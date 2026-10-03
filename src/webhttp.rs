@@ -22,11 +22,12 @@ pub const FALLBACK_MODELS: &[&str] = &[
 
 /// web/ 目录的静态资源（与 Python 版共用同一批文件，UI 不变）。
 pub mod web_assets {
-    pub const ADMIN_HTML: &str = include_str!("../../web/admin.html");
-    pub const ADMIN_JS: &str = include_str!("../../web/admin.js");
-    pub const LANDING_HTML: &str = include_str!("../../web/landing.html");
-    pub const LOGIN_HTML: &str = include_str!("../../web/login.html");
-    pub const QUEUE_HTML: &str = include_str!("../../web/queue.html");
+    // 前端随仓库分发（web/ 在仓库根），编译期内嵌进二进制
+    pub const ADMIN_HTML: &str = include_str!("../web/admin.html");
+    pub const ADMIN_JS: &str = include_str!("../web/admin.js");
+    pub const LANDING_HTML: &str = include_str!("../web/landing.html");
+    pub const LOGIN_HTML: &str = include_str!("../web/login.html");
+    pub const QUEUE_HTML: &str = include_str!("../web/queue.html");
 }
 
 pub fn cors_headers() -> Vec<(String, String)> {

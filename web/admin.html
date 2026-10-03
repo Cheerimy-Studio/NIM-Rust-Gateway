@@ -1,0 +1,1034 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NVIDIA Gateway</title>
+<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+<script defer src="https://cdn.bootcdn.net/ajax/libs/marked/4.3.0/marked.min.js"></script>
+<script defer src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
+<style>
+:root{--acc:#2f6fed;--bg:#f3f5f9;--line:#e7ecf3;--txt:#1c2536;--mut:#68758a;
+  --r-xs:6px;--r-sm:8px;--r-md:10px;--r:12px;--r-lg:14px;--r-pill:999px;--ring:0 0 0 3px rgba(47,111,237,.12)}
+*{scrollbar-width:thin}
+body{background:var(--bg);color:var(--txt);font-size:14px;-webkit-font-smoothing:antialiased;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+a{text-decoration:none}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:202px;background:linear-gradient(180deg,#0e1729 0%,#0b1120 100%);color:#8d9bb2;flex-shrink:0;
+  display:flex;flex-direction:column;position:sticky;top:0;height:100vh;border-right:1px solid rgba(255,255,255,.045)}
+.brand{display:flex;align-items:center;gap:11px;padding:15px 15px;border-bottom:1px solid rgba(255,255,255,.06)}
+.brand .mark{width:31px;height:31px;border-radius:var(--r-md);flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;font-weight:800;font-size:15px;
+  box-shadow:0 3px 10px rgba(37,99,235,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.brand .bt{color:#fff;font-weight:700;font-size:14px;letter-spacing:.2px;line-height:1.2}
+.brand .bt small{display:block;font-weight:500;font-size:10px;color:#5d6b83;letter-spacing:1.2px;text-transform:uppercase;margin-top:2px}
+.sidebar nav{flex:1;overflow-y:auto;padding:10px}
+.sidebar nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;color:#8d9bb2;font-size:13.5px;
+  border-radius:var(--r-sm);margin-bottom:2px;position:relative;transition:background .14s ease,color .14s ease}
+.sidebar nav a i{font-size:15px;width:18px;text-align:center}
+.sidebar nav a:hover{color:#e3eaf5;background:rgba(255,255,255,.05)}
+.sidebar nav a.active{color:#fff;background:linear-gradient(90deg,rgba(47,111,237,.3),rgba(47,111,237,.05))}
+.sidebar nav a.active::before{content:"";position:absolute;left:-10px;top:8px;bottom:8px;width:3px;border-radius:3px;background:var(--acc)}
+.sidebar .nav-label{font-size:10px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;
+  color:#57657d;padding:13px 12px 5px}
+.sidebar nav .nav-label:first-child{padding-top:6px}
+.sidebar .foot{padding:8px 10px;border-top:1px solid rgba(255,255,255,.06)}
+.sidebar .foot a{color:#8d9bb2;font-size:13px;border-radius:var(--r-sm);padding:7px 11px;display:inline-flex;align-items:center;gap:6px;transition:all .13s ease}
+.sidebar .foot a:hover{color:#f87171;background:rgba(248,113,113,.09)}
+.content{flex:1;padding:22px 26px;min-width:0}
+.pane{display:none}
+.pane.active{display:block;animation:fadein .18s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.pane-title{font-size:17px;font-weight:700;margin:0 0 15px;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+.pane-title::before{content:"";width:3px;height:15px;border-radius:2px;background:linear-gradient(180deg,#4d86f2,#2a5ce0);flex-shrink:0}
+.dash-sec{display:flex;align-items:center;gap:8px;margin:20px 0 10px;font-size:13px;font-weight:600;
+  color:#334155;letter-spacing:.3px;user-select:none}
+.dash-sec:first-of-type{margin-top:0}
+.dash-sec .bi{color:var(--acc);font-size:14px}
+.dash-sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,#dbe3ee,transparent);border-radius:1px}
+.sec-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+.sec-nav a{display:inline-flex;align-items:center;padding:5px 13px;border-radius:var(--r-pill);font-size:12.5px;
+  color:#5b6b84;background:#fff;border:1px solid var(--line);transition:all .13s ease}
+.sec-nav a:hover{color:var(--acc);border-color:#b9cdf3;background:#f6f9ff}
+.sec-nav a.danger{color:#dc2626}
+.sec-nav a.danger:hover{border-color:#f3b4b4;background:#fff5f5}
+.card{border:1px solid var(--line);border-radius:var(--r);background:#fff;transition:box-shadow .16s ease,border-color .16s ease,transform .16s ease;
+  box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.03)}
+.card:hover{border-color:#dbe2ec}
+.card:has(>.table-responsive){overflow:hidden}
+.card>.table-responsive>.table>:last-child>*>:first-child,.card>.table-responsive>.table>:last-child>*>:last-child{border-radius:0}
+.card-header{background:#fff;border-bottom:1px solid var(--line);font-weight:600;font-size:13px;letter-spacing:.2px;color:#2c3a52;
+  border-radius:var(--r) var(--r) 0 0!important;padding:.6rem .95rem}
+.table{font-size:13px;margin-bottom:0;--bs-table-border-color:#eef2f7}
+.table thead th{color:#8492a6;font-weight:600;font-size:11.5px;letter-spacing:.5px;background:#fafbfd;border-bottom:1px solid var(--line);white-space:nowrap}
+.table td,.table th{padding:.5rem .65rem}
+.table>:not(caption)>*>*:first-child{padding-left:.95rem}
+.table>:not(caption)>*>*:last-child{padding-right:.95rem}
+.table-hover tbody tr:hover{background:#f7f9fc}
+.table tbody tr{transition:background .12s ease}
+.stat{padding:.95rem 1.05rem;position:relative;overflow:hidden}
+.stat .stat-lbl .bi{font-size:14px;color:#98a3b8;flex-shrink:0}
+.stat .stat-lbl{margin-bottom:2px}
+.stat .lbl{font-size:12px;color:var(--mut);letter-spacing:.3px}
+.stat .num{font-size:1.45rem;font-weight:700;line-height:1.3;font-variant-numeric:tabular-nums;letter-spacing:-.2px}
+.stat .sub{font-size:11.5px;color:#98a3b8}
+.stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:0 2px 2px 0;background:transparent}
+.stat.accent::before{background:var(--acc)}
+.stat.green::before{background:#16a34a}
+.stat.red::before{background:#dc2626}
+.stat.amber::before{background:#d97706}
+.card.stat:hover{box-shadow:0 8px 22px rgba(16,24,40,.09);transform:translateY(-1px);border-color:#d5deea}
+.key-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.86em}
+.table .key-mono{white-space:nowrap}
+pre{background:#0d1526;color:#dbe5f5;padding:1rem 1.1rem;border-radius:10px;font-size:.82em;overflow-x:auto;border:0;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.055)}
+.err-cell{white-space:normal!important;max-width:280px}
+.ui-mask{position:fixed;inset:0;background:rgba(12,18,32,.42);backdrop-filter:blur(3px);z-index:3000;display:flex;align-items:center;justify-content:center}
+.ui-dialog{background:#fff;border-radius:14px;padding:18px 20px;width:340px;max-width:92vw;
+  box-shadow:0 24px 64px rgba(12,18,32,.3);animation:popin .16s ease}
+.ui-dialog.wide{width:660px;max-height:82vh;display:flex;flex-direction:column;padding:16px 18px}
+.ui-dialog .ui-body-flex{overflow-y:auto;min-height:0}
+.ui-title-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-shrink:0}
+.ui-title-row .t{font-weight:700;font-size:14px}
+.ui-close{border:0;background:transparent;color:#98a3b8;font-size:18px;line-height:1;padding:2px 6px;border-radius:6px;cursor:pointer}
+.ui-close:hover{background:#f1f5f9;color:#334155}
+
+.conv{display:flex;flex-direction:column;gap:9px;padding:2px 1px}
+.conv .cmsg{display:flex;gap:9px;align-items:flex-start;font-size:13px}
+.conv .crole{flex-shrink:0;min-width:56px;text-align:center;font-size:11px;font-weight:600;
+  padding:2.5px 8px;border-radius:var(--r-pill);margin-top:2px}
+.crole.r-system{background:rgba(108,117,125,.13);color:#6c757d}
+.crole.r-user{background:rgba(47,111,237,.13);color:#2f5bc7}
+.crole.r-assistant{background:rgba(25,135,84,.13);color:#198754}
+.conv .ctext{flex:1;white-space:pre-wrap;word-break:break-word;background:#f6f8fb;
+  border:1px solid #eef2f7;border-radius:var(--r);padding:8px 12px;line-height:1.6}
+.conv .cthink{color:#9d7bb8}
+.conv .cmeta{font-size:11.5px;color:#98a3b8;padding-left:65px}
+@keyframes popin{from{opacity:0;transform:scale(.96) translateY(4px)}to{opacity:1;transform:none}}
+.ui-title{font-weight:700;font-size:14px;margin-bottom:8px}
+.ui-msg{font-size:13px;color:var(--txt);white-space:pre-line}
+.ui-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+.grp-row td{background:#eef3fa!important;font-weight:600;font-size:12.5px;color:#334155}
+.dot{width:15px;height:15px;border-radius:4px;display:inline-block;margin-right:3px;box-shadow:inset 0 0 0 1px rgba(15,23,42,.05)}
+.dot.ok{background:#16a34a}.dot.fail{background:#dc2626}.dot.empty{background:#e2e8f0}
+.chev{transition:transform .18s ease;color:#94a3b8;cursor:pointer;font-size:12px}
+tr.open .chev{transform:rotate(90deg);color:var(--acc)}
+tr.krow{cursor:pointer}
+tr.krow.open>td{border-bottom:0}
+.detail-row>td{background:#fafbfd;padding:0!important;border-top:0}
+.kpanel{padding:13px 16px;border-top:1px dashed var(--line);background:#fafbfd}
+
+
+.btn{border-radius:var(--r-sm);font-size:13px;white-space:nowrap;transition:all .15s ease;--bs-btn-font-size:13px}
+.btn-sm{border-radius:var(--r-sm);padding:.3rem .68rem;--bs-btn-padding-y:.3rem}
+.btn-primary{background:linear-gradient(135deg,#3576f0,#2a5ce0);border-color:transparent;box-shadow:0 1px 3px rgba(37,99,235,.28)}
+.btn-primary:hover{background:linear-gradient(135deg,#2a5ce0,#1f4fd0);border-color:transparent;
+  box-shadow:0 3px 12px rgba(37,99,235,.35);transform:translateY(-1px)}
+.btn-outline-secondary{--bs-btn-color:#5b6b84;--bs-btn-border-color:#d3dbe7;--bs-btn-hover-bg:#f2f5fa;
+  --bs-btn-hover-border-color:#c4cfdf;--bs-btn-hover-color:#3a4a63;--bs-btn-active-bg:#eaeff7}
+.btn-outline-primary{--bs-btn-color:var(--acc);--bs-btn-border-color:#b9cdf3;--bs-btn-hover-bg:var(--acc);--bs-btn-hover-border-color:var(--acc)}
+.btn-outline-danger:hover{color:#fff}
+.btn:focus-visible{box-shadow:0 0 0 .2rem rgba(47,111,237,.18)}
+.form-control,.form-select{border-radius:var(--r-sm);border-color:#dde4ee}
+.form-control-sm,.form-select-sm{font-size:13px}
+.form-control:hover,.form-select:hover{border-color:#c9d4e4}
+.form-control:focus,.form-select:focus{border-color:var(--acc);box-shadow:0 0 0 .18rem rgba(47,111,237,.13)}
+.form-check-input:checked{background-color:var(--acc);border-color:var(--acc)}
+.form-check-input:focus{box-shadow:0 0 0 .18rem rgba(47,111,237,.15);border-color:#b9c8e4}
+.form-label{font-size:12px;color:var(--mut);margin-bottom:3px}
+.badge{font-weight:600;letter-spacing:.2px;border-radius:var(--r-pill);font-size:11px;padding:.34em .72em}
+.card-header.py-1{border-radius:var(--r) var(--r) 0 0!important}
+summary{user-select:none}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#c6d0de;border-radius:6px}
+::-webkit-scrollbar-thumb:hover{background:#9fadc2}
+.toast{border-radius:var(--r-md);box-shadow:0 8px 28px rgba(16,24,40,.18)}
+
+
+.tchat{min-height:240px;max-height:46vh;overflow:auto;padding:14px 16px}
+.tmsg{max-width:82%;white-space:pre-wrap;word-break:break-word;padding:.52rem .8rem;
+  border-radius:var(--r-lg);font-size:13px;line-height:1.55;box-shadow:0 1px 2px rgba(15,23,42,.06)}
+.tmsg.me{background:linear-gradient(135deg,#3576f0,#2a5ce0);color:#fff;border-bottom-right-radius:4px}
+.tmsg.ai{background:#f4f7fb;color:var(--txt);border:1px solid #e8eef7;border-bottom-left-radius:4px}
+.tmsg.pending{opacity:.6}
+
+.tmsg .md>:first-child{margin-top:0}
+.tmsg .md>:last-child{margin-bottom:0}
+.tmsg .md p{margin:.35em 0}
+.tmsg .md h1,.tmsg .md h2,.tmsg .md h3,.tmsg .md h4{font-size:1.02em;font-weight:700;margin:.6em 0 .3em}
+.tmsg .md ul,.tmsg .md ol{padding-left:1.35em;margin:.35em 0}
+.tmsg .md li{margin:.15em 0}
+.tmsg .md pre{background:#0d1526;color:#dbe5f5;padding:10px 12px;border-radius:var(--r-sm);
+  font-size:12px;line-height:1.5;overflow-x:auto;margin:.5em 0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
+.tmsg .md pre code{background:none;padding:0;color:inherit;font-size:inherit}
+.tmsg .md code{background:rgba(13,21,38,.08);padding:.12em .38em;border-radius:var(--r-xs);font-size:.88em}
+.tmsg .md blockquote{border-left:3px solid var(--acc);margin:.45em 0;padding:.05em .8em;color:#5b6b84}
+.tmsg .md table{border-collapse:collapse;margin:.5em 0;font-size:.92em}
+.tmsg .md th,.tmsg .md td{border:1px solid #d8e0ec;padding:.28em .6em}
+.tmsg .md th{background:rgba(47,111,237,.07)}
+.tmsg .md a{color:#2f5bc7;text-decoration:underline}
+.tmsg .md hr{border:0;border-top:1px solid #dde5f0;margin:.6em 0}
+
+.tmsg .think{border:1px dashed #ccd8e8;border-radius:var(--r-sm);margin-bottom:.55em;
+  padding:8px 11px;background:rgba(47,111,237,.045)}
+.tmsg .think-hd{font-size:11px;font-weight:600;color:#98a3b8;letter-spacing:.6px;margin-bottom:4px}
+.tmsg .think-body{font-size:12.5px;color:#64748b;line-height:1.55}
+.tmsg .think-body>:first-child{margin-top:0}
+.tmsg .think-body>:last-child{margin-bottom:0}
+.tmsg .think-body p{margin:.3em 0}
+.tmsg .think-body pre{background:#0d1526;color:#cfe0f5;padding:8px 10px;border-radius:var(--r-xs);font-size:11.5px;overflow-x:auto;margin:.4em 0}
+.tmsg .think-body pre code{background:none;padding:0;color:inherit}
+.tmsg .think-body code{background:rgba(13,21,38,.07);padding:.1em .3em;border-radius:var(--r-xs);font-size:.9em}
+.traw{max-height:220px;overflow:auto;margin:6px 0}
+.kpanel .mini{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.kpanel .chip{background:#fff;border:1px solid var(--line);border-radius:var(--r-sm);padding:6px 11px;font-size:12px;min-width:96px;
+  box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.kpanel .chip b{display:block;font-size:13.5px;font-weight:700;font-variant-numeric:tabular-nums}
+.kpanel .chip span{color:var(--mut)}
+.score-hi{color:#16a34a;font-weight:700}
+.score-mid{color:#d97706;font-weight:700}
+.score-lo{color:#dc2626;font-weight:700}
+#poolmap .pm-group{margin-bottom:10px}
+#poolmap .pm-group:last-child{margin-bottom:0}
+#poolmap .pm-head{display:flex;align-items:center;gap:8px;font-size:12px;color:#5b6b84;margin-bottom:5px}
+#poolmap .pm-head b{color:#334155;font-weight:600}
+#poolmap .pm-head .pm-dot{width:8px;height:8px;border-radius:50%}
+#poolmap .pm-cells{display:flex;flex-wrap:wrap;gap:3px}
+#poolmap .cell{width:13px;height:13px;border-radius:3px;cursor:help;transition:transform .1s ease;display:inline-block}
+#poolmap .cell:hover{transform:scale(1.35)}
+#poolmap .cell.s0{background:#16a34a}
+#poolmap .cell.s1{background:#d97706}
+#poolmap .cell.s2{background:#dc2626}
+details.upgrp{border:1px solid var(--line);border-radius:var(--r-md);padding:9px 13px;background:#f8fafd;transition:background .14s ease}
+details.upgrp summary{cursor:pointer;font-size:13px;font-weight:600;color:#334155;user-select:none}
+details.upgrp[open]{background:#fff}
+.pover-editor,.tdef-editor{background:#f8fafd;border:1px solid #e4eaf3;border-radius:var(--r-md);padding:12px}
+.pover-list{display:flex;flex-wrap:wrap;gap:6px;min-height:32px}
+.pover-item{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #e4eaf3;border-radius:var(--r-sm);
+  padding:4px 10px;font-size:12px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.pover-item .pover-scope{color:#6b7280;font-weight:500}
+.pover-item .pover-kv{color:#111827}
+.pover-item .pover-del{color:#dc2626;cursor:pointer;padding:0 2px;font-weight:700}
+.pover-item .pover-del:hover{color:#991b1b}
+.badge.bg-primary-subtle{background-color:rgba(47,111,237,.13);color:#2f5bc7}
+.badge.bg-info-subtle{background-color:rgba(13,202,240,.13);color:#0e7a8a}
+.badge.bg-warning-subtle{background-color:rgba(255,193,7,.16);color:#a07400}
+.badge.bg-success-subtle{background-color:rgba(25,135,84,.13);color:#198754}
+.badge.bg-danger-subtle{background-color:rgba(220,53,69,.13);color:#d33b4c}
+.badge.bg-secondary-subtle{background-color:rgba(108,117,125,.13);color:#6c757d}
+.badge.bg-purple-subtle{background-color:rgba(111,66,193,.13);color:#6f42c1}
+.nav-pills .nav-link{border-radius:var(--r-sm)}
+@media(max-width:860px){
+  .layout{flex-direction:column}
+  .sidebar{width:100%;height:auto;position:static;flex-direction:column}
+  .brand{justify-content:center}
+  .sidebar .nav-label{display:none}
+  .sidebar nav{display:flex;flex-wrap:wrap;padding:6px}
+  .sidebar nav a{margin-bottom:0}
+  .sidebar nav a.active{border-left:0}
+  .sidebar nav a.active::before{display:none}
+  .content{padding:14px}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar">
+  <div class="brand"><span class="mark">N</span><span class="bt">NVIDIA Gateway<small>Console</small></span></div>
+  <nav>
+    <div class="nav-label">监控</div>
+    <a href="javascript:void(0)" data-pane="dash" class="active"><i class="bi bi-speedometer2"></i>仪表盘</a>
+    <a href="javascript:void(0)" data-pane="logs"><i class="bi bi-list-ul"></i>日志</a>
+    <a href="javascript:void(0)" data-pane="queue"><i class="bi bi-hourglass-split"></i>排队</a>
+    <div class="nav-label">资源</div>
+    <a href="javascript:void(0)" data-pane="keys"><i class="bi bi-key"></i>账号池</a>
+    <a href="javascript:void(0)" data-pane="upstreams"><i class="bi bi-hdd-network"></i>上游</a>
+    <a href="javascript:void(0)" data-pane="import"><i class="bi bi-upload"></i>导入</a>
+    <a href="javascript:void(0)" data-pane="tokens"><i class="bi bi-shield-lock"></i>访问令牌</a>
+    <a href="javascript:void(0)" data-pane="intercept"><i class="bi bi-slash-circle"></i>拦截</a>
+    <div class="nav-label">数据</div>
+    <a href="javascript:void(0)" data-pane="test"><i class="bi bi-chat-dots"></i>模型测试</a>
+    <a href="javascript:void(0)" data-pane="training"><i class="bi bi-collection"></i>训练资料</a>
+    <a href="javascript:void(0)" data-pane="sessions"><i class="bi bi-journal-text"></i>会话日志</a>
+    <div class="nav-label">系统</div>
+    <a href="javascript:void(0)" data-pane="settings"><i class="bi bi-gear"></i>设置</a>
+    <a href="javascript:void(0)" data-pane="docs"><i class="bi bi-book"></i>接入</a>
+  </nav>
+  <div class="foot"><a href="javascript:void(0)" id="btn-logout"><i class="bi bi-box-arrow-left me-1"></i>退出登录</a></div>
+</aside>
+
+<main class="content">
+
+
+<section class="pane active" id="pane-dash">
+  <h2 class="pane-title">仪表盘</h2>
+  <div class="dash-sec"><i class="bi bi-speedometer2"></i>实时概览</div>
+  <div class="row g-3" id="dash-cards"></div>
+  <div class="dash-sec"><i class="bi bi-activity"></i>今日监控</div>
+  <div class="row g-3">
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-list-ol me-2 text-muted"></i>模型调用 TOP（今日）</div>
+        <div class="table-responsive"><table class="table table-sm">
+          <thead><tr><th>模型</th><th class="text-end">次数</th></tr></thead>
+          <tbody id="dash-models"></tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header">最近失败</div>
+        <div class="table-responsive"><table class="table table-sm">
+          <thead><tr><th>时间</th><th>模型</th><th>状态</th><th class="err-cell">错误</th></tr></thead>
+          <tbody id="dash-errors"></tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-exclamation-triangle me-2 text-muted"></i>风险账号</div>
+        <div class="table-responsive"><table class="table table-sm">
+          <thead><tr><th>邮箱</th><th class="text-end">连败</th><th class="text-end">失败率</th><th class="err-cell">最近错误</th></tr></thead>
+          <tbody id="dash-risky"></tbody>
+        </table></div>
+      </div>
+    </div>
+  </div>
+  <div class="dash-sec"><i class="bi bi-grid-3x3-gap"></i>号池健康</div>
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>号池状态</span>
+      <span class="small text-muted" id="poolmap-sum"></span>
+    </div>
+    <div class="card-body" id="poolmap"></div>
+  </div>
+</section>
+
+
+<section class="pane" id="pane-keys">
+  <h2 class="pane-title">账号池</h2>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <input id="keys-q" class="form-control form-control-sm" style="max-width:210px" placeholder="搜索邮箱 / 密钥">
+    <select id="keys-filter" class="form-select form-select-sm" style="max-width:110px">
+      <option value="all">全部</option>
+      <option value="active">可用</option>
+      <option value="banned">封禁</option>
+      <option value="disabled">不可用</option>
+    </select>
+    <button id="keys-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
+    <a id="keys-export" class="btn btn-sm btn-outline-secondary" href="/api/keys/export">导出 CSV</a>
+  </div>
+  <div id="batch-bar" class="d-none d-flex flex-wrap gap-2 align-items-center mb-2 p-2 rounded" style="background:#eef3fa;border:1px solid var(--line)">
+    <span class="small fw-semibold">已选 <span id="batch-count">0</span> 个</span>
+    <button id="batch-unban" class="btn btn-sm btn-outline-warning">解封</button>
+    <button id="batch-enable" class="btn btn-sm btn-outline-success">启用</button>
+    <button id="batch-disable" class="btn btn-sm btn-outline-secondary">停用</button>
+    <button id="batch-test" class="btn btn-sm btn-outline-primary">测试</button>
+    <button id="batch-reset" class="btn btn-sm btn-outline-secondary">重置统计</button>
+    <button id="batch-delete" class="btn btn-sm btn-outline-danger">删除</button>
+    <span class="small text-muted ms-2">转移到</span>
+    <select id="batch-up" class="form-select form-select-sm" style="max-width:150px"></select>
+    <button id="batch-move" class="btn btn-sm btn-outline-primary">应用</button>
+    <button id="batch-clear" class="btn btn-sm btn-link ms-auto">取消选择</button>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr><th style="width:34px"><input type="checkbox" class="form-check-input" id="keys-all"></th><th></th><th>邮箱</th><th>API Key</th><th>上游</th><th>状态</th>
+          <th class="text-end">今日</th><th class="text-end">请求</th><th class="text-end">成功</th>
+          <th class="text-end">失败</th><th class="text-end">连败</th><th class="text-end">在途</th><th class="text-end">RPM</th>
+          <th class="text-end">Tokens</th><th>最近使用</th><th>操作</th></tr>
+      </thead>
+      <tbody id="keys-rows"></tbody>
+    </table>
+    </div>
+  </div>
+  <nav class="mt-2"><ul class="pagination pagination-sm mb-0" id="keys-pages"></ul></nav>
+</section>
+
+
+<section class="pane" id="pane-upstreams">
+  <h2 class="pane-title">上游</h2>
+  <div class="card mb-3">
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr><th>名称</th><th>Base URL</th><th>可行性</th><th class="text-end">权重</th><th class="text-end">RPM 上限</th>
+          <th class="text-end">日上限</th><th>模型</th><th>策略</th><th class="text-end">账号</th><th class="text-end">今日</th>
+          <th class="text-end">本分钟</th><th>状态</th><th>操作</th></tr>
+      </thead>
+      <tbody id="up-rows"></tbody>
+    </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span id="up-form-title">添加上游</span>
+        <select id="up-preset" class="form-select form-select-sm" style="max-width:200px">
+          <option value="">— 选择预设 —</option>
+        </select>
+      </div>
+    <div class="card-body">
+      <input type="hidden" id="up-id">
+      <div class="row g-3">
+        <div class="col-md-3"><label class="form-label" for="up-name">名称</label>
+          <input class="form-control form-control-sm" id="up-name" placeholder="NVIDIA NIM"></div>
+        <div class="col-md-6"><label class="form-label" for="up-base">Base URL</label>
+          <input class="form-control form-control-sm font-monospace" id="up-base" placeholder="https://integrate.api.nvidia.com/v1"></div>
+        <div class="col-md-3"><label class="form-label" for="up-weight">权重（1-100）</label>
+          <input type="number" min="1" max="100" class="form-control form-control-sm" id="up-weight" value="10"></div>
+      </div>
+      <details class="upgrp mt-3" open>
+        <summary>模型</summary>
+        <div class="row g-3 pt-1">
+          <div class="col-12"><label class="form-label" for="up-models">渠道可用模型（空=不限）</label>
+            <textarea class="form-control form-control-sm font-monospace" id="up-models" rows="2" placeholder="deepseek-ai/deepseek-r1&#10;meta/llama-3.3-70b-instruct"></textarea></div>
+          <div class="col-12"><label class="form-label" for="up-map">模型映射（每行 客户端模型=上游模型）</label>
+            <textarea class="form-control form-control-sm font-monospace" id="up-map" rows="2" placeholder="gpt-4o=meta/llama-3.3-70b-instruct"></textarea></div>
+        </div>
+      </details>
+      <details class="upgrp mt-2" open>
+        <summary>调度与限额（0=继承全局，-1=不限）</summary>
+        <div class="row g-3 pt-1">
+          <div class="col-md-3"><label class="form-label" for="up-rpm-key">单账号 RPM</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-rpm-key" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-tpm-key">单账号 TPM</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-tpm-key" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-accon">账户并发数</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-accon" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-chcon">渠道总并发数</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-chcon" value="0"></div>
+        </div>
+      </details>
+      <details class="upgrp mt-2">
+        <summary>限额细节（0=继承全局，-1=不限）</summary>
+        <div class="row g-3 pt-1">
+          <div class="col-md-3"><label class="form-label" for="up-coolcd">账号请求间隔（毫秒）</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-coolcd" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-hrl">触发日 token 上限后每小时请求上限</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-hrl" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-dcap-key">单账号每日请求上限</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-dcap-key" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-dtok-key">单账号每日 tokens 上限</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-dtok-key" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-rpm">池级 RPM 上限</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-rpm" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-daily">池级每日请求上限</label>
+            <input type="number" min="-1" class="form-control form-control-sm" id="up-daily" value="0"></div>
+        </div>
+      </details>
+      <details class="upgrp mt-2">
+        <summary>重试 / 退避 / 超时 / 封禁（0=继承全局）</summary>
+        <div class="row g-3 pt-1">
+          <div class="col-md-3"><label class="form-label" for="up-retries">失败换号重试次数</label>
+            <input type="number" min="0" max="20" class="form-control form-control-sm" id="up-retries" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-bb-base">退避基数（毫秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-bb-base" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-bb-max">退避上限（毫秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-bb-max" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-minwait">失败重试最小等待（毫秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-minwait" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-timeout">请求超时（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-timeout" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-ctimeout">连接超时（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-ctimeout" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-bstep">失败封禁阶梯步长（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-bstep" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-bmax">封禁上限（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-bmax" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-hfban">401/403 单次封禁（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-hfban" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-hfcnt">401/403 累计次数 → 封 1 天</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-hfcnt" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-c429k">429 冷却（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-c429k" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-c5xxk">5xx 冷却（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-c5xxk" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-ctok">超时冷却（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-ctok" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-ccnk">连接失败冷却（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-ccnk" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-bthk">熔断阈值</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-bthk" value="0"></div>
+          <div class="col-md-3"><label class="form-label" for="up-bseck">熔断持续（秒）</label>
+            <input type="number" min="0" class="form-control form-control-sm" id="up-bseck" value="0"></div>
+        </div>
+      </details>
+      <details class="upgrp mt-2">
+        <summary>隐私 / 参数覆写 / 思考强度</summary>
+        <div class="row g-3 pt-1">
+          <div class="col-md-6"><label class="form-label" for="up-herr">上游报错</label>
+            <select id="up-herr" class="form-select form-select-sm">
+              <option value="0">继承全局</option><option value="1">只透传状态码</option><option value="2">透传详情</option>
+            </select></div>
+          <div class="col-md-6"><label class="form-label" for="up-hname">原名访问（映射目标名）</label>
+            <select id="up-hname" class="form-select form-select-sm">
+              <option value="0">继承全局</option><option value="1">禁止访问</option><option value="2">允许访问</option>
+            </select></div>
+          <div class="col-12">
+            <label class="form-label">渠道固定参数（按模型分设）</label>
+            <div class="pover-editor">
+              <div class="d-flex gap-2 mb-2">
+                <select id="pover-model" class="form-select form-select-sm" style="max-width:220px">
+                  <option value="">选择模型...</option>
+                </select>
+                <input type="text" id="pover-key" class="form-control form-control-sm" placeholder="参数名" style="max-width:120px">
+                <input type="text" id="pover-val" class="form-control form-control-sm" placeholder="参数值" style="max-width:120px">
+                <button type="button" id="pover-add" class="btn btn-sm btn-outline-primary">添加</button>
+              </div>
+              <div id="pover-list" class="pover-list small"></div>
+            </div>
+          </div>
+          <div class="col-12">
+            <label class="form-label">思考默认强度（上游报错后的降级强度）</label>
+            <div class="tdef-editor">
+              <div class="d-flex gap-2 mb-2">
+                <select id="tdef-model" class="form-select form-select-sm" style="max-width:220px">
+                  <option value="">选择模型...</option>
+                </select>
+                <input type="text" id="tdef-effort" class="form-control form-control-sm" placeholder="强度：minimal/low/medium/high/max" style="max-width:190px">
+                <button type="button" id="tdef-add" class="btn btn-sm btn-outline-primary">添加</button>
+              </div>
+              <div id="tdef-list" class="pover-list small"></div>
+            </div>
+          </div>
+        </div>
+      </details>
+      <div class="mt-3 d-flex align-items-center gap-3">
+        <button id="up-save" class="btn btn-primary btn-sm">保存</button>
+        <button id="up-cancel" class="btn btn-outline-secondary btn-sm d-none">取消编辑</button>
+        <div class="form-check form-switch ms-2">
+          <input class="form-check-input" type="checkbox" id="up-enabled" checked>
+          <label class="form-check-label small" for="up-enabled">启用该渠道</label>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="pane" id="pane-import">
+  <h2 class="pane-title">导入</h2>
+  <div class="card"><div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-4">
+        <label class="form-label" for="import-up">导入到上游</label>
+        <select id="import-up" class="form-select form-select-sm"></select>
+      </div>
+      <div class="col-12">
+        <textarea id="import-text" class="form-control font-monospace" rows="9" placeholder="每行一个账号：email,password,nvapi-xxx"></textarea>
+      </div>
+      <div class="col-12">
+        <input type="file" id="import-file" class="form-control form-control-sm" accept=".csv,.tsv,.txt">
+      </div>
+    </div>
+    <div class="mt-3 d-flex align-items-center gap-3">
+      <button id="import-btn" class="btn btn-primary btn-sm">导入</button>
+      <span class="small text-muted" id="import-result"></span>
+    </div>
+  </div></div>
+</section>
+
+
+<section class="pane" id="pane-tokens">
+  <h2 class="pane-title">访问令牌</h2>
+  <div class="card mb-3">
+    <div class="card-header">添加令牌</div>
+    <div class="card-body">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-4"><label class="form-label" for="tok-name">令牌（留空自动生成）</label>
+          <input class="form-control form-control-sm font-monospace" id="tok-name" placeholder="sk-gw-…"></div>
+        <div class="col-md-5"><label class="form-label" for="tok-models">可用模型（逗号分隔，空=全部模型）</label>
+          <input class="form-control form-control-sm" id="tok-models" placeholder="kimi-k3, glm-5.3"></div>
+        <div class="col-md-3"><button id="tok-add" class="btn btn-sm btn-primary w-100">添加</button></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>令牌</th><th>可用模型</th><th style="width:110px">最近使用</th><th style="width:130px">来源 IP</th><th class="text-end">操作</th></tr></thead>
+      <tbody id="tok-rows"></tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+
+<section class="pane" id="pane-intercept">
+  <h2 class="pane-title">拦截</h2>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="int-enabled">
+      <label class="form-check-label small" for="int-enabled">启用拦截</label>
+    </div>
+    <button id="int-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
+    <button id="int-clear" class="btn btn-sm btn-outline-danger">清空记录</button>
+    <div class="ms-auto small text-muted" id="int-meta"></div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header">添加规则</div>
+    <div class="card-body">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-2"><label class="form-label" for="int-mode">匹配模式</label>
+          <select id="int-mode" class="form-select form-select-sm">
+            <option value="contains">包含</option>
+            <option value="equals">等于</option>
+            <option value="prefix">前缀</option>
+            <option value="suffix">后缀</option>
+            <option value="regex">正则</option>
+          </select></div>
+        <div class="col-md-4"><label class="form-label" for="int-pattern">匹配内容(最后一条用户消息)</label>
+          <input id="int-pattern" class="form-control form-control-sm" placeholder="Reply and OK"></div>
+        <div class="col-md-6"><label class="form-label" for="int-reply">回复内容</label>
+          <div class="d-flex gap-2">
+            <textarea id="int-reply" class="form-control form-control-sm" rows="2" placeholder="命中后返回的内容"></textarea>
+            <button id="int-add" class="btn btn-sm btn-primary text-nowrap">添加</button>
+          </div></div>
+        <div class="col-md-5"><label class="form-label" for="int-models">限定模型</label>
+          <input id="int-models" class="form-control form-control-sm" placeholder="留空=全部，多个用逗号分隔"></div>
+        <div class="col-md-5"><label class="form-label" for="int-ups">限定渠道</label>
+          <select id="int-ups" class="form-select form-select-sm" multiple size="3"></select></div>
+        <div class="col-md-7"><label class="form-label" for="int-sample">样本消息</label>
+          <div class="d-flex gap-2">
+            <input id="int-sample" class="form-control form-control-sm" placeholder="把真实消息粘进来">
+            <button id="int-test" class="btn btn-sm btn-outline-secondary text-nowrap">测试</button>
+          </div></div>
+      </div>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header">规则</div>
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th style="width:80px">模式</th><th class="text-end" style="width:64px">命中</th><th>作用范围</th><th>匹配</th><th>回复</th><th class="text-end" style="width:76px">操作</th></tr></thead>
+      <tbody id="int-rules"></tbody>
+    </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">拦截记录</div>
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th style="width:150px">时间</th><th style="width:120px">IP</th><th style="width:130px">令牌</th>
+        <th>模型</th><th>规则</th><th class="err-cell">内容</th></tr></thead>
+      <tbody id="int-logs"></tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<section class="pane" id="pane-logs">
+  <h2 class="pane-title">日志</h2>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <select id="logs-filter" class="form-select form-select-sm" style="max-width:110px">
+      <option value="all">全部</option>
+      <option value="ok">成功</option>
+      <option value="err">失败</option>
+    </select>
+    <div class="form-check ms-1">
+      <input class="form-check-input" type="checkbox" id="logs-auto" checked>
+      <label class="form-check-label small" for="logs-auto">自动刷新</label>
+    </div>
+    <button id="logs-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
+    <button id="logs-clear" class="btn btn-sm btn-outline-danger">清空</button>
+    <div class="ms-auto small text-muted" id="logs-meta"></div>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+    <table class="table table-hover align-middle logs-table">
+      <thead>
+        <tr><th style="width:130px">时间 / IP</th><th style="width:220px">模型 / 映射</th><th style="width:120px">端点</th>
+          <th style="width:130px">账号</th><th style="width:110px">令牌</th><th style="width:80px">状态</th>
+          <th class="text-end" style="width:80px">Token</th><th class="text-end" style="width:80px">延迟</th>
+          <th class="err-cell">错误信息</th></tr>
+      </thead>
+      <tbody id="logs-rows"></tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+
+<section class="pane" id="pane-queue">
+  <h2 class="pane-title">排队</h2>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <div class="form-check ms-1">
+      <input class="form-check-input" type="checkbox" id="queue-auto" checked>
+      <label class="form-check-label small" for="queue-auto">自动刷新</label>
+    </div>
+    <button id="queue-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
+    <button id="queue-clear" class="btn btn-sm btn-outline-danger">清空</button>
+    <div class="ms-auto small text-muted" id="queue-meta"></div>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr><th>#</th><th>到达时间</th><th class="text-end">已等待</th><th>IP</th><th>令牌</th><th>接口</th><th>模型</th><th>阻塞原因</th></tr>
+      </thead>
+      <tbody id="queue-rows"></tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+
+<section class="pane" id="pane-test">
+  <h2 class="pane-title">模型测试</h2>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <select id="test-model" class="form-select form-select-sm" style="min-width:240px"></select>
+    <input id="test-system" class="form-control form-control-sm" placeholder="系统提示（可选）" style="max-width:220px">
+    <div class="form-check ms-1">
+      <input class="form-check-input" type="checkbox" id="test-stream" checked>
+      <label class="form-check-label small" for="test-stream">流式</label>
+    </div>
+    <button id="test-reload" class="btn btn-sm btn-outline-secondary">刷新模型</button>
+    <button id="test-clear" class="btn btn-sm btn-outline-secondary">清空对话</button>
+    <span class="small text-muted ms-auto" id="test-hint"></span>
+  </div>
+  <div class="card mb-2">
+    <div class="card-body tchat" id="test-chat">
+      <span class="text-muted small">选择模型后输入消息开始测试。</span>
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    <textarea id="test-input" class="form-control form-control-sm" rows="2"
+      placeholder="输入消息后按 Enter 发送（Shift+Enter 换行）"></textarea>
+    <button id="test-send" class="btn btn-primary px-4">发送</button>
+  </div>
+  <div class="card mt-3">
+    <div class="card-header py-1 small d-flex justify-content-between">
+      <span>链路诊断（最近一次）</span>
+      <span class="text-muted" id="test-diag-sum"></span>
+    </div>
+    <div class="card-body py-2">
+      <div id="test-diag" class="small text-muted">尚未发起请求</div>
+      <details class="mt-2 d-none" id="test-raw-wrap">
+        <summary class="small text-primary" style="cursor:pointer">原始事件流</summary>
+        <pre id="test-raw" class="small traw"></pre>
+      </details>
+    </div>
+  </div>
+</section>
+
+
+
+<section class="pane" id="pane-training">
+  <h2 class="pane-title">训练资料</h2>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <button id="training-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
+    <a id="training-export" class="btn btn-sm btn-outline-primary" href="/api/training/export">导出 JSONL</a>
+    <button id="training-clear" class="btn btn-sm btn-outline-danger">清空</button>
+    <div class="ms-auto small text-muted" id="training-meta"></div>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr><th style="width:150px">时间</th><th>模型</th><th style="width:70px">端点</th>
+          <th class="text-end" style="width:60px">轮数</th><th>响应预览</th><th style="width:56px">操作</th></tr>
+      </thead>
+      <tbody id="training-rows"></tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+
+<section class="pane" id="pane-sessions">
+  <h2 class="pane-title">会话日志</h2>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <button id="sessions-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
+    <button id="sessions-clear" class="btn btn-sm btn-outline-danger">清空</button>
+    <div class="ms-auto small text-muted" id="sessions-meta"></div>
+  </div>
+  <div id="sessions-list"></div>
+</section>
+
+
+
+<section class="pane" id="pane-settings">
+  <h2 class="pane-title">设置</h2>
+  <div class="sec-nav">
+    <a href="javascript:void(0)" data-sec="sec-sched">调度</a>
+    <a href="javascript:void(0)" data-sec="sec-retry">重试</a>
+    <a href="javascript:void(0)" data-sec="sec-ban">封禁</a>
+    <a href="javascript:void(0)" data-sec="sec-breaker">熔断</a>
+    <a href="javascript:void(0)" data-sec="sec-model">模型</a>
+    <a href="javascript:void(0)" data-sec="sec-privacy">隐私</a>
+    <a href="javascript:void(0)" data-sec="sec-misc">排队日志</a>
+    <a href="javascript:void(0)" data-sec="sec-sync">同步</a>
+    <a href="javascript:void(0)" data-sec="sec-passwd">密码</a>
+    <a href="javascript:void(0)" data-sec="sec-danger" class="text-danger">危险</a>
+  </div>
+  <div class="row g-3">
+    <div class="col-lg-7">
+      <div class="card mb-3" id="sec-sched">
+        <div class="card-header"><i class="bi bi-sliders me-2 text-muted"></i>调度与限额</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3"><label class="form-label" for="set-rate">单账号 RPM</label>
+              <input type="number" min="-1" class="form-control form-control-sm" id="set-rate"></div>
+            <div class="col-md-3"><label class="form-label" for="set-tpm">单账号 TPM</label>
+              <input type="number" min="-1" class="form-control form-control-sm" id="set-tpm"></div>
+            <div class="col-md-3"><label class="form-label" for="set-coolcd">账号请求间隔（毫秒）</label>
+              <input type="number" min="-1" class="form-control form-control-sm" id="set-coolcd"></div>
+            <div class="col-md-3"><label class="form-label" for="set-hrl">触发日 token 上限后每小时请求上限</label>
+              <input type="number" min="-1" class="form-control form-control-sm" id="set-hrl"></div>
+            <div class="col-md-3"><label class="form-label" for="set-accon">账户并发数</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-accon"></div>
+            <div class="col-md-3"><label class="form-label" for="set-chcon">渠道总并发数</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-chcon"></div>
+            <div class="col-md-3"><label class="form-label" for="set-prpm">池级 RPM 上限</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-prpm"></div>
+            <div class="col-md-3"><label class="form-label" for="set-pdcap">池级每日请求上限</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-pdcap"></div>
+            <div class="col-md-3"><label class="form-label" for="set-dcap">单账号每日请求上限</label>
+              <input type="number" min="-1" class="form-control form-control-sm" id="set-dcap"></div>
+            <div class="col-md-3"><label class="form-label" for="set-dtok">单账号每日 token 上限</label>
+              <input type="number" min="-1" class="form-control form-control-sm" id="set-dtok"></div>
+            <div class="col-md-3"><label class="form-label" for="set-warmup">新账号预热时长（秒）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-warmup"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-retry">
+        <div class="card-header"><i class="bi bi-arrow-repeat me-2 text-muted"></i>重试 / 退避 / 超时</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3"><label class="form-label" for="set-retries">失败换号重试次数</label>
+              <input type="number" min="0" max="20" class="form-control form-control-sm" id="set-retries"></div>
+            <div class="col-md-3"><label class="form-label" for="set-bb-base">退避基数（毫秒）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-bb-base"></div>
+            <div class="col-md-3"><label class="form-label" for="set-bb-max">退避上限（毫秒）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-bb-max"></div>
+            <div class="col-md-3"><label class="form-label" for="set-minwait">失败重试最小等待（毫秒，0=不限）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-minwait"></div>
+            <div class="col-md-3"><label class="form-label" for="set-timeout">请求超时（秒）</label>
+              <input type="number" min="10" class="form-control form-control-sm" id="set-timeout"></div>
+            <div class="col-md-3"><label class="form-label" for="set-ctimeout">连接超时（秒）</label>
+              <input type="number" min="2" class="form-control form-control-sm" id="set-ctimeout"></div>
+            <div class="col-md-3 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-verify">
+                <label class="form-check-label small" for="set-verify">校验上游 TLS 证书</label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-ban">
+        <div class="card-header"><i class="bi bi-shield-check me-2 text-muted"></i>封禁与账号保护</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3"><label class="form-label" for="set-ban-step">失败封禁阶梯步长（秒）</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="set-ban-step"></div>
+            <div class="col-md-3"><label class="form-label" for="set-ban-max">封禁上限（秒）</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="set-ban-max"></div>
+            <div class="col-md-3"><label class="form-label" for="set-hf-ban">401/403 单次封禁（秒）</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="set-hf-ban"></div>
+            <div class="col-md-3"><label class="form-label" for="set-hf-cnt">401/403 累计次数 → 封 1 天</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="set-hf-cnt"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-model">
+        <div class="card-header"><i class="bi bi-list-check me-2 text-muted"></i>模型限制</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label" for="set-mwl">全局白名单（空=不限）</label>
+              <textarea class="form-control form-control-sm font-monospace" id="set-mwl" rows="3" placeholder="deepseek-ai/deepseek-v4-flash-0731&#10;meta/llama-3.3-70b-instruct"></textarea></div>
+            <div class="col-md-6"><label class="form-label" for="set-mbl">全局黑名单</label>
+              <textarea class="form-control form-control-sm font-monospace" id="set-mbl" rows="3" placeholder="模型ID，逗号或换行分隔"></textarea></div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-privacy">
+        <div class="card-header"><i class="bi bi-eye-slash me-2 text-muted"></i>隐私与渠道兼容</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-6 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-herr">
+                <label class="form-check-label small" for="set-herr">渠道报错只透传状态码（详情仅记日志）</label>
+              </div>
+            </div>
+            <div class="col-md-6 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-mhide">
+                <label class="form-check-label small" for="set-mhide">模型改名后，原名在本渠道不可访问</label>
+              </div>
+            </div>
+            <div class="col-12"><label class="form-label" for="set-pover">全局固定参数（每行 参数=值，强制覆盖）</label>
+              <textarea class="form-control form-control-sm font-monospace" id="set-pover" rows="2" placeholder="top_p=0.9&#10;top_k=1"></textarea></div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-breaker">
+        <div class="card-header"><i class="bi bi-activity me-2 text-muted"></i>防风控与熔断</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3"><label class="form-label" for="set-c429">429 限流冷却（秒）</label>
+              <input type="number" min="5" class="form-control form-control-sm" id="set-c429"></div>
+            <div class="col-md-3"><label class="form-label" for="set-c5xx">上游 5xx 冷却（秒）</label>
+              <input type="number" min="5" class="form-control form-control-sm" id="set-c5xx"></div>
+            <div class="col-md-3"><label class="form-label" for="set-cto">上游超时冷却（秒）</label>
+              <input type="number" min="5" class="form-control form-control-sm" id="set-cto"></div>
+            <div class="col-md-3"><label class="form-label" for="set-ccn">连接失败冷却（秒）</label>
+              <input type="number" min="5" class="form-control form-control-sm" id="set-ccn"></div>
+            <div class="col-md-3"><label class="form-label" for="set-bth">熔断阈值（同模型连续失败）</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="set-bth"></div>
+            <div class="col-md-3"><label class="form-label" for="set-bsec">熔断持续（秒）</label>
+              <input type="number" min="5" class="form-control form-control-sm" id="set-bsec"></div>
+            <div class="col-md-3"><label class="form-label" for="set-ttfb">首字节超时（秒，0=不限）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-ttfb"></div>
+            <div class="col-md-3"><label class="form-label" for="set-sidle">流式空闲超时（秒）</label>
+              <input type="number" min="10" class="form-control form-control-sm" id="set-sidle"></div>
+            <div class="col-md-3"><label class="form-label" for="set-poolconns">上游连接池上限</label>
+              <input type="number" min="50" class="form-control form-control-sm" id="set-poolconns"></div>
+            <div class="col-12 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-breaker">
+                <label class="form-check-label small" for="set-breaker">模型熔断器</label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-sync">
+        <div class="card-header"><i class="bi bi-arrow-left-right me-2 text-muted"></i>配置同步</div>
+        <div class="card-body">
+          <div class="d-flex flex-wrap gap-2 align-items-center">
+            <a id="cfg-export" class="btn btn-sm btn-outline-primary" href="/api/config/export">导出配置（JSON）</a>
+            <input type="file" id="cfg-import-file" class="form-control form-control-sm" style="max-width:260px" accept=".json">
+            <button id="cfg-import" class="btn btn-sm btn-outline-primary">导入配置</button>
+            <span class="small text-muted" id="cfg-result"></span>
+          </div>
+          <div class="form-text small mt-2 mb-0">导出包含全部参数与访问令牌，不含管理员密码；账号池数据不随配置导出。</div>
+        </div>
+      </div>
+      <div class="card" id="sec-misc">
+        <div class="card-header"><i class="bi bi-hourglass-split me-2 text-muted"></i>排队与其他</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-6 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-queue">
+                <label class="form-check-label small" for="set-queue">号池无可用账号时排队等待</label>
+              </div>
+            </div>
+            <div class="col-md-6 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-update">
+                <label class="form-check-label small" for="set-update">远程更新</label>
+              </div>
+            </div>
+            <div class="col-md-6"><label class="form-label" for="set-uachk">自动检查更新间隔（小时，0=关闭）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-uachk"></div>
+            <div class="col-md-6"><label class="form-label" for="set-restart-h">定时重启间隔（小时，0=关闭）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-restart-h" value="0"></div>
+            <div class="col-md-6"><label class="form-label" for="set-updtok">更新令牌</label>
+              <div class="d-flex gap-2">
+                <input class="form-control form-control-sm font-monospace" id="set-updtok" placeholder="upd-…">
+                <button type="button" id="gen-updtok" class="btn btn-sm btn-outline-secondary text-nowrap">生成</button>
+              </div>
+            </div>
+            <div class="col-md-6"><label class="form-label" for="set-qwait">排队最长等待（秒）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-qwait"></div>
+            <div class="col-md-6"><label class="form-label" for="set-qpoll">排队轮询间隔（毫秒）</label>
+              <input type="number" min="100" class="form-control form-control-sm" id="set-qpoll"></div>
+            <div class="col-md-6"><label class="form-label" for="set-mttl">模型不存在缓存（秒，0=关闭）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-mttl"></div>
+            <div class="col-md-6"><label class="form-label" for="set-smax">会话内容保留条数（0 关闭）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-smax" value="100"></div>
+            <div class="col-md-6"><label class="form-label" for="set-trmax">训练资料保留条数（0 关闭）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-trmax" value="500"></div>
+            <div class="col-md-6"><label class="form-label" for="set-trmin">训练资料最小响应长度（0 不过滤）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-trmin" value="20"></div>
+            <div class="col-md-6 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-watchdog">
+                <label class="form-check-label small" for="set-watchdog">雪崩自动重启</label>
+              </div>
+            </div>
+            <div class="col-md-6"><label class="form-label" for="set-watchmin">雪崩持续判定分钟数</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="set-watchmin"></div>
+            <div class="col-md-6"><label class="form-label" for="set-logmax">日志保留条数（0 关闭）</label>
+              <input type="number" min="0" class="form-control form-control-sm" id="set-logmax"></div>
+            <div class="col-md-6"><label class="form-label" for="set-intmax">拦截记录保留条数</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="set-intmax" value="100"></div>
+            <div class="col-md-6 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-logen">
+                <label class="form-check-label small" for="set-logen">启用请求日志</label>
+              </div>
+            </div>
+            <div class="col-md-6"><label class="form-label" for="set-tz">显示时区</label>
+              <input type="text" class="form-control form-control-sm" id="set-tz"></div>
+            <div class="col-md-6"><label class="form-label" for="set-user">管理员账号名</label>
+              <input type="text" class="form-control form-control-sm" id="set-user"></div>
+            <div class="col-12"></div>
+          </div>
+          <button id="settings-save" class="btn btn-primary btn-sm mt-3">保存</button>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-5">
+      <div class="card mb-3" id="sec-passwd">
+        <div class="card-header"><i class="bi bi-person-lock me-2 text-muted"></i>修改密码</div>
+        <div class="card-body">
+          <div class="row g-2">
+            <div class="col-12"><input type="password" class="form-control form-control-sm" id="pwd-old" placeholder="当前密码"></div>
+            <div class="col-12"><input type="password" class="form-control form-control-sm" id="pwd-new" placeholder="新密码（≥6 位）"></div>
+            <div class="col-12"><button id="pwd-btn" class="btn btn-sm btn-warning">修改</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="card border-danger" id="sec-danger">
+        <div class="card-header text-danger"><i class="bi bi-exclamation-triangle me-2"></i>危险操作</div>
+        <div class="card-body d-flex flex-wrap gap-2">
+          <button id="btn-reset-stats" class="btn btn-sm btn-outline-secondary">重置全部统计</button>
+          <button id="btn-clear-logs" class="btn btn-sm btn-outline-secondary">清空日志</button>
+          <button id="btn-clear-keys" class="btn btn-sm btn-outline-danger">清空账号池</button>
+          <button id="btn-rollback" class="btn btn-sm btn-outline-danger">回滚到上一版本</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<section class="pane" id="pane-docs">
+  <h2 class="pane-title">接入</h2>
+  <div class="card"><div class="card-body">
+    <p class="mb-1">Base URL：<code id="doc-base"></code></p>
+    <p class="small text-muted">鉴权：<code>Authorization: Bearer &lt;令牌&gt;</code>，令牌留空时不校验。</p>
+    <h3 class="h6 mt-3">Chat Completions</h3>
+<pre id="doc-curl1"></pre>
+    <h3 class="h6 mt-3">Responses</h3>
+<pre id="doc-curl2"></pre>
+    <h3 class="h6 mt-3">Python</h3>
+<pre id="doc-py"></pre>
+    <h3 class="h6 mt-3">Anthropic 兼容（Claude SDK / Claude Code）</h3>
+<pre id="doc-anthropic"></pre>
+    <ul class="small text-muted mb-0 mt-3">
+      <li><code>/v1/responses</code>、<code>/v1/messages</code> 由网关转换，无状态，不支持按 ID 检索历史。</li>
+      <li>失败自动换号重试；号池无可用账号时排队等待，超时返回 429/503。</li>
+      <li>多个上游按近期成功率调度；渠道可设模型列表与模型映射。</li>
+    </ul>
+  </div></div>
+</section>
+
+</main>
+</div>
+
+<script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script>window.NGW = {base: "/", csrf: window.__csrf || ""};</script>
+<script src="/assets/admin.js?v={{VERSION}}"></script>
+</body>
+</html>

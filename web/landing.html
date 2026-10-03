@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NVIDIA Gateway</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;color:#dbe5f5;
+  background:radial-gradient(1200px 600px at 20% -10%,#1d3561 0%,transparent 60%),
+             radial-gradient(1000px 500px at 110% 110%,#17306b 0%,transparent 55%),
+             linear-gradient(160deg,#0d1526 0%,#0a1120 100%);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.panel{width:100%;max-width:520px;border-radius:16px;padding:30px 34px;
+  background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);backdrop-filter:blur(8px);
+  box-shadow:0 24px 70px rgba(2,8,20,.5)}
+.mark{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;justify-content:center;color:#fff;
+  background:linear-gradient(135deg,#3b82f6,#1d4ed8);font-weight:800;font-size:18px;margin-bottom:14px;
+  box-shadow:0 4px 14px rgba(37,99,235,.45),inset 0 1px 0 rgba(255,255,255,.25)}
+h1{font-size:18px;font-weight:700;color:#fff;margin:0 0 2px;letter-spacing:.2px}
+.sub{font-size:10.5px;color:#5d6b83;letter-spacing:2px;text-transform:uppercase;margin-bottom:22px}
+.ep{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:13.5px}
+.ep:last-of-type{border-bottom:0}
+.ep .n{color:#8d9bb2;width:86px;flex-shrink:0}
+.ep code{color:#dbe5f5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.ep a{color:#6ea2ff;font-size:12.5px}
+.ep a:hover{color:#9dc0ff}
+</style>
+</head>
+<body>
+  <div class="panel">
+    <div class="mark">N</div>
+    <h1>NVIDIA Gateway</h1>
+    <div class="sub">OpenAI Compatible · NIM Pool</div>
+    <div class="ep"><span class="n">chat</span><code>POST /v1/chat/completions</code></div>
+    <div class="ep"><span class="n">responses</span><code>POST /v1/responses</code></div>
+    <div class="ep"><span class="n">messages</span><code>POST /v1/messages</code></div>
+    <div class="ep"><span class="n">models</span><code>GET /v1/models</code></div>
+    <div class="ep"><span class="n">queue</span><code><a href="/queue">队列状态 →</a></code></div>
+  </div>
+</body>
+</html>

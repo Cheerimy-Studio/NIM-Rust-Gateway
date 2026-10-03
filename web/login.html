@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NVIDIA Gateway</title>
+<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<style>
+body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+  background:radial-gradient(1200px 600px at 20% -10%,#1d3561 0%,transparent 60%),
+             radial-gradient(1000px 500px at 110% 110%,#17306b 0%,transparent 55%),
+             linear-gradient(160deg,#0d1526 0%,#0a1120 100%);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.card-login{width:100%;max-width:372px;border:0;border-radius:16px;padding:34px 30px 28px;background:#fff;
+  box-shadow:0 28px 80px rgba(2,8,20,.55)}
+.mark{width:44px;height:44px;border-radius:12px;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;font-weight:800;font-size:20px;
+  box-shadow:0 6px 18px rgba(37,99,235,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.h-title{text-align:center;font-size:17px;font-weight:700;color:#1c2536;letter-spacing:.2px;margin-bottom:4px}
+.h-sub{text-align:center;font-size:11px;color:#98a3b8;letter-spacing:1.6px;text-transform:uppercase;margin-bottom:22px}
+.form-control{border-radius:10px;border-color:#dde4ee;padding:.62rem .85rem;font-size:14px}
+.form-control:hover{border-color:#c9d4e4}
+.form-control:focus{border-color:#2f6fed;box-shadow:0 0 0 .2rem rgba(47,111,237,.13)}
+.btn-primary{width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+  background:linear-gradient(135deg,#3576f0,#2a5ce0);box-shadow:0 4px 14px rgba(37,99,235,.35);transition:all .15s ease}
+.btn-primary:hover{background:linear-gradient(135deg,#2a5ce0,#1f4fd0);box-shadow:0 6px 20px rgba(37,99,235,.45);transform:translateY(-1px)}
+.err{display:none;color:#dc2626;font-size:13px;margin-bottom:10px}
+</style>
+</head>
+<body>
+  <div class="card-login">
+    <div class="mark">N</div>
+    <div class="h-title">NVIDIA Gateway</div>
+    <div class="h-sub">Console</div>
+    <div id="login-err" class="err"></div>
+    <form id="login-form">
+      <div class="mb-3">
+        <input type="text" class="form-control" name="username" placeholder="账号" autofocus required>
+      </div>
+      <div class="mb-4">
+        <input type="password" class="form-control" name="password" placeholder="密码" required>
+      </div>
+      <button class="btn btn-primary">登录</button>
+    </form>
+<script>
+document.getElementById('login-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const r = await fetch('/api/login', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username: fd.get('username'), password: fd.get('password')})});
+  if (r.ok) { location.href = '/admin'; }
+  else { const d = await r.json().catch(() => ({}));
+    document.getElementById('login-err').textContent = (d.error && d.error.message) || '登录失败';
+    document.getElementById('login-err').style.display = 'block'; }
+});
+</script>
+  </div>
+</body>
+</html>
