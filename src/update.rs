@@ -36,18 +36,26 @@ fn http_client() -> reqwest::Client {
 }
 
 async fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let client = http_client();
-    match client.get(url).send().await {
-        Ok(r) if r.status().is_success() => match r.bytes().await {
-            Ok(b) => Ok(b.to_vec()),
-            Err(e) => Err(format!("下载失败: {}", e)),
-        },
-        Ok(r) if r.status() == reqwest::StatusCode::FORBIDDEN || r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            Err("更新源限流（HTTP 403/429），请稍后再试，或用 NGW_UPDATE_URL 指向自建更新源".into())
+    // 到 GitHub 的链路常见瞬断（连接重置 / 响应体截断），自动重试一次
+    let mut last = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        Ok(r) => Err(format!("更新源返回 HTTP {}", r.status())),
-        Err(e) => Err(format!("下载失败: {}", e)),
+        let client = http_client();
+        match client.get(url).send().await {
+            Ok(r) if r.status().is_success() => match r.bytes().await {
+                Ok(b) => return Ok(b.to_vec()),
+                Err(e) => last = format!("下载失败: {}", e),
+            },
+            Ok(r) if r.status() == reqwest::StatusCode::FORBIDDEN || r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                return Err("更新源限流（HTTP 403/429），请稍后再试，或用 NGW_UPDATE_URL 指向自建更新源".into());
+            }
+            Ok(r) => return Err(format!("更新源返回 HTTP {}", r.status())),
+            Err(e) => last = format!("下载失败: {}", e),
+        }
     }
+    Err(last)
 }
 
 /// 解析 "v1.7.0" / "1.7.0-rc1" 形态的版本号；不可解析返回 None。
@@ -396,6 +404,11 @@ fn unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
             continue;
         }
         let out_path = dest.join(&path);
+        // 最终防线：join 之后必须仍在解包目录内（Windows 盘符类绝对路径
+        // 如 "C:/evil" 不以 / 开头，前面的字符串检查拦不住）
+        if !out_path.starts_with(dest) {
+            continue;
+        }
         if let Some(parent) = out_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

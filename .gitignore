@@ -5,3 +5,4 @@
 __pycache__/
 last-gateway-stderr.log
 *.exe.old
+tests-blackbox/

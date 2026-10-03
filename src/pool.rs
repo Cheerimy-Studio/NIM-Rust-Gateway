@@ -1251,6 +1251,9 @@ fn release_fn(
             if util::str_or(k.get("id"), "") != key_id {
                 continue;
             }
+            if !k.is_object() {
+                continue; // 手工编辑过的 db.json 可能有脏行，跳过而不是 panic
+            }
             let uid = util::str_or(k.get("upstream_id"), "");
             let up_row = db
                 .get("upstreams")

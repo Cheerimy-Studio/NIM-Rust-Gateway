@@ -283,6 +283,12 @@ impl Store {
         let tmp = format!("{}.{}.tmp", db_path().display(), std::process::id());
         if let Ok(payload) = serde_json::to_string(db) {
             if fs::write(&tmp, payload.as_bytes()).is_ok() {
+                // db.json 含 API Key 与口令哈希：Unix 上收紧到 0600
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+                }
                 let _ = fs::rename(&tmp, db_path());
             }
         }
@@ -341,6 +347,11 @@ impl Store {
         let write_res = fs::write(&tmp, payload.as_bytes());
         match write_res {
             Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+                }
                 let mut inner = self.inner.lock().unwrap();
                 let _ = fs::rename(&tmp, db_path());
                 bump_gen();

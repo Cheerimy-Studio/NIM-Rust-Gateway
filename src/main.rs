@@ -43,6 +43,14 @@ fn html_resp(name: &str, csrf: &str, no_cache: bool) -> Response {
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
     );
+    resp.headers_mut().insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
     if no_cache {
         resp.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
@@ -174,6 +182,10 @@ async fn h_admin_js() -> Response {
         axum::http::HeaderValue::from_static("application/javascript"),
     );
     resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
     );
@@ -183,8 +195,8 @@ async fn h_admin_js() -> Response {
 // ---------------------------------------------------------------- /api 处理器
 
 async fn h_login(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
-    let ip = ip_of(&headers, Some(addr));
-    admin::login(&headers, ip, body).await
+    // 限流按 socket 来源 IP：X-Forwarded-For 可被客户端伪造，用来做限流键等于没有限流
+    admin::login(&headers, addr.ip().to_string(), body).await
 }
 
 async fn h_logout() -> Response {
@@ -215,6 +227,7 @@ async fn h_keys_import(headers: HeaderMap, req: Request) -> Response {
             .map(|s| s.trim())
             .find_map(|s| s.strip_prefix("boundary="))
             .unwrap_or("")
+            .trim_matches('"')
             .to_string();
         let body = match axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024).await {
             Ok(b) => b,
@@ -993,4 +1006,8 @@ fn build_router() -> Router {
         .route("/api/sessions/clear", post(h_sessions_clear))
         .route("/api/config/export", get(h_config_export))
         .route("/api/config/import", post(h_config_import))
+        // axum 默认把请求体限制在 2MB：不显式放宽，MAX_BODY=20MB 永远不会生效，
+        // 大 prompt 会在提取器阶段被 413 掉。层上限比 MAX_BODY 高 1MB：边界请求
+        // 进到处理器里返回友好的「请求体过大」，超过层上限才走 axum 的通用 413
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY + 1024 * 1024))
 }

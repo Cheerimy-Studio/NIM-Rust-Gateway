@@ -786,6 +786,19 @@ fn breaker_queue_reason(br: &Value) -> String {
     )
 }
 
+/// 排队参与守卫：客户端在排队期间断开时 hyper 丢弃 handler，
+/// 队列条目与等待计数器由 Drop 兜底回收，否则泄漏到重启为止。
+struct QueueGuard {
+    qid: String,
+    model: String,
+}
+impl Drop for QueueGuard {
+    fn drop(&mut self) {
+        queue::remove(&self.qid);
+        waiting_dec(&self.model);
+    }
+}
+
 pub struct Taken {
     pub ok: bool,
     pub key: Option<Value>,
@@ -909,11 +922,12 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         q_reason = breaker_queue_reason(b);
     }
     let qid = queue::add(ep, model, ip, &tok_mask(tok), &q_reason);
+    waiting_add(model);
+    let _qguard = QueueGuard { qid: qid.clone(), model: model.to_string() };
     let deadline = Instant::now() + Duration::from_secs_f64(max_wait as f64);
     let poll = (util::cfg_int(cfg, "queue_poll_ms", 400) as f64 / 1000.0).max(0.05);
     let mut waiting_breaker = br.is_some();
     let mut backoff = poll;
-    waiting_add(model);
     let mut last_reason = acq_reason.clone();
     let mut got: Option<Value> = None;
     while Instant::now() < deadline {
@@ -941,8 +955,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         let jitter = 0.7 + rand::thread_rng().gen_range(0.0..0.6);
         tokio::time::sleep(Duration::from_secs_f64(wait * jitter)).await;
     }
-    queue::remove(&qid);
-    waiting_dec(model);
+    drop(_qguard); // 守卫统一出队；显式 drop 保证在返回值构造前完成
     if let Some(k) = got {
         return Taken { ok: true, key: Some(k), status: 0, message: String::new() };
     }

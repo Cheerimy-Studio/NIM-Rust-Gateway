@@ -126,10 +126,13 @@ fn json_dict(body: &Bytes) -> Option<Value> {
     serde_json::from_slice::<Value>(body).ok().filter(|v| v.is_object())
 }
 
-fn set_cookie_header(name: &str, value: &str, http_only: bool, delete: bool) -> String {
+fn set_cookie_header(name: &str, value: &str, http_only: bool, delete: bool, secure: bool) -> String {
     let mut s = format!("{}={}; Path=/; SameSite=Lax", name, value);
     if http_only {
         s.push_str("; HttpOnly");
+    }
+    if secure {
+        s.push_str("; Secure");
     }
     if delete {
         s.push_str("; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT");
@@ -174,14 +177,22 @@ pub async fn login(headers: &HeaderMap, ip: String, body: Bytes) -> Response {
     login_rate_clear(&ip);
     let session = session_cookie(&cfg);
     let csrf = csrf_token(&cfg);
+    // https 部署下会话 Cookie 带 Secure（反代成 http 的内网部署不能设，否则浏览器
+    // 拒绝回传）；反代场景从 X-Forwarded-Proto 识别。CSRF cookie 补 HttpOnly：
+    // 双提交的比对在服务端读 cookie 完成，JS 无需读取
+    let secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|x| x.to_str().ok())
+        .map(|p| p.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
     let mut resp = axum::Json(json!({"ok": true, "csrf": csrf})).into_response();
     resp.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_session", &session, true, false)).unwrap(),
+        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_session", &session, true, false, secure)).unwrap(),
     );
     resp.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&set_cookie_header(CSRF_COOKIE, &csrf, false, false)).unwrap(),
+        axum::http::HeaderValue::from_str(&set_cookie_header(CSRF_COOKIE, &csrf, true, false, secure)).unwrap(),
     );
     resp
 }
@@ -190,11 +201,11 @@ pub async fn logout() -> Response {
     let mut resp = axum::Json(json!({"ok": true})).into_response();
     resp.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_session", "", true, true)).unwrap(),
+        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_session", "", true, true, false)).unwrap(),
     );
     resp.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&set_cookie_header(CSRF_COOKIE, "", false, true)).unwrap(),
+        axum::http::HeaderValue::from_str(&set_cookie_header(CSRF_COOKIE, "", true, true, false)).unwrap(),
     );
     resp
 }
