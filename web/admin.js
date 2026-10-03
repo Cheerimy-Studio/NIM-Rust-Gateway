@@ -3,6 +3,24 @@
 'use strict';
 
 const B = window.NGW.base, CSRF = window.NGW.csrf;
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  }
+  return Promise.resolve(fallbackCopy(text));
+}
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
@@ -335,7 +353,7 @@ async function loadKeys() {
     code.style.cursor = 'pointer'; code.title = '显示/隐藏';
     code.onclick = () => { revealSet.has(k.id) ? revealSet.delete(k.id) : revealSet.add(k.id); loadKeys(); };
     const copy = el('button', 'btn btn-sm btn-link py-0 ps-1', '复制');
-    copy.onclick = () => navigator.clipboard.writeText(k.apikey).then(() => toast('已复制'));
+    copy.onclick = () => copyText(k.apikey).then(ok => toast(ok ? '已复制' : '复制失败，请手动复制'));
     tdKey.append(code, copy);
 
     tr.append(
@@ -890,7 +908,7 @@ async function loadTokens() {
     code.style.cursor = 'pointer'; code.title = '显示/隐藏';
     code.onclick = () => { tokReveal.has(t.t) ? tokReveal.delete(t.t) : tokReveal.add(t.t); loadTokens(); };
     const copy = el('button', 'btn btn-sm btn-link py-0 ps-1', '复制');
-    copy.onclick = () => navigator.clipboard.writeText(t.t).then(() => toast('已复制'));
+    copy.onclick = () => copyText(t.t).then(ok => toast(ok ? '已复制' : '复制失败，请手动复制'));
     tdT.append(code, copy);
     tr.appendChild(tdT);
     const tdM = el('td');
@@ -939,7 +957,7 @@ function bindTokens() {
     if (wasCustom) {
       toast('已添加');
     } else {
-      navigator.clipboard.writeText(r.token).catch(() => {});
+      copyText(r.token);
       toast(`已生成并复制：${r.token.slice(0, 18)}…`);
     }
     loadTokens();
@@ -1675,8 +1693,7 @@ $('#gen-updtok').onclick = () => {
   crypto.getRandomValues(arr);
   const tok = 'upd-' + Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
   $('#set-updtok').value = tok;
-  navigator.clipboard.writeText(tok).catch(() => {});
-  toast('更新令牌已生成并复制');
+  copyText(tok).then(ok => toast(ok ? '更新令牌已生成并复制' : '更新令牌已生成，复制失败请手动复制'));
 };
 $('#btn-rollback').onclick = guard(async () => {
   if (!await uiConfirm('回滚到上次更新前的版本？数据也会恢复到更新前的状态，此操作只能执行一次。',

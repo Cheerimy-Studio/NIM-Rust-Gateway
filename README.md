@@ -71,15 +71,6 @@ GET  /queue                    公开排队页
 
 鉴权：后台生成访问令牌，`Authorization: Bearer <令牌>` 调用；令牌留空时不校验。
 
-## 测试
-
-黑盒验收套件（起 mock 上游与网关实例，需要 Python 3.10+ 与 fastapi、httpx、uvicorn）：
-
-```bash
-python tests-blackbox/compat.py       # 19 项：接口与协议结构
-python tests-blackbox/regression.py   # 158 项：调度、限速、断连回收、更新回滚、协议守护
-```
-
 ## 许可
 
 [AGPL-3.0](LICENSE)
