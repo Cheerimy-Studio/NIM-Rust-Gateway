@@ -1,4 +1,18 @@
-//! JSON 存储层（core/store.py 的移植）：原子写、mtime 校验缓存、默认配置与迁移。
+//! JSON 存储层：按「表」分文件落盘（data/db/*.json），原子写、内存缓存、默认配置与迁移。
+//!
+//! 旧版是单个 db.json：账号、日志、训练资料全在一个文件里，每次落盘都是全量重写，
+//! 文件体积随使用线性膨胀。现在按访问模式拆成 9 个表文件，flush 只写有变化的表：
+//!   config.json      配置 + 渠道预设
+//!   keys.json        账号池
+//!   upstreams.json   渠道
+//!   logs.json        请求日志（高频）
+//!   training.json    训练资料（体积大头）
+//!   sessions.json    会话审计
+//!   intercepted.json 拦截记录
+//!   queue.json       排队（高频）
+//!   metrics.json     统计与滑动窗口（stats/buckets/pool_*/up_recent/model_breaker/model_missing）
+//!
+//! 兼容：首次启动发现旧版 data/db.json 时自动拆分迁移，原文件改名 db.json.migrated 留存。
 
 use crate::util;
 use hmac::{Hmac, Mac};
@@ -18,10 +32,10 @@ pub struct Store {
 
 struct Inner {
     memo: Option<Value>,
-    memo_mtime: i64,
-    memo_size: u64,
+    dir_fp: Option<(i64, usize)>,
     memo_at: Instant,
     dirty: bool,
+    saved: Vec<u64>, // 每个表上次成功落盘内容的哈希
 }
 
 pub fn data_dir() -> PathBuf {
@@ -33,8 +47,9 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
-pub fn db_path() -> PathBuf {
-    data_dir().join("db.json")
+/// 分表存储目录：DATA_DIR/db/
+pub fn db_dir() -> PathBuf {
+    data_dir().join("db")
 }
 
 fn warn_persist(msg: &str) {
@@ -42,6 +57,34 @@ fn warn_persist(msg: &str) {
         "[store] 落盘失败({});状态仍在内存、下一轮会重试,持续失败则重启会丢这段变更 —— 检查磁盘空间与 data/ 权限",
         msg
     );
+}
+
+/// 表名 → 顶层键 的分组（组内键同文件落盘）。
+const GROUPS: &[(&str, &[&str])] = &[
+    ("config", &["config", "channel_presets"]),
+    ("keys", &["keys"]),
+    ("upstreams", &["upstreams"]),
+    ("logs", &["logs"]),
+    ("training", &["training"]),
+    ("sessions", &["sessions"]),
+    ("intercepted", &["intercepted"]),
+    ("queue", &["queue"]),
+    (
+        "metrics",
+        &[
+            "stats",
+            "buckets",
+            "pool_buckets",
+            "pool_daily",
+            "up_recent",
+            "model_breaker",
+            "model_missing",
+        ],
+    ),
+];
+
+fn group_file(group: &str) -> PathBuf {
+    db_dir().join(format!("{}.json", group))
 }
 
 pub fn default_config() -> Vec<(&'static str, Value)> {
@@ -160,15 +203,86 @@ pub fn verify_password(pw: &str, stored: &str) -> bool {
     dk.ct_eq(&dk_stored).into()
 }
 
-fn file_fingerprint(path: &Path) -> Option<(i64, u64)> {
-    let md = fs::metadata(path).ok()?;
-    let mtime = md
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64;
-    Some((mtime, md.len()))
+/// 目录指纹：条目数 + 目录 mtime。表文件始终以「临时文件 + rename」落盘，
+/// rename 会刷新目录 mtime，因此本进程写盘与外部改动都能被识别。
+fn dir_fingerprint() -> (i64, usize) {
+    let dir = db_dir();
+    let Ok(rd) = fs::read_dir(&dir) else { return (0, 0) };
+    let mut count = 0usize;
+    let mut newest: i64 = 0;
+    for e in rd.flatten() {
+        count += 1;
+        if let Ok(md) = e.metadata() {
+            if let Ok(t) = md.modified() {
+                let secs = t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                if secs > newest {
+                    newest = secs;
+                }
+            }
+        }
+    }
+    (newest, count)
+}
+
+fn write_group_file(group: &str, payload: &str) -> Result<(), String> {
+    let path = group_file(group);
+    let tmp = format!("{}.{}.tmp", path.display(), std::process::id());
+    fs::write(&tmp, payload.as_bytes()).map_err(|e| e.to_string())?;
+    // 表文件含 API Key 与口令哈希：Unix 上收紧到 0600
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+fn read_group_file(group: &str) -> Value {
+    let path = group_file(group);
+    let Ok(raw) = fs::read(&path) else { return Value::Object(Obj::new()) };
+    match serde_json::from_slice::<Value>(&raw) {
+        Ok(v) if v.is_object() => v,
+        _ => {
+            // 损坏：另存副本并告警，该表按空表继续（不影响其它表）
+            let bak = format!("{}.corrupt-{}", path.display(), util::now_i());
+            let _ = fs::rename(&path, &bak);
+            eprintln!(
+                "[store] {}.json 解析失败,原文件已另存;该表以空数据继续",
+                group
+            );
+            Value::Object(Obj::new())
+        }
+    }
+}
+
+fn group_hash(obj: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(obj).unwrap_or_default().hash(&mut h);
+    h.finish()
+}
+
+/// 从内存树提取一个组的对象。
+fn extract_group(tree: &Value, keys: &[&str]) -> Value {
+    let mut m = Obj::new();
+    for k in keys {
+        if let Some(v) = tree.get(*k) {
+            m.insert(k.to_string(), v.clone());
+        }
+    }
+    Value::Object(m)
+}
+
+fn legacy_db_json() -> Option<PathBuf> {
+    let p = data_dir().join("db.json");
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 impl Store {
@@ -179,13 +293,14 @@ impl Store {
         if !guard.exists() {
             let _ = fs::write(&guard, "Require all denied\n");
         }
+        let _ = fs::create_dir_all(db_dir());
         let s = Store {
             inner: Mutex::new(Inner {
                 memo: None,
-                memo_mtime: 0,
-                memo_size: 0,
+                dir_fp: None,
                 memo_at: Instant::now(),
                 dirty: false,
+                saved: vec![0; GROUPS.len()],
             }),
         };
         s.bootstrap_env_admin_pw();
@@ -210,7 +325,14 @@ impl Store {
                 o.insert("admin_password_hash".into(), Value::from(hash_password(&env_pw)));
             }
         }
-        self.write_now(&db);
+        self.update(|d| {
+            if let Some(o) = d.as_object_mut() {
+                if let Some(c) = o.get_mut("config") {
+                    *c = db.get("config").cloned().unwrap_or(Value::Object(Obj::new()));
+                }
+            }
+        });
+        self.flush();
         let user = util::str_or(db.pointer("/config/admin_username"), "admin");
         eprintln!(
             "[admin] 已按 NGW_ADMIN_PASSWORD 重置管理员密码（用户名 {}）；删掉该环境变量后不再覆盖",
@@ -218,155 +340,128 @@ impl Store {
         );
     }
 
-    fn read_file(&self) -> Value {
-        let raw = fs::read(db_path()).unwrap_or_default();
-        let mut db: Option<Value> = None;
-        if !raw.is_empty() {
-            match serde_json::from_slice::<Value>(&raw) {
-                Ok(v) => db = Some(v),
-                Err(_) => {
-                    let bak = format!(
-                        "{}.corrupt-{}",
-                        db_path().display(),
-                        util::now_i()
-                    );
-                    if fs::write(&bak, &raw).is_ok() {
-                        eprintln!(
-                            "[store] db.json 解析失败({} 字节),原文件已另存 {},本次以默认配置继续;找回数据:用该备份或 backup/data/db.json 覆盖 data/db.json 后重启",
-                            raw.len(),
-                            Path::new(&bak)
-                                .file_name()
-                                .map(|x| x.to_string_lossy().to_string())
-                                .unwrap_or_default()
-                        );
-                    }
-                }
-            }
-        }
-        match db {
-            Some(v) if v.is_object() => v,
-            _ => Value::Object(Obj::new()),
-        }
-    }
-
-    /// 读取快照（克隆）。高并发下如遇性能问题可再引入 Arc 缓存。
+    /// 读取快照（克隆）。分表目录为空且存在旧版 db.json 时做一次性拆分迁移。
     pub fn load(&self) -> Value {
         let mut inner = self.inner.lock().unwrap();
         if inner.memo.is_some() && inner.memo_at.elapsed().as_millis() < 50 {
             return inner.memo.clone().unwrap();
         }
-        let fp = file_fingerprint(&db_path());
-        let (mut mtime, mut size) = fp.unwrap_or((0, 0));
-        if inner.memo.is_some() && inner.memo_mtime == mtime && inner.memo_size == size {
+        let fp = dir_fingerprint();
+        if inner.memo.is_some() && inner.dir_fp == Some(fp) {
             inner.memo_at = Instant::now();
             return inner.memo.clone().unwrap();
         }
-        let raw_db = self.read_file();
-        let before = canonical(&raw_db);
-        let mut db = raw_db;
-        migrate(&mut db);
-        if canonical(&db) != before {
-            self.write_now(&db);
-            if let Some(f) = file_fingerprint(&db_path()) {
-                mtime = f.0;
-                size = f.1;
+        // 分表读取
+        let mut db = Value::Object(Obj::new());
+        let mut loaded_any = false;
+        let mut saved = vec![0u64; GROUPS.len()];
+        for (gi, (group, keys)) in GROUPS.iter().enumerate() {
+            let obj = read_group_file(group);
+            let empty = obj.as_object().map(|m| m.is_empty()).unwrap_or(true);
+            if !empty {
+                loaded_any = true;
+                saved[gi] = group_hash(&obj);
+                if let Some(m) = obj.as_object() {
+                    for (k, v) in m {
+                        db.as_object_mut().unwrap().insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            let _ = keys;
+        }
+        if !loaded_any {
+            // 首次启动：尝试旧版单文件迁移
+            if let Some(legacy) = legacy_db_json() {
+                if let Ok(raw) = fs::read(&legacy) {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
+                        if v.is_object() {
+                            db = v;
+                            eprintln!(
+                                "[store] 检测到旧版单文件 db.json：拆分为 db/ 目录分表存储，原文件改名 db.json.migrated"
+                            );
+                        }
+                    }
+                }
             }
         }
+        let before = canonical(&db);
+        migrate(&mut db);
+        if canonical(&db) != before || !loaded_any {
+            // 首建 / 迁移变更：全表落盘一次
+            for (gi, (group, keys)) in GROUPS.iter().enumerate() {
+                let obj = extract_group(&db, keys);
+                let payload = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".into());
+                match write_group_file(group, &payload) {
+                    Ok(()) => saved[gi] = group_hash(&obj),
+                    Err(e) => warn_persist(&e),
+                }
+            }
+            if let Some(legacy) = legacy_db_json() {
+                let renamed = data_dir().join("db.json.migrated");
+                let _ = fs::rename(&legacy, &renamed);
+            }
+        }
+        inner.saved = saved;
         inner.memo = Some(db.clone());
-        inner.memo_mtime = mtime;
-        inner.memo_size = size;
+        inner.dir_fp = Some(dir_fingerprint());
         inner.memo_at = Instant::now();
         db
     }
 
-    fn write_now(&self, db: &Value) {
-        let tmp = format!("{}.{}.tmp", db_path().display(), std::process::id());
-        if let Ok(payload) = serde_json::to_string(db) {
-            if fs::write(&tmp, payload.as_bytes()).is_ok() {
-                // db.json 含 API Key 与口令哈希：Unix 上收紧到 0600
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-                }
-                let _ = fs::rename(&tmp, db_path());
-            }
-        }
-    }
-
-    /// 加锁读-改-写；memo 未失效时直接复用内存态。
+    /// 加锁读-改-写；memo 未失效时直接复用内存态，落盘由 flush 按表统一处理。
     pub fn update<F: FnOnce(&mut Value)>(&self, f: F) -> Value {
         let mut inner = self.inner.lock().unwrap();
-        let fp = file_fingerprint(&db_path());
-        let (mtime, size) = fp.unwrap_or((0, 0));
-        if inner.memo.is_some() && inner.memo_mtime == mtime && inner.memo_size == size {
+        let fp = dir_fingerprint();
+        if inner.memo.is_some() && inner.dir_fp == Some(fp) {
             let db = inner.memo.as_mut().unwrap();
             f(db);
             inner.dirty = true;
             bump_gen();
             return inner.memo.clone().unwrap();
         }
-        let raw_db = self.read_file();
-        let before = canonical(&raw_db);
-        let mut db = raw_db;
-        migrate(&mut db);
+        // memo 失效（外部改动/首次）：重读后在新快照上应用变更
+        drop(inner);
+        let mut db = self.load();
+        let mut inner = self.inner.lock().unwrap();
         f(&mut db);
-        let after = canonical(&db);
-        if after != before {
-            drop(inner);
-            self.write_now(&db);
-            inner = self.inner.lock().unwrap();
-            inner.dirty = false;
-            bump_gen();
-            if let Some(f2) = file_fingerprint(&db_path()) {
-                inner.memo = Some(db.clone());
-                inner.memo_mtime = f2.0;
-                inner.memo_size = f2.1;
-                inner.memo_at = Instant::now();
-            }
-        }
+        inner.dirty = true;
+        bump_gen();
+        inner.memo = Some(db.clone());
+        inner.memo_at = Instant::now();
         db
     }
 
-    /// 把内存态写盘（后台定期调用）。磁盘写在锁外执行，锁内只做序列化。
+    /// 把内存态按表落盘：只写内容有变化的表。磁盘写在锁外执行。
     pub fn flush(&self) {
-        let payload = {
+        let (snapshot, mut saved, mut dirty_now) = {
             let mut inner = self.inner.lock().unwrap();
             if !inner.dirty || inner.memo.is_none() {
                 return;
             }
-            let db = inner.memo.as_ref().unwrap();
-            let p = match serde_json::to_string(db) {
-                Ok(p) => p,
-                Err(_) => return,
-            };
             inner.dirty = false;
-            p
+            (inner.memo.clone().unwrap(), inner.saved.clone(), false)
         };
-        let tmp = format!("{}.{}.tmp", db_path().display(), std::process::id());
-        let write_res = fs::write(&tmp, payload.as_bytes());
-        match write_res {
-            Ok(()) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
-                }
-                let mut inner = self.inner.lock().unwrap();
-                let _ = fs::rename(&tmp, db_path());
-                bump_gen();
-                if let Some(f) = file_fingerprint(&db_path()) {
-                    inner.memo_mtime = f.0;
-                    inner.memo_size = f.1;
-                    inner.memo_at = Instant::now();
+        for (gi, (group, keys)) in GROUPS.iter().enumerate() {
+            let obj = extract_group(&snapshot, keys);
+            let hash = group_hash(&obj);
+            if hash == saved[gi] {
+                continue; // 该表没变，跳过 —— 大表（training/logs）不反复重写
+            }
+            let payload = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".into());
+            match write_group_file(group, &payload) {
+                Ok(()) => saved[gi] = hash,
+                Err(e) => {
+                    warn_persist(&e);
+                    dirty_now = true; // 写失败的表保持旧哈希：下一轮 flush 会再试
                 }
             }
-            Err(e) => {
-                let mut inner = self.inner.lock().unwrap();
-                inner.dirty = true;
-                drop(inner);
-                warn_persist(&e.to_string());
-            }
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.saved = saved;
+        // 指纹刷新与本轮写盘同锁：避免「写完 → 别的线程 stat 到新文件 → 误判外部改动重读」
+        inner.dir_fp = Some(dir_fingerprint());
+        if dirty_now {
+            inner.dirty = true;
         }
     }
 }

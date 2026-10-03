@@ -56,6 +56,26 @@ CI 自动构建 Linux（glibc 2.17）与 Windows 二进制并发布 Release。�
 
 更新流程：下载、备份到 `backup/`、原子替换、自动重启。回滚备份保留一份，可在后台一键回退。
 
+## 数据存储
+
+数据按表分文件存放于 `data/db/`，落盘只写有变化的表（账号、日志、训练资料互不影响，
+不会因为一条日志重写整个库）：
+
+```
+data/db/config.json       配置与渠道预设
+data/db/keys.json         账号池
+data/db/upstreams.json    渠道
+data/db/logs.json         请求日志
+data/db/training.json     训练资料
+data/db/sessions.json     会话审计
+data/db/intercepted.json  拦截记录
+data/db/queue.json        排队
+data/db/metrics.json      统计、限速窗口、熔断与负缓存
+```
+
+从旧版单文件升级：首次启动自动拆分迁移，原 `db.json` 改名 `db.json.migrated` 留存。
+更新/回滚会整目录备份与还原数据。
+
 ## 接口
 
 ```

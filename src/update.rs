@@ -223,11 +223,17 @@ fn backup_current() -> Result<(), String> {
         let dst = backup.join(if cfg!(windows) { "nim-gateway.exe.bak" } else { "nim-gateway.bak" });
         std::fs::copy(&exe, &dst).map_err(|e| format!("备份可执行文件失败: {}", e))?;
     }
-    let db = crate::store::db_path();
-    if db.exists() {
+    // 数据备份：分表目录整目录拷贝（保留旧版单文件兼容）
+    let db_dir = crate::store::db_dir();
+    if db_dir.is_dir() {
+        let dst = backup.join("data").join("db");
+        copy_dir(&db_dir, &dst)?;
+    }
+    let legacy = crate::store::data_dir().join("db.json");
+    if legacy.exists() {
         let data_dir = backup.join("data");
         std::fs::create_dir_all(&data_dir).ok();
-        std::fs::copy(&db, data_dir.join("db.json")).map_err(|e| format!("备份数据失败: {}", e))?;
+        std::fs::copy(&legacy, data_dir.join("db.json")).map_err(|e| format!("备份数据失败: {}", e))?;
     }
     Ok(())
 }
@@ -367,13 +373,26 @@ async fn remote_rollback_inner() -> (bool, String) {
         return (false, format!("回滚失败: {}", e));
     }
     let _ = std::fs::remove_file(&bak_exe);
-    let bak_db = backup.join("data").join("db.json");
-    if bak_db.exists() {
-        let db = crate::store::db_path();
-        let db_bak = db.with_extension("json.rollback");
-        let _ = std::fs::copy(&db, &db_bak);
-        let _ = std::fs::copy(&bak_db, &db);
-        let _ = std::fs::remove_file(&db_bak);
+    // 数据回滚：分表目录整目录替换（回滚前当前数据先挪到 db.rollback 留底）
+    let bak_dir = backup.join("data").join("db");
+    if bak_dir.is_dir() {
+        let cur = crate::store::db_dir();
+        let rollback_copy = crate::store::data_dir().join("db.rollback");
+        let _ = std::fs::remove_dir_all(&rollback_copy);
+        if cur.is_dir() {
+            let _ = std::fs::rename(&cur, &rollback_copy);
+        }
+        if copy_dir(&bak_dir, &cur).is_err() && rollback_copy.is_dir() {
+            let _ = std::fs::remove_dir_all(&cur);
+            let _ = std::fs::rename(&rollback_copy, &cur);
+        }
+        let _ = std::fs::remove_dir_all(&rollback_copy);
+    }
+    let bak_legacy = backup.join("data").join("db.json");
+    if bak_legacy.exists() {
+        let legacy = crate::store::data_dir().join("db.json");
+        let _ = std::fs::copy(&bak_legacy, &legacy);
+        let _ = std::fs::remove_file(&bak_legacy);
     }
     let _ = std::fs::remove_dir_all(&backup);
     tokio::spawn(async {
@@ -430,4 +449,21 @@ fn unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
 fn touch() {
     let _ = store();
     let _ = util::now_i();
+}
+
+
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {}", e))?;
+    let rd = std::fs::read_dir(src).map_err(|e| format!("读取目录失败: {}", e))?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_file() {
+            let name = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+            if name.ends_with(".tmp") || name.contains(".corrupt-") || name.contains(".rollback") {
+                continue;
+            }
+            std::fs::copy(&p, dst.join(&name)).map_err(|err| format!("拷贝 {} 失败: {}", name, err))?;
+        }
+    }
+    Ok(())
 }

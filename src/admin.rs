@@ -159,10 +159,6 @@ fn query_get(query: &Option<String>, key: &str) -> String {
 // ---------------------------------------------------------------- 路由处理
 
 pub async fn login(headers: &HeaderMap, ip: String, body: Bytes) -> Response {
-    if !login_rate_ok(&ip) {
-        let body = json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试", "type": "auth"}});
-        return (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response();
-    }
     let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let cfg = store().load();
     let cfg = cfg.get("config").cloned().unwrap_or(json!({}));
@@ -170,7 +166,14 @@ pub async fn login(headers: &HeaderMap, ip: String, body: Bytes) -> Response {
     let password = util::str_or(body_v.get("password"), "");
     let ok_user = username.to_lowercase() == util::str_or(cfg.get("admin_username"), "").to_lowercase();
     let ok_pass = verify_password(&password, &util::str_or(cfg.get("admin_password_hash"), ""));
+    // 先验证、失败才计入限流预算：反代/公网部署下所有流量共享同一个来源 IP，
+    // 扫描机器人的垃圾请求会把 10 次预算永远占满，正确口令也被 429 挡在门外
+    // （暴力破解防护不受影响：同一 IP 每5分钟仍只有 10 次错误尝试的机会）
     if !(ok_user && ok_pass) {
+        if !login_rate_ok(&ip) {
+            let body = json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试", "type": "auth"}});
+            return (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response();
+        }
         let body = json!({"error": {"message": "账号或密码错误", "type": "auth"}});
         return (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response();
     }
