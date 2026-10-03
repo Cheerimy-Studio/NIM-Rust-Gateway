@@ -1,0 +1,61 @@
+name: Release
+
+# 打 tag（v*）→ 双平台构建 → 发布 GitHub Release。
+# Release 资产是各实例的自动更新源（/releases/latest 只认正式 Release，
+# draft 与 prerelease 不会被线上实例收到）。
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Install zig toolchain (glibc 2.17 cross build)
+        run: pip install cargo-zigbuild ziglang
+      - name: Build (glibc 2.17)
+        run: cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17
+      - name: Package
+        run: tar -czf nim-gateway-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release nim-gateway
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: nim-gateway-linux-x86_64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        run: tar -czf nim-gateway-windows-x86_64.tar.gz -C target/release nim-gateway.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows
+          path: nim-gateway-windows-x86_64.tar.gz
+
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            && gh release upload "$GITHUB_REF_NAME" dist/* --clobber \
+            || gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"

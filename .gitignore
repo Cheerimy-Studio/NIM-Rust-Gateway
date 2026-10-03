@@ -1,0 +1,7 @@
+/target
+/data
+/backup
+*.tar.gz
+__pycache__/
+last-gateway-stderr.log
+*.exe.old
