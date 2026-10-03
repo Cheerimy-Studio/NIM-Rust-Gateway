@@ -563,9 +563,9 @@ pub fn self_restart(reason: &str) -> bool {
     if RESTARTING.swap(true, Ordering::SeqCst) {
         return false;
     }
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(_) => {
+    let exe = match update::exe_path() {
+        Some(e) => e,
+        None => {
             RESTARTING.store(false, Ordering::SeqCst);
             return false;
         }
@@ -870,6 +870,10 @@ async fn main() {
         }
     }
 
+    // 启动即捕获自身路径：运行中被替换/删除后仍能更新与重启
+    if let Ok(p) = std::env::current_exe() {
+        update::set_exe_path(p);
+    }
     let store_ref = store();
     upstreams::ensure_default();
     {

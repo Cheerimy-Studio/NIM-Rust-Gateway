@@ -23,8 +23,28 @@ const DEFAULT_REPO: &str = "Cheerimy-Studio/NIM-Rust-Gateway";
 // 触发源有手动端点与定时自动检查两条，必须串行。
 static UPDATE_IN_PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn current_exe() -> Option<PathBuf> {
-    std::env::current_exe().ok()
+/// 进程启动时捕获的可执行文件路径。
+///
+/// 运行中二进制被替换/删除后（面板覆盖部署、上一次更新换过文件），
+/// Linux 的 /proc/self/exe 会变成 "... (deleted)" 且原路径可能已不存在 ——
+/// 更新/重启若在那一刻重新解析路径，就会「备份当前二进制」失败把更新卡死。
+/// 启动时路径一定存在，以它为准。
+static EXE_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_exe_path(p: PathBuf) {
+    let _ = EXE_PATH.set(p);
+}
+
+pub fn exe_path() -> Option<PathBuf> {
+    if let Some(p) = EXE_PATH.get() {
+        return Some(p.clone());
+    }
+    let raw = std::env::current_exe().ok()?;
+    let s = raw.to_string_lossy().to_string();
+    if let Some(stripped) = s.strip_suffix(" (deleted)") {
+        return Some(PathBuf::from(stripped));
+    }
+    Some(raw)
 }
 
 fn http_client() -> reqwest::Client {
@@ -219,9 +239,17 @@ fn backup_current() -> Result<(), String> {
     let base = base_dir();
     let backup = base.join("backup");
     std::fs::create_dir_all(&backup).map_err(|e| format!("创建备份目录失败: {}", e))?;
-    if let Some(exe) = current_exe() {
+    if let Some(exe) = exe_path() {
         let dst = backup.join(if cfg!(windows) { "nim-gateway.exe.bak" } else { "nim-gateway.bak" });
-        std::fs::copy(&exe, &dst).map_err(|e| format!("备份可执行文件失败: {}", e))?;
+        match std::fs::copy(&exe, &dst) {
+            Ok(_) => {}
+            // 启动后文件被替换/删除（面板重新部署过）时源文件可能已不存在：
+            // 不能因此把整个更新卡死——数据备份照做，只是本次没有二进制可回滚
+            Err(e) => eprintln!(
+                "[update] 警示：备份当前二进制失败（{}: {}）；本次更新的回滚将只能还原数据",
+                exe.display(), e
+            ),
+        }
     }
     // 数据备份：分表目录整目录拷贝（保留旧版单文件兼容）
     let db_dir = crate::store::db_dir();
@@ -242,7 +270,7 @@ fn base_dir() -> PathBuf {
     std::env::var("NGW_BASE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            current_exe()
+            exe_path()
                 .and_then(|p| p.parent().map(|x| x.to_path_buf()))
                 .unwrap_or_else(|| PathBuf::from("."))
         })
@@ -309,7 +337,7 @@ async fn remote_update_inner() -> (bool, String) {
         let _ = std::fs::remove_dir_all(&tmp);
         return (true, "演练通过:更新包完整,二进制在位;DRYRUN 未覆盖文件".into());
     }
-    let Some(exe) = current_exe() else {
+    let Some(exe) = exe_path() else {
         let _ = std::fs::remove_dir_all(&tmp);
         return (false, "无法定位当前可执行文件".into());
     };
@@ -360,7 +388,7 @@ async fn remote_rollback_inner() -> (bool, String) {
     if !bak_exe.exists() {
         return (false, "没有可用备份".into());
     }
-    let Some(exe) = current_exe() else {
+    let Some(exe) = exe_path() else {
         return (false, "无法定位当前可执行文件".into());
     };
     let old = exe.with_extension("old");
