@@ -203,28 +203,29 @@ pub fn verify_password(pw: &str, stored: &str) -> bool {
     dk.ct_eq(&dk_stored).into()
 }
 
-/// 目录指纹：条目数 + 目录 mtime。表文件始终以「临时文件 + rename」落盘，
-/// rename 会刷新目录 mtime，因此本进程写盘与外部改动都能被识别。
+/// 表文件指纹：只统计 9 张表文件的 (mtime 秒, 大小) 汇总。
+/// 刻意忽略 .tmp / .corrupt：flush 期间临时文件的存在会让「目录级」指纹瞬时变化，
+/// 被误判成外部改动 → 重读磁盘 → 把尚未落盘的内存变更丢掉（实测丢过训练记录）。
+/// 该指纹只服务于「检测手工/外部编辑」，漏检的代价仅是下次重启才生效，误检代价是数据丢失，
+/// 因此宁可迟钝也要稳定。
 fn dir_fingerprint() -> (i64, usize) {
-    let dir = db_dir();
-    let Ok(rd) = fs::read_dir(&dir) else { return (0, 0) };
-    let mut count = 0usize;
     let mut newest: i64 = 0;
-    for e in rd.flatten() {
-        count += 1;
-        if let Ok(md) = e.metadata() {
-            if let Ok(t) = md.modified() {
-                let secs = t
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                if secs > newest {
-                    newest = secs;
-                }
+    let mut total: usize = 0;
+    for (group, _) in GROUPS {
+        let p = group_file(group);
+        let Ok(md) = fs::metadata(&p) else { continue };
+        total += md.len() as usize;
+        if let Ok(t) = md.modified() {
+            let secs = t
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if secs > newest {
+                newest = secs;
             }
         }
     }
-    (newest, count)
+    (newest, total)
 }
 
 fn write_group_file(group: &str, payload: &str) -> Result<(), String> {
@@ -351,6 +352,18 @@ impl Store {
             inner.memo_at = Instant::now();
             return inner.memo.clone().unwrap();
         }
+        // 指纹不符时，若内存里还有未落盘变更：先落盘，避免随后的重读把变更丢掉
+        // （flush 会同时刷新指纹，之后再看就是「无外部改动」）
+        if inner.memo.is_some() && inner.dirty {
+            drop(inner);
+            self.flush();
+            inner = self.inner.lock().unwrap();
+            let fp2 = dir_fingerprint();
+            if inner.memo.is_some() && inner.dir_fp == Some(fp2) {
+                inner.memo_at = Instant::now();
+                return inner.memo.clone().unwrap();
+            }
+        }
         // 分表读取
         let mut db = Value::Object(Obj::new());
         let mut loaded_any = false;
@@ -419,8 +432,14 @@ impl Store {
             bump_gen();
             return inner.memo.clone().unwrap();
         }
-        // memo 失效（外部改动/首次）：重读后在新快照上应用变更
+        // memo 失效（外部改动/首次）：先把自己未落盘的变更写下去，再重读，
+        // 否则重读会把只有内存里才有的变更静默覆盖掉
+        let has_memo = inner.memo.is_some();
+        let dirty = inner.dirty;
         drop(inner);
+        if has_memo && dirty {
+            self.flush();
+        }
         let mut db = self.load();
         let mut inner = self.inner.lock().unwrap();
         f(&mut db);
@@ -431,38 +450,38 @@ impl Store {
         db
     }
 
-    /// 把内存态按表落盘：只写内容有变化的表。磁盘写在锁外执行。
+    /// 把内存态按表落盘：只写内容有变化的表。
+    ///
+    /// 写文件刻意放在锁内：若在锁外写，写盘期间 `dirty` 已被清空、磁盘又是「写了一半」
+    /// 的状态，任何并发读盘都会把快照里已有、尚未写出的记录从内存里挤掉（实测丢过
+    /// 训练记录）。每张表按需写、通常只有几十 KB 到 1MB，持锁几毫秒换取数据一致性。
     pub fn flush(&self) {
-        let (snapshot, mut saved, mut dirty_now) = {
-            let mut inner = self.inner.lock().unwrap();
-            if !inner.dirty || inner.memo.is_none() {
-                return;
-            }
-            inner.dirty = false;
-            (inner.memo.clone().unwrap(), inner.saved.clone(), false)
-        };
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.dirty || inner.memo.is_none() {
+            return;
+        }
+        let snapshot = inner.memo.clone().unwrap();
+        let mut all_ok = true;
         for (gi, (group, keys)) in GROUPS.iter().enumerate() {
             let obj = extract_group(&snapshot, keys);
             let hash = group_hash(&obj);
-            if hash == saved[gi] {
+            if hash == inner.saved[gi] {
                 continue; // 该表没变，跳过 —— 大表（training/logs）不反复重写
             }
             let payload = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".into());
             match write_group_file(group, &payload) {
-                Ok(()) => saved[gi] = hash,
+                Ok(()) => inner.saved[gi] = hash,
                 Err(e) => {
                     warn_persist(&e);
-                    dirty_now = true; // 写失败的表保持旧哈希：下一轮 flush 会再试
+                    all_ok = false; // 失败的表保持旧哈希：下一轮 flush 只重试它
                 }
             }
         }
-        let mut inner = self.inner.lock().unwrap();
-        inner.saved = saved;
-        // 指纹刷新与本轮写盘同锁：避免「写完 → 别的线程 stat 到新文件 → 误判外部改动重读」
-        inner.dir_fp = Some(dir_fingerprint());
-        if dirty_now {
-            inner.dirty = true;
+        if all_ok {
+            inner.dirty = false;
         }
+        // 指纹刷新与写盘同锁：本进程写盘不会被误判成「外部改动」
+        inner.dir_fp = Some(dir_fingerprint());
     }
 }
 

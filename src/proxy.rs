@@ -1341,7 +1341,6 @@ async fn run_pump(
             .unwrap_or_else(|| buf.clone());
         emit_bytes!(Bytes::from(rewritten));
     }
-    drop(tx);
     // 统计与释放（恰好一次）
     let ms = ctx.t0.elapsed().as_millis() as i64;
     let ttfb = if first_chunk_at > 0.0 {
@@ -1396,6 +1395,10 @@ async fn run_pump(
         let req_v: Value = serde_json::from_str(&ctx.body).unwrap_or(Value::Null);
         record_training(&cfgv, &ctx.ep_tag, &ctx.model, train_messages(&req_v), &content, &reasoning, Some(&usage)).await;
     }
+    // 响应体在「释放 + 记录」全部完成之后才关闭：客户端一收到流结束，
+    // 训练记录/释放日志就必须已经在库里（与 Python 生成器 finally 的语义一致），
+    // 否则紧接着的查询会看不到刚结束的对话（实测套件就因此失败）
+    drop(tx);
 }
 
 /// 包装为 axum 响应：pump 在后台任务中运行。

@@ -589,14 +589,43 @@ pub fn self_restart(reason: &str) -> bool {
     }
     #[cfg(not(unix))]
     {
-        match std::process::Command::new(exe).args(args).env("NGW_RESTART_CHILD", "1").spawn() {
-            Ok(_) => std::process::exit(0),
-            Err(e) => {
-                RESTARTING.store(false, Ordering::SeqCst);
-                eprintln!("[restart] 无法自助重启：{}", e);
-                false
+        // 刚刚替换过 exe：杀毒/索引器可能短暂锁住新文件导致启动失败，
+        // 重试几次再放弃（旧进程在此期间继续服务，不产生停机）
+        let mut last = String::new();
+        for attempt in 0..3 {
+            match std::process::Command::new(&exe).args(&args).env("NGW_RESTART_CHILD", "1").spawn() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    last = e.to_string();
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
             }
         }
+        RESTARTING.store(false, Ordering::SeqCst);
+        eprintln!("[restart] 无法自助重启：{}", last);
+        // 界面上已显示「更新完成」，这里必须留下可见痕迹，否则版本静默停留在旧版
+        let row = json!([
+            util::now_i(), "watch", "updater", "-", 500, 0,
+            util::str_cut(&format!("[网关异常] 自助重启失败：{}；更新包已就位，请手动重启进程", last), 140),
+            "-", 1, "", 0, 0, 0, 0,
+        ]);
+        let max_logs = store()
+            .load()
+            .pointer("/config/log_max")
+            .and_then(util::py_int)
+            .unwrap_or(200)
+            .max(0) as usize;
+        store().update(|db| {
+            if let Some(o) = db.as_object_mut() {
+                let logs = o.entry("logs").or_insert_with(|| serde_json::Value::Array(vec![]));
+                if let Some(a) = logs.as_array_mut() {
+                    a.insert(0, row);
+                    a.truncate(max_logs);
+                }
+            }
+        });
+        store().flush();
+        false
     }
 }
 
