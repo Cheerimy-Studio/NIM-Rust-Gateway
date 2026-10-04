@@ -1,10 +1,9 @@
 const $ = s => document.querySelector(s);
-const B = '';
 
 async function api(path, opts = {}) {
   const init = {method: opts.method || 'GET', headers: {}};
   if (opts.json !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.json); }
-  const res = await fetch(B + 'api/user/' + path, init);
+  const res = await fetch('api/user/' + path, init);
   let data = null;
   try { data = await res.json(); } catch (e) { }
   if (!res.ok) throw new Error((data && data.error && data.error.message) || ('HTTP ' + res.status));
@@ -29,25 +28,54 @@ function fmtTime(t) {
   return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true).catch(() => fallbackCopy(text));
+  }
+  return Promise.resolve(fallbackCopy(text));
+}
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+function uiConfirm(msg) { return window.confirm(msg); }
+
 let ME = null;
+
+function showLogin() {
+  $('#login-view').style.display = 'flex';
+  $('#panel-view').style.display = 'none';
+}
+function showPanel() {
+  $('#login-view').style.display = 'none';
+  $('#panel-view').style.display = 'block';
+}
 
 async function loadMe() {
   ME = await api('me');
-  $('#balance').textContent = (ME.balance ?? 0).toFixed(2);
-  $('#chip-free').textContent = '免费模型限速 ' + (ME.free_rpm > 0 ? ME.free_rpm + ' 次/分' : '不限');
-  $('#chip-paid').textContent = '付费模型限速 ' + (ME.paid_rpm > 0 ? ME.paid_rpm + ' 次/分' : '不限');
-  document.querySelector('.top-sub').textContent = 'USER PORTAL · ' + ME.username;
+  $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
+  $('#ov-frpm').textContent = ME.free_rpm > 0 ? ME.free_rpm : '不限';
+  $('#ov-prpm').textContent = ME.paid_rpm > 0 ? ME.paid_rpm : '不限';
+  $('#ov-prpm-sub').textContent = ME.paid_rpm > 0 ? '次 / 分钟' : '关闭';
 }
 
 async function loadKeys() {
   const rows = (await api('keys')).rows || [];
   const tb = $('#key-rows');
   tb.innerHTML = '';
-  if (!rows.length) { tb.innerHTML = '<tr><td colspan="5" class="hint">还没有 Key，点上方「生成新 Key」创建</td></tr>'; return; }
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="5" class="hint">还没有 Key</td></tr>'; return; }
   for (const k of rows) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td>' + (k.name || '未命名') + '</td>'
-      + '<td class="key-mono">' + k.key.slice(0, 14) + '…' + '</td>'
+      + '<td class="key-mono">' + k.key.slice(0, 14) + '…</td>'
       + '<td>' + (k.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>'
       + '<td class="small text-muted">' + fmtTime(k.last_used_at) + '</td>'
       + '<td class="text-end"></td>';
@@ -65,37 +93,14 @@ async function loadKeys() {
     del.className = 'btn btn-sm btn-outline-danger';
     del.textContent = '删除';
     del.onclick = () => run(async () => {
-      if (!await uiConfirm('删除该 Key？使用它的调用将立即失效。', {danger: true, okText: '删除'})) return;
+      if (!uiConfirm('删除该 Key？')) return;
       await api('keys/op', {method: 'POST', json: {id: k.id, op: 'delete'}});
-      toast('已删除');
-      loadKeys();
+      toast('已删除'); loadKeys();
     });
     op.append(copy, tog, del);
     tr.appendChild(op);
     tb.appendChild(tr);
   }
-}
-
-function copyText(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text).then(() => fallbackCopy(text));
-  }
-  return Promise.resolve(fallbackCopy(text));
-}
-function fallbackCopy(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
-  document.body.appendChild(ta);
-  ta.select();
-  let ok = false;
-  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-  document.body.removeChild(ta);
-  return ok;
-}
-
-function uiConfirm(msg, opts = {}) {
-  return window.confirm(msg);
 }
 
 async function loadLogs() {
@@ -137,15 +142,15 @@ async function loadModels() {
   }
 }
 
-document.querySelectorAll('.nav-pills .nav-link').forEach(a => {
+document.querySelectorAll('.sidebar nav a').forEach(a => {
   a.addEventListener('click', e => {
     e.preventDefault();
-    document.querySelectorAll('.nav-pills .nav-link').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.sidebar nav a').forEach(x => x.classList.remove('active'));
     a.classList.add('active');
     document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
     $('#pane-' + a.dataset.p).classList.add('active');
-    if (a.dataset.p === 'logs') loadLogs();
-    if (a.dataset.p === 'models') loadModels();
+    if (a.dataset.p === 'logs') run(() => loadLogs());
+    if (a.dataset.p === 'models') run(() => loadModels());
   });
 });
 
@@ -156,11 +161,36 @@ $('#key-add').onclick = () => run(async () => {
   loadKeys();
 });
 
-$('#btn-logout').onclick = () => run(async () => { await api('logout', {method: 'POST'}); location.href = '/user'; });
+$('#btn-logout').onclick = () => run(async () => { await api('logout', {method: 'POST'}); showLogin(); });
+
+$('#login-go').onclick = async () => {
+  const err = $('#login-err');
+  err.style.display = 'none';
+  try {
+    const r = await fetch('api/user/login', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: $('#login-user').value.trim(), password: $('#login-pass').value})});
+    if (!r.ok) {
+      const d = await r.json().catch(() => null);
+      err.textContent = (d && d.error && d.error.message) || '登录失败';
+      err.style.display = 'block';
+      return;
+    }
+    showPanel();
+    await loadMe();
+    await loadKeys();
+  } catch (e) {
+    err.textContent = e.message || '登录失败';
+    err.style.display = 'block';
+  }
+};
+$('#login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#login-go').click(); });
 
 (async () => {
   try {
     await loadMe();
+    showPanel();
     await loadKeys();
-  } catch (e) { location.href = '/user'; }
+  } catch (e) {
+    showLogin();
+  }
 })();

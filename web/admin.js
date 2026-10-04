@@ -147,8 +147,10 @@ const LOADERS = {
   sessions: () => loadSessions(),
   settings: () => loadSettings(),
   docs: () => fillDocs(),
-  users: loadUsers
-};;
+  users: loadUsers,
+  users: loadUsers,
+  prices: loadPrices
+};;;
 function activate(name) {
   $$('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.pane === name));
   $$('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
@@ -1847,6 +1849,137 @@ document.addEventListener('DOMContentLoaded', () => {
       if (panel) refreshKeyPanel(keysState2.openId, panel);
     }
   }, 10000);
+});
+
+
+// ---------------- 模型定价 ----------------
+let _priceRows = [];
+
+async function loadPrices() {
+  const data = await api('prices');
+  _priceRows = data.rows || [];
+  renderPrices();
+  const sel = $('#price-channel');
+  const chs = [...new Set(_priceRows.map(r => r.channel_name))];
+  sel.innerHTML = '<option value="">选择渠道</option>' + chs.map(c => `<option>${c}</option>`).join('');
+}
+
+function renderPrices() {
+  const tb = $('#price-rows');
+  tb.innerHTML = '';
+  for (const r of _priceRows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + r.channel_name + '</td>'
+      + '<td class="mono fw-semibold">' + r.model + '</td>'
+      + '<td><input type="number" step="0.001" min="0" class="form-control form-control-sm price-input" '
+      + 'data-ch="' + r.channel_id + '" data-model="' + r.model + '" value="' + (r.price || 0) + '" style="width:100px"></td>'
+      + '<td>' + (r.free ? '<span class="badge badge-free">免费</span>' : '<span class="badge badge-paid">付费</span>') + '</td>'
+      + '<td class="small text-muted">' + (r.enabled ? '' : '<span class="badge bg-secondary">渠道停用</span>') + '</td>';
+    tb.appendChild(tr);
+  }
+}
+
+$('#price-add').onclick = guard(async () => {
+  const ch = $('#price-channel').value;
+  const model = $('#price-model').value.trim();
+  const val = parseFloat($('#price-val').value) || 0;
+  if (!ch || !model) { toast('请选择渠道并填写模型名', 'danger'); return; }
+  const exist = _priceRows.find(r => r.channel_name === ch && r.model === model);
+  if (exist) { exist.price = val; exist.free = val <= 0; renderPrices(); return; }
+  _priceRows.push({channel_id: _priceRows.find(r => r.channel_name === ch)?.channel_id || '',
+    channel_name: ch, model: model, price: val, free: val <= 0, enabled: true});
+  renderPrices();
+});
+
+$('#prices-save').onclick = guard(async () => {
+  const byChannel = {};
+  document.querySelectorAll('.price-input').forEach(inp => {
+    const ch = inp.dataset.ch, model = inp.dataset.model, val = parseFloat(inp.value) || 0;
+    if (!byChannel[ch]) byChannel[ch] = {};
+    byChannel[ch][model] = val;
+  });
+  for (const [chId, prices] of Object.entries(byChannel)) {
+    await api('prices', {method: 'POST', json: {channel_id: chId, prices: prices}});
+  }
+  toast('定价已保存');
+  loadPrices();
+});
+
+// ---------------- 用户管理 ----------------
+async function loadUsers() {
+  const rows = (await api('users')).rows || [];
+  const tb = $('#usr-rows');
+  tb.innerHTML = '';
+  for (const u of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="fw-semibold">' + u.username + '</td>'
+      + '<td class="fw-semibold">¥' + (u.balance ?? 0).toFixed(2) + '</td>'
+      + '<td>' + (u.key_count ?? 0) + '</td>'
+      + '<td class="small">' + (u.free_rpm > 0 ? u.free_rpm + ' 次/分' : '不限') + '</td>'
+      + '<td class="small">' + (u.paid_rpm > 0 ? u.paid_rpm + ' 次/分' : '关闭') + '</td>'
+      + '<td>' + (u.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>'
+      + '<td class="small text-muted">' + new Date(u.created_at * 1000).toLocaleDateString() + '</td>';
+    const td = document.createElement('td');
+    td.className = 'text-end text-nowrap';
+    const bal = document.createElement('button');
+    bal.className = 'btn btn-sm btn-outline-secondary me-1';
+    bal.textContent = '余额';
+    bal.onclick = () => run(async () => {
+      const v = await uiPrompt('设置 ' + u.username + ' 的余额（元）', String(u.balance ?? 0));
+      if (v === null) return;
+      await api('users/op', {method: 'POST', json: {id: u.id, op: 'set-balance', balance: parseFloat(v) || 0}});
+      toast('余额已更新'); loadUsers();
+    });
+    const lim = document.createElement('button');
+    lim.className = 'btn btn-sm btn-outline-secondary me-1'; lim.textContent = '限速';
+    lim.onclick = () => run(async () => {
+      const f = await uiPrompt('免费模型每分钟上限（0=不限）', String(u.free_rpm ?? 0));
+      if (f === null) return;
+      const p = await uiPrompt('付费模型每分钟上限（0=关闭）', String(u.paid_rpm ?? 0));
+      if (p === null) return;
+      await api('users/op', {method: 'POST', json: {id: u.id, op: 'set-limits', free_rpm: parseInt(f) || 0, paid_rpm: parseInt(p) || 0}});
+      toast('限速已更新'); loadUsers();
+    });
+    const pw = document.createElement('button');
+    pw.className = 'btn btn-sm btn-outline-secondary me-1'; pw.textContent = '改密';
+    pw.onclick = () => run(async () => {
+      const v = await uiPrompt('为 ' + u.username + ' 设置新密码（至少 6 位）');
+      if (!v) return;
+      await api('users/op', {method: 'POST', json: {id: u.id, op: 'reset-password', password: v}});
+      toast('密码已重置');
+    });
+    const tog = document.createElement('button');
+    tog.className = 'btn btn-sm btn-outline-secondary me-1';
+    tog.textContent = u.enabled ? '停用' : '启用';
+    tog.onclick = () => run(async () => {
+      await api('users/op', {method: 'POST', json: {id: u.id, op: u.enabled ? 'disable' : 'enable'}});
+      toast('已' + tog.textContent); loadUsers();
+    });
+    const del = document.createElement('button');
+    del.className = 'btn btn-sm btn-outline-danger'; del.textContent = '删除';
+    del.onclick = () => run(async () => {
+      if (!await uiConfirm('删除用户 ' + u.username + '？其调用 Key 将一并停用。', {danger: true, okText: '删除'})) return;
+      await api('users/op', {method: 'POST', json: {id: u.id, op: 'delete'}});
+      toast('已删除'); loadUsers();
+    });
+    td.append(bal, lim, pw, tog, del);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+  if (!rows.length) tb.innerHTML = '<tr><td colspan="8" class="text-muted small">还没有用户</td></tr>';
+}
+
+$('#usr-add').onclick = guard(async () => {
+  const name = $('#usr-name').value.trim();
+  const pw = $('#usr-pw').value;
+  if (!name || pw.length < 6) { toast('用户名必填，密码至少 6 位', 'danger'); return; }
+  await api('users', {method: 'POST', json: {
+    username: name, password: pw,
+    balance: parseFloat($('#usr-bal').value) || 0,
+    free_rpm: parseInt($('#usr-frpm').value) || 0, paid_rpm: 0,
+  }});
+  $('#usr-name').value = ''; $('#usr-pw').value = ''; $('#usr-bal').value = '0';
+  toast('用户已添加'); loadUsers();
 });
 
 })();

@@ -290,3 +290,30 @@ pub async fn refresh_login(headers: &HeaderMap) -> Response {
             .into_response(),
     }
 }
+
+
+/// 用户面板概览统计：总调用次数、总消费、Key 数、最近 5 条日志。
+pub async fn stats(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
+    let db = store().load();
+    let logs = db.get("user_logs").and_then(|l| l.as_array()).cloned().unwrap_or_default();
+    let my_logs: Vec<&Value> = logs.iter().filter(|r| util::str_or(r.get("user_id"), "") == uid).collect();
+    let total_calls = my_logs.len() as i64;
+    let total_cost: f64 = my_logs.iter().map(|r| util::f64_or(r.get("cost"), 0.0)).sum();
+    let key_count = db.get("user_tokens").and_then(|t| t.as_array())
+        .map(|a| a.iter().filter(|t| util::str_or(t.get("user_id"), "") == uid
+            && t.get("enabled").map(util::truthy).unwrap_or(false)).count())
+        .unwrap_or(0);
+    let recent: Vec<Value> = my_logs.iter().take(5).map(|r| json!({
+        "t": util::int_or(r.get("t"), 0),
+        "model": util::str_or(r.get("model"), ""),
+        "st": util::int_or(r.get("st"), 0),
+        "cost": util::f64_or(r.get("cost"), 0.0),
+    })).collect();
+    json_resp(json!({
+        "total_calls": total_calls,
+        "total_cost": util::round6(total_cost),
+        "key_count": key_count,
+        "recent": recent,
+    }))
+}

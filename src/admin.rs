@@ -1747,3 +1747,87 @@ pub async fn users_op(headers: &HeaderMap, body: Bytes) -> Response {
     store().flush();
     json_resp(json!({"ok": true}))
 }
+
+
+// ============================================================ 模型定价
+
+/// 聚合所有渠道的模型定价，供管理端定价面板展示。
+pub async fn prices_list(headers: &HeaderMap) -> Response {
+    if let Err(e) = require(headers, false) { return e; }
+    let db = store().load();
+    let ups = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
+    let mut rows: Vec<Value> = Vec::new();
+    for u in &ups {
+        let ch_id = util::str_or(u.get("id"), "");
+        let ch_name = util::str_or(u.get("name"), "");
+        let enabled = u.get("enabled").map(util::truthy).unwrap_or(false);
+        let prices = u.get("prices").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        // models 白名单里的模型
+        if let Some(ms) = u.get("models").and_then(|m| m.as_array()) {
+            for m in ms {
+                let model = util::str_or(Some(m), "");
+                if model.is_empty() || !seen.insert(model.clone()) { continue; }
+                let price = prices.get(&model).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                rows.push(json!({"channel_id": ch_id, "channel_name": ch_name,
+                    "model": model, "price": if price > 0.0 { json!(util::round6(price)) } else { json!(0) },
+                    "free": price <= 0.0, "enabled": enabled}));
+            }
+        }
+        // model_map 别名
+        if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
+            for (alias, target) in mm {
+                let target_name = util::str_or(Some(target), "");
+                if target_name.is_empty() || !seen.insert(alias.clone()) { continue; }
+                let price = prices.get(&target_name).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                rows.push(json!({"channel_id": ch_id, "channel_name": ch_name,
+                    "model": alias, "price": if price > 0.0 { json!(util::round6(price)) } else { json!(0) },
+                    "free": price <= 0.0, "enabled": enabled}));
+            }
+        }
+        // prices 里已设价但不在 models/model_map 里的（透传渠道场景）
+        for (model, pv) in &prices {
+            if seen.contains(model) { continue; }
+            let price = pv.as_f64().unwrap_or(0.0);
+            rows.push(json!({"channel_id": ch_id, "channel_name": ch_name,
+                "model": model, "price": if price > 0.0 { json!(util::round6(price)) } else { json!(0) },
+                "free": price <= 0.0, "enabled": enabled}));
+        }
+    }
+    json_resp(json!({"rows": rows}))
+}
+
+/// 保存某个渠道的模型定价。body: {channel_id, prices: {model: price}}
+pub async fn prices_save(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) { return e; }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "请求体格式错误"}}))).into_response();
+    };
+    let ch_id = util::str_or(body.get("channel_id"), "");
+    let Some(new_prices) = body.get("prices").and_then(|p| p.as_object()) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "缺少 prices 字段"}}))).into_response();
+    };
+    if ch_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "缺少 channel_id"}}))).into_response();
+    }
+    store().update(|db| {
+        if let Some(ups) = db.get_mut("upstreams").and_then(|u| u.as_array_mut()) {
+            for u in ups.iter_mut() {
+                if util::str_or(u.get("id"), "") != ch_id { continue; }
+                if let Some(o) = u.as_object_mut() {
+                    let mut cleaned = serde_json::Map::new();
+                    for (k, v) in new_prices {
+                        let price = v.as_f64().unwrap_or(0.0);
+                        if price > 0.0 {
+                            cleaned.insert(k.clone(), json!(util::round6(price)));
+                        }
+                    }
+                    o.insert("prices".into(), Value::Object(cleaned));
+                }
+                break;
+            }
+        }
+    });
+    store().flush();
+    json_resp(json!({"ok": true}))
+}

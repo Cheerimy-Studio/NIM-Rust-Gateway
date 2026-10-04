@@ -29,8 +29,7 @@ a{text-decoration:none}
 .sidebar nav a:hover{color:#e3eaf5;background:rgba(255,255,255,.05)}
 .sidebar nav a.active{color:#fff;background:linear-gradient(90deg,rgba(16,185,129,.3),rgba(16,185,129,.05))}
 .sidebar nav a.active::before{content:"";position:absolute;left:-10px;top:8px;bottom:8px;width:3px;border-radius:3px;background:#10b981}
-.sidebar .nav-label{font-size:10px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;
-  color:#57657d;padding:13px 12px 5px}
+.sidebar .nav-label{font-size:10px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;color:#57657d;padding:13px 12px 5px}
 .sidebar .foot{padding:8px 10px;border-top:1px solid rgba(255,255,255,.06)}
 .sidebar .foot button{color:#8d9bb2;font-size:13px;border-radius:var(--r-sm);padding:7px 11px;display:inline-flex;align-items:center;gap:6px;
   transition:all .13s ease;border:0;background:transparent;cursor:pointer;width:100%}
@@ -82,6 +81,18 @@ a{text-decoration:none}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:#c6d0de;border-radius:6px}
+#login-view{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+  background:radial-gradient(1200px 600px at 20% -10%,#1d3561 0%,transparent 60%),
+             radial-gradient(1000px 500px at 110% 110%,#17306b 0%,transparent 55%),
+             linear-gradient(160deg,#0d1526 0%,#0a1120 100%)}
+.login-card{width:100%;max-width:372px;border:0;border-radius:16px;padding:34px 30px 28px;background:#fff;
+  box-shadow:0 28px 80px rgba(2,8,20,.55)}
+.login-mark{width:44px;height:44px;border-radius:12px;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-weight:800;font-size:20px;
+  box-shadow:0 6px 18px rgba(16,185,129,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.login-title{text-align:center;font-size:17px;font-weight:700;color:#1c2536;margin-bottom:4px}
+.login-sub{text-align:center;font-size:11px;color:#98a3b8;letter-spacing:1.6px;text-transform:uppercase;margin-bottom:22px}
+.login-err{display:none;color:#dc2626;font-size:13px;margin-bottom:10px}
 @media(max-width:860px){
   .layout{flex-direction:column}
   .sidebar{width:100%;height:auto;position:static}
@@ -93,6 +104,23 @@ a{text-decoration:none}
 </style>
 </head>
 <body>
+
+<div id="login-view" style="display:none">
+  <div class="login-card">
+    <div class="login-mark">U</div>
+    <div class="login-title">用户中心</div>
+    <div class="login-sub">USER PORTAL</div>
+    <div class="login-err" id="login-err"></div>
+    <div class="mb-3"><label class="form-label small fw-semibold">用户名</label>
+      <input class="form-control" id="login-user" autocomplete="username"></div>
+    <div class="mb-3"><label class="form-label small fw-semibold">密码</label>
+      <input class="form-control" id="login-pass" type="password" autocomplete="current-password"></div>
+    <button class="btn btn-primary" id="login-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+      background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35)">登录</button>
+  </div>
+</div>
+
+<div id="panel-view" style="display:none">
 <div class="layout">
 <aside class="sidebar">
   <div class="brand"><span class="mark">U</span><span class="bt">用户中心<small>User Portal</small></span></div>
@@ -173,6 +201,8 @@ a{text-decoration:none}
 
 </div>
 </div>
+</div>
+
 <script src="/assets/user.js"></script>
 </body>
 </html>

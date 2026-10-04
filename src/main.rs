@@ -441,33 +441,9 @@ async fn h_config_import(headers: HeaderMap, body: Bytes) -> Response {
 
 // ---------------------------------------------------------------- 用户面板
 
-async fn h_user_page(headers: HeaderMap) -> Response {
-    let cfg = store().load();
-    let secret = util::str_or(cfg.get("config").and_then(|c| c.get("session_secret")), "");
-    let session = user_api::cookie_get(&headers, "ngw_user").unwrap_or_default();
-    let authed = user_api::user_session_id_pub(&secret, &session)
-        .map(|uid| user_api::auth_user_pub(&uid).is_some())
-        .unwrap_or(false);
-    if !authed {
-        let mut resp = web_assets::USER_LOGIN_HTML.to_string().into_response();
-        resp.headers_mut().insert(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
-        );
-        resp.headers_mut().insert(
-            axum::http::header::CACHE_CONTROL,
-            axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
-        );
-        resp.headers_mut().insert(
-            axum::http::header::X_FRAME_OPTIONS,
-            axum::http::HeaderValue::from_static("DENY"),
-        );
-        resp.headers_mut().insert(
-            axum::http::header::X_CONTENT_TYPE_OPTIONS,
-            axum::http::HeaderValue::from_static("nosniff"),
-        );
-        return resp;
-    }
+async fn h_user_page() -> Response {
+    // 始终返回同一个 SPA 页面：登录/面板由 JS 根据 /api/user/me 的结果切换，
+    // 不在服务端做跳转——彻底消除重定向循环
     let mut resp = web_assets::USER_HTML.to_string().into_response();
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
@@ -549,6 +525,18 @@ async fn h_users_add(headers: HeaderMap, body: Bytes) -> Response {
 
 async fn h_users_op(headers: HeaderMap, body: Bytes) -> Response {
     admin::users_op(&headers, body).await
+}
+
+async fn h_prices_list(headers: HeaderMap) -> Response {
+    admin::prices_list(&headers).await
+}
+
+async fn h_prices_save(headers: HeaderMap, body: Bytes) -> Response {
+    admin::prices_save(&headers, body).await
+}
+
+async fn h_user_stats(headers: HeaderMap) -> Response {
+    user_api::stats(&headers).await
 }
 
 // ---------------------------------------------------------------- 看门狗 / 自重启
@@ -1166,6 +1154,8 @@ fn build_router() -> Router {
         .route("/api/user/models", get(h_user_models))
         .route("/api/users", get(h_users_list).post(h_users_add))
         .route("/api/users/op", post(h_users_op))
+        .route("/api/prices", get(h_prices_list).post(h_prices_save))
+        .route("/api/user/stats", get(h_user_stats))
         // axum 默认把请求体限制在 2MB：不显式放宽，MAX_BODY=20MB 永远不会生效，
         // 大 prompt 会在提取器阶段被 413 掉。层上限比 MAX_BODY 高 1MB：边界请求
         // 进到处理器里返回友好的「请求体过大」，超过层上限才走 axum 的通用 413
