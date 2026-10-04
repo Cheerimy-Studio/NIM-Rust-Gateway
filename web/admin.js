@@ -262,7 +262,7 @@ async function runBatch(op) {
     const ok = await uiConfirm(`重置选中的 ${ids.length} 个账号的统计与封禁？`);
     if (!ok) return;
   }
-  await guard(async () => {
+  await run(async () => {
     const payload = {op, ids};
     if (op === 'move') payload.upstream_id = $('#batch-up').value;
     const r = await api('keys/batch', {method: 'POST', json: payload});

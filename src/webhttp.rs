@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
 
 pub const MAX_BODY: usize = 20 * 1024 * 1024;
-pub const VERSION: &str = "1.7.7";
+// 跟随 Cargo.toml：历史硬编码导致 1.7.x 各版资源 URL 不变，浏览器一直用旧缓存的 admin.js
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const FALLBACK_MODELS: &[&str] = &[
     "deepseek-ai/deepseek-r1",
