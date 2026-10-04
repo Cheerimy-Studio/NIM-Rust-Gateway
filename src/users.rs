@@ -317,6 +317,22 @@ pub fn lookup_user_key(key: &str) -> Option<(Value, Value)> {
     Some((u, t.clone()))
 }
 
+/// 用户面板对话测试：取本人第一个启用中的 Key；一个都没有则自动建「对话测试」Key。
+pub fn ensure_test_key(user_id: &str) -> Option<String> {
+    for t in list_keys(user_id) {
+        if !t.get("enabled").map(util::truthy).unwrap_or(false) {
+            continue;
+        }
+        let k = util::str_or(t.get("key"), "");
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    let row = add_key(user_id, "对话测试");
+    let k = util::str_or(row.get("key"), "");
+    if k.is_empty() { None } else { Some(k) }
+}
+
 // ---------------------------------------------------------------- 计费与限速
 
 /// 渠道上某模型的单次价格（元/次）。未设置 = 免费模型。

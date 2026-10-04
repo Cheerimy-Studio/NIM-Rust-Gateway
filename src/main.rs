@@ -513,6 +513,10 @@ async fn h_user_models(headers: HeaderMap) -> Response {
     user_api::models(&headers).await
 }
 
+async fn h_user_test_key(headers: HeaderMap) -> Response {
+    user_api::test_key(&headers).await
+}
+
 // ---------------------------------------------------------------- 管理端用户管理
 
 async fn h_users_list(headers: HeaderMap) -> Response {
@@ -1156,6 +1160,7 @@ fn build_router() -> Router {
         .route("/api/user/keys/op", post(h_user_keys_op))
         .route("/api/user/logs", get(h_user_logs))
         .route("/api/user/models", get(h_user_models))
+        .route("/api/user/test-key", post(h_user_test_key))
         .route("/api/users", get(h_users_list).post(h_users_add))
         .route("/api/users/op", post(h_users_op))
         .route("/api/user-logs", get(h_user_logs_admin))

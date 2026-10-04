@@ -78,6 +78,16 @@ a{text-decoration:none}
 .model-card{border:1px solid var(--line);border-radius:var(--r);background:#fff;transition:all .15s ease}
 .model-card:hover{border-color:#d5deea;box-shadow:0 4px 14px rgba(16,24,40,.08)}
 .hint{font-size:12px;color:var(--mut)}
+.tchat{min-height:240px;max-height:52vh;overflow:auto;padding:14px 16px}
+.tmsg{max-width:82%;white-space:pre-wrap;word-break:break-word;padding:.52rem .8rem;
+  border-radius:var(--r-lg);font-size:13px;line-height:1.55;box-shadow:0 1px 2px rgba(15,23,42,.06)}
+.tmsg + .tmsg{margin-top:9px}
+.tmsg.me{background:linear-gradient(135deg,#10b981,#059669);color:#fff;border-bottom-right-radius:4px}
+.tmsg.ai{background:#f4f7fb;color:var(--txt);border:1px solid #e8eef7;border-bottom-left-radius:4px}
+.tmsg.pending{opacity:.6}
+.tmsg .reason{border:1px dashed #cdd8e6;border-radius:var(--r-sm);margin-bottom:.5em;padding:7px 10px;
+  background:rgba(16,185,129,.05);color:#64748b;font-size:12.5px}
+.tmsg .reason-hd{font-size:11px;font-weight:600;color:#98a3b8;margin-bottom:3px}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:#c6d0de;border-radius:6px}
@@ -131,6 +141,7 @@ a{text-decoration:none}
     <a href="javascript:void(0)" data-p="keys"><i class="bi bi-key"></i>API Key</a>
     <a href="javascript:void(0)" data-p="logs"><i class="bi bi-list-ul"></i>调用日志</a>
     <a href="javascript:void(0)" data-p="models"><i class="bi bi-grid-3x3-gap"></i>模型广场</a>
+    <a href="javascript:void(0)" data-p="test"><i class="bi bi-chat-dots"></i>对话测试</a>
   </nav>
   <div class="foot">
     <button id="btn-logout"><i class="bi bi-box-arrow-left"></i>退出登录</button>
@@ -222,6 +233,28 @@ a{text-decoration:none}
   <h2 class="pane-title">模型广场</h2>
   <div class="hint mb-3">标有「免费」的模型余额为 0 也可调用；标价为单次成功调用的费用（失败不计费）。</div>
   <div class="row g-3" id="model-cards"></div>
+</div>
+
+<div class="pane" id="pane-test">
+  <h2 class="pane-title">对话测试</h2>
+  <div class="hint mb-2">真实调用网关：与 API Key 同样计费、限速，调用记录进入「调用日志」；付费模型将扣除余额。</div>
+  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <select id="t-model" class="form-select form-select-sm" style="min-width:250px"></select>
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" id="t-stream" checked>
+      <label class="form-check-label small" for="t-stream">流式</label>
+    </div>
+    <button id="t-clear" class="btn btn-sm btn-outline-secondary">清空对话</button>
+    <span class="small text-muted ms-auto" id="t-diag"></span>
+  </div>
+  <div class="card mb-2">
+    <div class="card-body tchat" id="t-chat"><span class="hint">选择模型后输入消息开始测试。</span></div>
+  </div>
+  <div class="d-flex gap-2">
+    <textarea id="t-input" class="form-control form-control-sm" rows="2"
+      placeholder="输入消息后按 Enter 发送（Shift+Enter 换行）"></textarea>
+    <button id="t-send" class="btn btn-primary px-4">发送</button>
+  </div>
 </div>
 
 </div>

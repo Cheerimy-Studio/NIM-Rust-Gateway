@@ -180,7 +180,158 @@ document.querySelectorAll('.sidebar nav a').forEach(a => {
     $('#pane-' + a.dataset.p).classList.add('active');
     if (a.dataset.p === 'logs') run(() => loadLogs());
     if (a.dataset.p === 'models') run(() => loadModels());
+    if (a.dataset.p === 'test') run(() => loadTestModels());
   });
+});
+
+// ---------------- 对话测试 ----------------
+let tMsgs = [], tKey = null, tBusy = false;
+
+async function ensureTestKey() {
+  if (tKey) return tKey;
+  const d = await api('test-key', {method: 'POST'});
+  tKey = d.key;
+  return tKey;
+}
+
+async function loadTestModels() {
+  const rows = (await api('models')).rows || [];
+  const sel = $('#t-model');
+  const cur = sel.value;
+  sel.innerHTML = '';
+  for (const m of rows) {
+    const o = document.createElement('option');
+    o.value = m.model;
+    o.textContent = m.free ? m.model + '（免费）' : m.model + '（¥' + m.price + ' / 次）';
+    sel.appendChild(o);
+  }
+  if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+
+function tRender() {
+  const box = $('#t-chat');
+  box.innerHTML = '';
+  if (!tMsgs.length) { box.innerHTML = '<span class="hint">选择模型后输入消息开始测试。</span>'; return; }
+  for (const m of tMsgs) {
+    const d = document.createElement('div');
+    d.className = 'tmsg ' + (m.role === 'user' ? 'me' : 'ai') + (m.pending ? ' pending' : '');
+    if (m.role === 'assistant' && m.reasoning) {
+      const r = document.createElement('div');
+      r.className = 'reason';
+      const hd = document.createElement('div');
+      hd.className = 'reason-hd';
+      hd.textContent = '思考';
+      const body = document.createElement('div');
+      body.textContent = m.reasoning;
+      r.append(hd, body);
+      d.appendChild(r);
+    }
+    const txt = document.createElement('span');
+    txt.textContent = m.content || (m.role === 'assistant' && m.pending && !m.reasoning ? '…' : '');
+    d.appendChild(txt);
+    box.appendChild(d);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+async function tSend() {
+  if (tBusy) return;
+  const model = $('#t-model').value;
+  const input = $('#t-input');
+  const text = input.value.trim();
+  if (!model || !text) return;
+  tBusy = true;
+  $('#t-send').disabled = true;
+  tMsgs.push({role: 'user', content: text});
+  input.value = '';
+  const reply = {role: 'assistant', content: '', reasoning: '', pending: true};
+  tMsgs.push(reply);
+  tRender();
+
+  let key = '';
+  try { key = await ensureTestKey(); } catch (e) {
+    reply.pending = false; tRender();
+    tBusy = false; $('#t-send').disabled = false;
+    toast(e.message || '未取得测试 Key', 'danger');
+    return;
+  }
+
+  const stream = $('#t-stream').checked;
+  const t0 = performance.now();
+  let ttfb = null, inTok = 0, outTok = 0, err = '', status = 0;
+  try {
+    const r = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + key, 'X-NGW-Skip-Training': '1'},
+      body: JSON.stringify({model, messages: tMsgs.filter(m => !m.pending), stream}),
+    });
+    status = r.status;
+    if (!stream || !r.body) {
+      const txt = await r.text();
+      let j = null;
+      try { j = JSON.parse(txt); } catch (e) { }
+      ttfb = performance.now() - t0;
+      if (j && j.error) err = (j.error.message || JSON.stringify(j.error)).slice(0, 200);
+      if (j) {
+        reply.content = (((j.choices || [{}])[0]).message || {}).content || '';
+        reply.reasoning = (((j.choices || [{}])[0]).message || {}).reasoning_content || '';
+        inTok = (j.usage || {}).prompt_tokens || 0;
+        outTok = (j.usage || {}).completion_tokens || 0;
+      } else { err = err || txt.slice(0, 200); }
+    } else {
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, {stream: true});
+        let i;
+        while ((i = buf.indexOf('\n\n')) >= 0) {
+          const frame = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          for (const line of frame.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (payload === '[DONE]') continue;
+            if (ttfb === null) ttfb = performance.now() - t0;
+            let j = null;
+            try { j = JSON.parse(payload); } catch (e) { continue; }
+            if (j.error) { err = (j.error.message || JSON.stringify(j.error)).slice(0, 200); continue; }
+            const delta = ((j.choices || [{}])[0] || {}).delta || {};
+            if (typeof delta.content === 'string') reply.content += delta.content;
+            if (typeof delta.reasoning_content === 'string') reply.reasoning += delta.reasoning_content;
+            if (j.usage) {
+              inTok = j.usage.prompt_tokens || inTok;
+              outTok = j.usage.completion_tokens || outTok;
+            }
+            tRender();
+          }
+        }
+      }
+    }
+  } catch (e) {
+    err = String(e && e.message || e).slice(0, 200);
+  }
+  reply.pending = false;
+  tRender();
+  const total = ((performance.now() - t0) / 1000).toFixed(1);
+  const bits = ['HTTP ' + status,
+    '首字 ' + (ttfb ? (ttfb / 1000).toFixed(1) + 's' : '-'),
+    '共 ' + total + 's',
+    inTok + ' + ' + outTok + ' tk'];
+  if (err) bits.push(err);
+  $('#t-diag').textContent = bits.join(' · ');
+  if (err) toast(err, 'danger');
+  tBusy = false;
+  $('#t-send').disabled = false;
+  if (status === 200) { loadMe().catch(() => {}); }
+}
+
+$('#t-send').onclick = () => run(() => tSend());
+$('#t-clear').onclick = () => { tMsgs = []; tRender(); $('#t-diag').textContent = ''; };
+$('#t-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); run(() => tSend()); }
 });
 
 $('#key-add').onclick = () => run(async () => {

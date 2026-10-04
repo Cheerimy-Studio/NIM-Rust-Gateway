@@ -264,6 +264,22 @@ pub async fn models(headers: &HeaderMap) -> Response {
     json_resp(json!({"rows": users::model_square()}))
 }
 
+/// 用户面板对话测试：签发/复用本人 Key，前端持 Key 直连 /v1，
+/// 计费、限速、调用日志与真实调用完全一致。
+pub async fn test_key(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, true) else {
+        return user_require_err();
+    };
+    match users::ensure_test_key(&uid) {
+        Some(k) => json_resp(json!({"key": k})),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": {"message": "无法取得测试 Key"}})),
+        )
+            .into_response(),
+    }
+}
+
 /// 用户面板与脚本（登录页由 /user 按会话状态切换）。
 pub async fn refresh_login(headers: &HeaderMap) -> Response {
     let cfg = store().load();
