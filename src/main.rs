@@ -527,6 +527,10 @@ async fn h_users_op(headers: HeaderMap, body: Bytes) -> Response {
     admin::users_op(&headers, body).await
 }
 
+async fn h_user_logs_admin(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::user_logs_admin(&headers, raw_query.0).await
+}
+
 async fn h_prices_list(headers: HeaderMap) -> Response {
     admin::prices_list(&headers).await
 }
@@ -1154,6 +1158,7 @@ fn build_router() -> Router {
         .route("/api/user/models", get(h_user_models))
         .route("/api/users", get(h_users_list).post(h_users_add))
         .route("/api/users/op", post(h_users_op))
+        .route("/api/user-logs", get(h_user_logs_admin))
         .route("/api/prices", get(h_prices_list).post(h_prices_save))
         .route("/api/user/stats", get(h_user_stats))
         // axum 默认把请求体限制在 2MB：不显式放宽，MAX_BODY=20MB 永远不会生效，

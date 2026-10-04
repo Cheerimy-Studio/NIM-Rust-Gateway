@@ -62,9 +62,34 @@ function showPanel() {
 async function loadMe() {
   ME = await api('me');
   $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
-  $('#ov-frpm').textContent = ME.free_rpm > 0 ? ME.free_rpm : '不限';
-  $('#ov-prpm').textContent = ME.paid_rpm > 0 ? ME.paid_rpm : '不限';
-  $('#ov-prpm-sub').textContent = ME.paid_rpm > 0 ? '次 / 分钟' : '关闭';
+  $('#ov-frpm').textContent = ME.free_rpm > 0 ? ME.free_rpm + ' 次 / 分' : '不限';
+  $('#ov-prpm').textContent = ME.paid_rpm > 0 ? ME.paid_rpm + ' 次 / 分' : '关闭';
+  const base = location.origin + '/v1';
+  $('#ov-base').textContent = base;
+  $('#ov-base2').textContent = base;
+  try {
+    const s = await api('stats');
+    $('#ov-calls').textContent = s.total_calls ?? 0;
+    $('#ov-cost').textContent = '¥' + (s.total_cost ?? 0).toFixed(2);
+    $('#ov-keys').textContent = s.key_count ?? 0;
+    const tb = $('#ov-recent');
+    tb.innerHTML = '';
+    const recent = s.recent || [];
+    if (!recent.length) {
+      tb.innerHTML = '<tr><td colspan="4" class="hint text-center py-4">还没有调用记录，去「模型广场」挑一个模型试试</td></tr>';
+    }
+    for (const r of recent) {
+      const tr = document.createElement('tr');
+      const st = r.st >= 200 && r.st < 400
+        ? '<span class="badge bg-success">OK</span>'
+        : '<span class="badge bg-danger">' + r.st + '</span>';
+      tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
+        + '<td class="small text-truncate" style="max-width:160px">' + (r.model || '-') + '</td>'
+        + '<td>' + st + '</td>'
+        + '<td class="text-end small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
+      tb.appendChild(tr);
+    }
+  } catch (e) { }
 }
 
 async function loadKeys() {

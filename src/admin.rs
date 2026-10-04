@@ -1748,6 +1748,45 @@ pub async fn users_op(headers: &HeaderMap, body: Bytes) -> Response {
     json_resp(json!({"ok": true}))
 }
 
+/// 管理端查看某个用户的调用日志。GET /api/user-logs?id=<uid>&n=200
+pub async fn user_logs_admin(headers: &HeaderMap, raw_query: Option<String>) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    let mut id = String::new();
+    let mut n: usize = 200;
+    if let Some(q) = raw_query {
+        for kv in q.split('&') {
+            if let Some((k, v)) = kv.split_once('=') {
+                match k {
+                    "id" => id = v.to_string(),
+                    "n" => {
+                        if let Ok(x) = v.parse::<usize>() {
+                            n = x;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "缺少 id 参数"}})),
+        )
+            .into_response();
+    }
+    if crate::users::get_user_by_id(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": {"message": "用户不存在"}})),
+        )
+            .into_response();
+    }
+    json_resp(json!({"rows": crate::users::user_logs(&id, n.clamp(1, 500))}))
+}
+
 
 // ============================================================ 模型定价
 
