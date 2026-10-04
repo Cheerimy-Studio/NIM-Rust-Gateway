@@ -64,9 +64,6 @@ async function loadMe() {
   $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
   $('#ov-frpm').textContent = ME.free_rpm > 0 ? ME.free_rpm + ' 次 / 分' : '不限';
   $('#ov-prpm').textContent = ME.paid_rpm > 0 ? ME.paid_rpm + ' 次 / 分' : '关闭';
-  const base = location.origin + '/v1';
-  $('#ov-base').textContent = base;
-  $('#ov-base2').textContent = base;
   try {
     const s = await api('stats');
     $('#ov-calls').textContent = s.total_calls ?? 0;

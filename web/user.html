@@ -78,8 +78,6 @@ a{text-decoration:none}
 .model-card{border:1px solid var(--line);border-radius:var(--r);background:#fff;transition:all .15s ease}
 .model-card:hover{border-color:#d5deea;box-shadow:0 4px 14px rgba(16,24,40,.08)}
 .hint{font-size:12px;color:var(--mut)}
-pre.qs{background:#0d1526;color:#dbe5f5;padding:11px 14px;border-radius:8px;font-size:12px;line-height:1.6;
-  overflow-x:auto;margin:8px 0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.055)}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:#c6d0de;border-radius:6px}
@@ -165,18 +163,6 @@ pre.qs{background:#0d1526;color:#dbe5f5;padding:11px 14px;border-radius:8px;font
     </div>
   </div>
   <div class="row g-3 mb-3">
-    <div class="col-lg-7">
-      <div class="card h-100"><div class="card-header"><i class="bi bi-rocket-takeoff me-2 text-muted"></i>快速开始</div>
-        <div class="card-body small" style="color:var(--mut)">
-          <p class="mb-2">接口地址：<code class="mono" id="ov-base"></code>（OpenAI 兼容）</p>
-<pre class="qs">curl <span id="ov-base2"></span>/chat/completions \
-  -H "Authorization: Bearer sk-usr-…" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"模型名","messages":[{"role":"user","content":"hi"}]}'</pre>
-          <p class="mb-0">未设价的模型为免费模型，余额为 0 也可调用；标价模型按「元 / 次」计费，失败不计费。</p>
-        </div>
-      </div>
-    </div>
     <div class="col-lg-5">
       <div class="card h-100"><div class="card-header"><i class="bi bi-speedometer me-2 text-muted"></i>限速</div>
         <div class="card-body">
@@ -188,16 +174,19 @@ pre.qs{background:#0d1526;color:#dbe5f5;padding:11px 14px;border-radius:8px;font
                 <td class="text-end fw-semibold" id="ov-prpm">-</td></tr>
             </tbody>
           </table>
+          <div class="hint mt-2 mb-0">未设价的模型为免费模型，余额为 0 也可调用；标价模型按「元 / 次」计费，失败不计费。</div>
         </div>
       </div>
     </div>
-  </div>
-  <div class="card"><div class="card-header"><i class="bi bi-clock-history me-2 text-muted"></i>最近调用</div>
-    <div class="table-responsive">
-      <table class="table table-hover align-middle">
-        <thead><tr><th>时间</th><th>模型</th><th>状态</th><th class="text-end">费用</th></tr></thead>
-        <tbody id="ov-recent"></tbody>
-      </table>
+    <div class="col-lg-7">
+      <div class="card h-100"><div class="card-header"><i class="bi bi-clock-history me-2 text-muted"></i>最近调用</div>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle">
+            <thead><tr><th>时间</th><th>模型</th><th>状态</th><th class="text-end">费用</th></tr></thead>
+            <tbody id="ov-recent"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 </div>
