@@ -92,7 +92,7 @@ pub fn user_require(headers: &HeaderMap, is_post: bool) -> Result<String, Respon
     Ok(uid)
 }
 
-pub async fn login(headers: &HeaderMap, body: Bytes) -> Response {
+pub async fn login(headers: &HeaderMap, ip: String, body: Bytes) -> Response {
     let secure = headers
         .get("x-forwarded-proto")
         .and_then(|x| x.to_str().ok())
@@ -114,20 +114,34 @@ pub async fn login(headers: &HeaderMap, body: Bytes) -> Response {
             })
         })
         .cloned();
-    let Some(u) = found else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(json!({"error": {"message": "账号或密码错误", "type": "auth"}})),
-        )
-            .into_response();
+    // 时序均衡：用户不存在时也对固定假哈希跑一遍 pbkdf2，
+    // 否则「用户不存在」立即返回可被用来枚举用户名（与管理端同口径）
+    let ok_pass = match &found {
+        Some(u) => crate::store::verify_password(&password, &util::str_or(u.get("password_hash"), "")),
+        None => {
+            static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let _ = crate::store::verify_password(&password, DUMMY.get_or_init(|| crate::store::hash_password("ngw-dummy")));
+            false
+        }
     };
-    if !crate::store::verify_password(&password, &util::str_or(u.get("password_hash"), "")) {
+    if found.is_none() || !ok_pass {
+        // 先验证、失败才计入限流预算（与管理端一致）：反代/公网部署下所有流量共享
+        // 同一来源 IP，验证前计数会把正常用户也挡在门外
+        if !crate::admin::login_rate_ok(&ip) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试", "type": "auth"}})),
+            )
+                .into_response();
+        }
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(json!({"error": {"message": "账号或密码错误", "type": "auth"}})),
         )
             .into_response();
     }
+    let u = found.unwrap();
+    crate::admin::login_rate_clear(&ip);
     let uid = util::str_or(u.get("id"), "");
     let secret = util::str_or(cfg.get("session_secret"), "");
     let session = users::user_session_value(&secret, &uid);
@@ -145,15 +159,21 @@ pub async fn login(headers: &HeaderMap, body: Bytes) -> Response {
     resp
 }
 
-pub async fn logout() -> Response {
+pub async fn logout(headers: &HeaderMap) -> Response {
+    // 删除 Cookie 与种入 Cookie 的 Secure 标记保持一致（https 部署下删除也应带 Secure）
+    let secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|x| x.to_str().ok())
+        .map(|p| p.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
     let mut resp = axum::Json(json!({"ok": true})).into_response();
     resp.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_user", "", true, true, false)).unwrap(),
+        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_user", "", true, true, secure)).unwrap(),
     );
     resp.headers_mut().append(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_ucsrfs", "", true, true, false)).unwrap(),
+        axum::http::HeaderValue::from_str(&set_cookie_header("ngw_ucsrfs", "", true, true, secure)).unwrap(),
     );
     resp
 }

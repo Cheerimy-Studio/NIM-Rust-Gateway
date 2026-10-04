@@ -671,8 +671,11 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
             for u in arr.iter_mut() {
                 if util::str_or(u.get("id"), "") == uid_in {
                     if let (Some(old), Some(newo)) = (u.as_object(), row.as_object_mut()) {
+                        // 「载荷里没出现的字段」一律保留旧值：渠道表单提交全量字段不受影响，
+                        // 而停用/启用等只提交部分字段的操作不会把 models/model_map/
+                        // param_overrides/thinking_defaults/prices 等整块抹成默认值
                         for (k, v) in old {
-                            if !newo.contains_key(k) {
+                            if !data.get(k).is_some() {
                                 newo.insert(k.clone(), v.clone());
                             }
                         }

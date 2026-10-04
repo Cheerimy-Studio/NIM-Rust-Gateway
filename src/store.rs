@@ -236,6 +236,11 @@ fn write_group_file(group: &str, payload: &str) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
+    // 断电/崩溃时元数据日志可能只落下 rename 而数据块还没写盘，
+    // 重命名前强制刷盘，避免表文件（含余额/口令哈希）损坏或半截
+    if let Ok(f) = fs::OpenOptions::new().write(true).open(&tmp) {
+        let _ = f.sync_all();
+    }
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
@@ -432,10 +437,20 @@ impl Store {
         }
         let mut db = self.load();
         let mut inner = self.inner.lock().unwrap();
-        f(&mut db);
+        // load() 已把磁盘态放进 memo；从 load 到重新拿锁之间若有并发快路径 update
+        // 改过 memo，必须把 f 应用在最新 memo 上 —— 用旧 db 会覆盖掉并发更新（丢数据）
+        match inner.memo.as_mut() {
+            Some(memo) => {
+                f(memo);
+                db = memo.clone();
+            }
+            None => {
+                f(&mut db);
+                inner.memo = Some(db.clone());
+            }
+        }
         inner.dirty = true;
         bump_gen();
-        inner.memo = Some(db.clone());
         inner.memo_at = Instant::now();
         db
     }

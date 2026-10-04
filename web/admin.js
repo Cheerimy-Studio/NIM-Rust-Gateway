@@ -1765,7 +1765,7 @@ async function loadPrices() {
   renderPrices();
   const sel = $('#price-channel');
   const chs = [...new Set(_priceRows.map(r => r.channel_name))];
-  sel.innerHTML = '<option value="">选择渠道</option>' + chs.map(c => `<option>${c}</option>`).join('');
+  sel.innerHTML = '<option value="">选择渠道</option>' + chs.map(c => `<option>${esc(c)}</option>`).join('');
 }
 
 function renderPrices() {
@@ -1773,10 +1773,10 @@ function renderPrices() {
   tb.innerHTML = '';
   for (const r of _priceRows) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td>' + r.channel_name + '</td>'
-      + '<td class="mono fw-semibold">' + r.model + '</td>'
+    tr.innerHTML = '<td>' + esc(r.channel_name) + '</td>'
+      + '<td class="mono fw-semibold">' + esc(r.model) + '</td>'
       + '<td><input type="number" step="0.001" min="0" class="form-control form-control-sm price-input" '
-      + 'data-ch="' + r.channel_id + '" data-model="' + r.model + '" value="' + (r.price || 0) + '" style="width:100px"></td>'
+      + 'data-ch="' + esc(r.channel_id) + '" data-model="' + esc(r.model) + '" value="' + (r.price || 0) + '" style="width:100px"></td>'
       + '<td>' + (r.free ? '<span class="badge badge-free">免费</span>' : '<span class="badge badge-paid">付费</span>') + '</td>'
       + '<td class="small text-muted">' + (r.enabled ? '' : '<span class="badge bg-secondary">渠道停用</span>') + '</td>';
     tb.appendChild(tr);
@@ -1816,7 +1816,7 @@ async function loadUsers() {
   tb.innerHTML = '';
   for (const u of rows) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td class="fw-semibold">' + u.username + '</td>'
+    tr.innerHTML = '<td class="fw-semibold">' + esc(u.username) + '</td>'
       + '<td class="fw-semibold">¥' + (u.balance ?? 0).toFixed(2) + '</td>'
       + '<td>' + (u.key_count ?? 0) + '</td>'
       + '<td class="small">' + (u.free_rpm > 0 ? u.free_rpm + ' 次/分' : '不限') + '</td>'

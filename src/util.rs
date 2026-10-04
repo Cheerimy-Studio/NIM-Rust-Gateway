@@ -84,12 +84,19 @@ pub fn cfg_int(cfg: &Value, name: &str, default: i64) -> i64 {
 
 /// Python `float(v or 0)`。
 pub fn f64_or(v: Option<&Value>, default: f64) -> f64 {
-    match v {
+    let out = match v {
         None | Some(Value::Null) => default,
         Some(Value::Number(n)) => n.as_f64().unwrap_or(default),
         Some(Value::Bool(b)) => *b as i32 as f64,
         Some(Value::String(s)) => s.trim().parse::<f64>().unwrap_or(default),
         _ => default,
+    };
+    // "NaN"/"inf" 之类输入会让余额字段在序列化时变成 null 再读回 0，
+    // 非有限值一律按 default 处理
+    if out.is_finite() {
+        out
+    } else {
+        default
     }
 }
 
@@ -271,10 +278,12 @@ pub fn mask_email(email: &str) -> String {
             s.push_str("***");
             s
         }
-        Some(at) => {
+        Some(byte_at) => {
+            // find('@') 返回字节偏移，按字符切片必须换算成字符位置（非 ASCII 本地名会越界 panic）
+            let char_at = email[..byte_at].chars().count();
             let chars: Vec<char> = email.chars().collect();
-            let head: String = chars.iter().take(at.min(2)).collect();
-            let tail: String = chars[at..].iter().collect();
+            let head: String = chars.iter().take(char_at.min(2)).collect();
+            let tail: String = chars[char_at..].iter().collect();
             format!("{}***{}", head, tail)
         }
     }
@@ -311,6 +320,23 @@ pub fn unescape_quote_entities(s: &str) -> String {
 
 /// 拦截规则的匹配实现（运行时与后台「测试」按钮共用同一份）。
 /// contains 全文；equals/prefix/suffix 先 strip；regex 只扫描前 scan_max 字符（0=全文）。
+/// 已编译正则缓存：拦截规则在每条请求上都要匹配，逐次 Regex::new 是纯浪费。
+/// 容量有界（规则数有限 + 命中上限即停填），满后直接跳过缓存只编译。
+fn regex_cache(pat: &str) -> Option<regex::Regex> {
+    static CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, regex::Regex>>> =
+        std::sync::Mutex::new(None);
+    let mut g = CACHE.lock().ok()?;
+    let m = g.get_or_insert_with(std::collections::HashMap::new);
+    if let Some(re) = m.get(pat) {
+        return Some(re.clone());
+    }
+    let re = Regex::new(pat).ok()?;
+    if m.len() < 128 {
+        m.insert(pat.to_string(), re.clone());
+    }
+    Some(re)
+}
+
 pub fn match_text(mode: &str, pattern: &str, text: &str, scan_max: usize) -> bool {
     let pat = unescape_quote_entities(pattern);
     let s = text.to_string();
@@ -329,10 +355,7 @@ pub fn match_text(mode: &str, pattern: &str, text: &str, scan_max: usize) -> boo
             } else {
                 s
             };
-            match Regex::new(&pat) {
-                Ok(re) => re.is_match(&subject),
-                Err(_) => false,
-            }
+            regex_cache(&pat).map(|re| re.is_match(&subject)).unwrap_or(false)
         }
         _ => false,
     }

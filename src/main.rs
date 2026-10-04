@@ -477,12 +477,12 @@ async fn h_user_js() -> Response {
     resp
 }
 
-async fn h_user_login(headers: HeaderMap, body: Bytes) -> Response {
-    user_api::login(&headers, body).await
+async fn h_user_login(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::login(&headers, addr.ip().to_string(), body).await
 }
 
-async fn h_user_logout() -> Response {
-    user_api::logout().await
+async fn h_user_logout(headers: HeaderMap) -> Response {
+    user_api::logout(&headers).await
 }
 
 async fn h_user_session(headers: HeaderMap) -> Response {
@@ -954,8 +954,30 @@ fn prune_queue() {
 
 // ---------------------------------------------------------------- 启动
 
+/// 启动最早期应用配置里的显示时区：daily 统计/日上限重置走 chrono::Local，
+/// glibc 在首次 localtime 后会缓存 TZ，所以必须先于一切时间调用设置。
+/// 设置项此前是死的（后台可改但从未生效）。
+fn apply_tz_from_config() {
+    let f = store::data_dir().join("db").join("config.json");
+    let Ok(raw) = std::fs::read_to_string(&f) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    let tz = v
+        .pointer("/config/timezone")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if tz.is_empty() {
+        return;
+    }
+    if std::env::var("TZ").map(|t| t != tz).unwrap_or(true) {
+        std::env::set_var("TZ", &tz);
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    apply_tz_from_config();
     let mut port: u16 = 8100;
     let args: Vec<String> = std::env::args().collect();
     let mut it = args.iter().peekable();
@@ -1025,8 +1047,11 @@ async fn main() {
 
 async fn bind_with_retry(addr: SocketAddr, max_secs: u64) -> std::io::Result<tokio::net::TcpListener> {
     // 普通启动也短暂重试：手动快速重启 / 旧进程被杀后，Windows 上 TIME_WAIT
-    // 的同端口套接字会让首次 bind 失败（无 SO_REUSEADDR），等 2 秒即过
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(if std::env::var("NGW_RESTART_CHILD").is_ok() { max_secs } else { 5 });
+    // 的同端口套接字会让首次 bind 失败（无 SO_REUSEADDR），等 2 秒即过。
+    // 重启子进程等待更久（max_secs）；所有启动路径统一重试，避免首次 bind
+    // 碰上短暂占用就直接退出
+    let wait = if std::env::var("NGW_RESTART_CHILD").is_ok() { max_secs } else { 5 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
     loop {
         let attempt = || -> std::io::Result<tokio::net::TcpListener> {
             #[cfg(unix)]
@@ -1051,8 +1076,7 @@ async fn bind_with_retry(addr: SocketAddr, max_secs: u64) -> std::io::Result<tok
         match attempt() {
             Ok(l) => return Ok(l),
             Err(e) => {
-                // 重启子进程：等旧进程释放端口
-                if std::env::var("NGW_RESTART_CHILD").is_ok() && std::time::Instant::now() < deadline {
+                if std::time::Instant::now() < deadline {
                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                     continue;
                 }
@@ -1074,6 +1098,8 @@ fn cli_reset_password(pw: &str) -> i32 {
                 "admin_password_hash".into(),
                 serde_json::Value::from(store::hash_password(pw)),
             );
+            // 与后台改密同口径：轮换会话密钥，改密前的一切登录态（可能已泄露）全部失效
+            cfg.insert("session_secret".into(), serde_json::Value::from(util::rand_hex(24)));
         }
     });
     store().flush();

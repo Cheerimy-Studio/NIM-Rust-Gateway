@@ -226,13 +226,37 @@ fn find_platform_binary(src: &Path) -> Option<PathBuf> {
         }
     }
     walk(src, SKIP_DIRS, &mut candidates, 0);
-    candidates
-        .into_iter()
-        .find(|p| p.to_string_lossy().ends_with(exe_ext) || exe_ext.is_empty())
+    candidates.into_iter().find(|p| {
+        if cfg!(windows) {
+            p.to_string_lossy().ends_with(exe_ext)
+        } else {
+            // 无扩展名平台上 nim-gateway.service / nim-gateway-notes.txt 同样命中前缀：
+            // 校验 ELF magic，避免把附件装成主程序后 exec 失败、网关直接下线
+            is_exec_image(p)
+        }
+    })
+}
+
+/// 平台可执行文件魔数：Unix=ELF，Windows=MZ。
+fn is_exec_image(p: &Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 4];
+    let Ok(mut f) = std::fs::File::open(p) else { return false };
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    if cfg!(windows) {
+        &buf[..2] == b"MZ"
+    } else {
+        buf == *b"\x7fELF"
+    }
 }
 
 /// 备份当前代码与数据到 backup/（与 Python 版语义一致：回滚只能一次，用完即删）。
 fn backup_current() -> Result<(), String> {
+    // 先把内存里未落盘的变更刷下去：备份缺了最近 2 秒写入的话，
+    // 回滚后就是真实丢数据（余额/日志都可能在窗口内）
+    crate::store::store().flush();
     let base = base_dir();
     let backup = base.join("backup");
     std::fs::create_dir_all(&backup).map_err(|e| format!("创建备份目录失败: {}", e))?;
@@ -395,7 +419,8 @@ async fn remote_rollback_inner() -> (bool, String) {
         return (false, format!("回滚失败: {}", e));
     }
     let _ = std::fs::remove_file(&bak_exe);
-    // 数据回滚：分表目录整目录替换（回滚前当前数据先挪到 db.rollback 留底）
+    // 数据回滚：分表目录整目录替换。回滚前的现势数据改名为 db.pre-rollback 留底，
+    // 万一管理员后悔还能手工找回（下次回滚时覆盖）
     let bak_dir = backup.join("data").join("db");
     if bak_dir.is_dir() {
         let cur = crate::store::db_dir();
@@ -408,7 +433,11 @@ async fn remote_rollback_inner() -> (bool, String) {
             let _ = std::fs::remove_dir_all(&cur);
             let _ = std::fs::rename(&rollback_copy, &cur);
         }
-        let _ = std::fs::remove_dir_all(&rollback_copy);
+        if rollback_copy.is_dir() {
+            let keep = crate::store::data_dir().join("db.pre-rollback");
+            let _ = std::fs::remove_dir_all(&keep);
+            let _ = std::fs::rename(&rollback_copy, &keep);
+        }
     }
     let bak_legacy = backup.join("data").join("db.json");
     if bak_legacy.exists() {

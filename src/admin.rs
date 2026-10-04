@@ -48,7 +48,7 @@ fn authed(headers: &HeaderMap) -> bool {
 
 static LOGIN_RATE: Mutex<Option<Vec<(String, Vec<f64>)>>> = Mutex::new(None);
 
-fn login_rate_ok(ip: &str) -> bool {
+pub(crate) fn login_rate_ok(ip: &str) -> bool {
     let now = util::now_f();
     let mut g = LOGIN_RATE.lock().unwrap();
     let m = g.get_or_insert_with(Vec::new);
@@ -75,7 +75,7 @@ fn login_rate_ok(ip: &str) -> bool {
     true
 }
 
-fn login_rate_clear(ip: &str) {
+pub(crate) fn login_rate_clear(ip: &str) {
     let mut g = LOGIN_RATE.lock().unwrap();
     if let Some(m) = g.as_mut() {
         m.retain(|(k, _)| k != ip);
@@ -353,7 +353,7 @@ pub async fn keys(headers: &HeaderMap, query: Option<String>) -> Response {
         let s = query_get(&query, "status");
         if s.is_empty() { "all".to_string() } else { s }
     };
-    let page = query_get(&query, "page").parse::<i64>().unwrap_or(1).max(1);
+    let page = query_get(&query, "page").parse::<i64>().unwrap_or(1).clamp(1, 1_000_000);
     let per = 20;
     let now = util::now_i();
     let day = util::local_day(now);

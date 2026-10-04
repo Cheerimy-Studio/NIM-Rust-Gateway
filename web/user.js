@@ -1,4 +1,6 @@
 const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 
 async function api(path, opts = {}) {
   const init = {method: opts.method || 'GET', headers: {}};
@@ -16,7 +18,13 @@ function toast(msg, kind) {
   const d = document.createElement('div');
   d.className = 'toast align-items-center border-0' + (kind === 'danger' ? ' bg-danger' : ' bg-dark');
   d.style.cssText = 'position:fixed;top:18px;right:18px;z-index:9999;color:#fff';
-  d.innerHTML = '<div class="d-flex"><div class="toast-body">' + msg + '</div></div>';
+  const inner = document.createElement('div');
+  inner.className = 'd-flex';
+  const body = document.createElement('div');
+  body.className = 'toast-body';
+  body.textContent = msg;
+  inner.appendChild(body);
+  d.appendChild(inner);
   document.body.appendChild(d);
   setTimeout(() => d.remove(), 3200);
 }
@@ -96,8 +104,8 @@ async function loadKeys() {
   if (!rows.length) { tb.innerHTML = '<tr><td colspan="5" class="hint">还没有 Key</td></tr>'; return; }
   for (const k of rows) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td>' + (k.name || '未命名') + '</td>'
-      + '<td class="key-mono">' + k.key.slice(0, 14) + '…</td>'
+    tr.innerHTML = '<td>' + esc(k.name || '未命名') + '</td>'
+      + '<td class="key-mono">' + esc(k.key.slice(0, 14)) + '…</td>'
       + '<td>' + (k.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>'
       + '<td class="small text-muted">' + fmtTime(k.last_used_at) + '</td>'
       + '<td class="text-end"></td>';
@@ -136,7 +144,7 @@ async function loadLogs() {
       ? '<span class="badge bg-success">' + r.st + '</span>'
       : '<span class="badge bg-danger">' + r.st + '</span>';
     tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
-      + '<td>' + (r.model || '-') + '</td>'
+      + '<td>' + esc(r.model || '-') + '</td>'
       + '<td>' + st + '</td>'
       + '<td class="small">' + r.ms + 'ms</td>'
       + '<td class="small">' + (r.in_tok || 0) + '</td>'
@@ -165,7 +173,7 @@ async function loadModels() {
     }
     col.innerHTML = '<div class="card model-card h-100"><div class="card-body">'
       + '<div class="d-flex justify-content-between align-items-start mb-1">'
-      + '<span class="mono fw-semibold" style="font-size:12.5px;word-break:break-all">' + m.model + '</span>' + badge
+      + '<span class="mono fw-semibold" style="font-size:12.5px;word-break:break-all">' + esc(m.model) + '</span>' + badge
       + '</div>' + health + '</div></div>';
     box.appendChild(col);
   }

@@ -1103,6 +1103,28 @@ impl Drop for HoldGuard {
 
 // ---------------------------------------------------------------- 统一流式 pump
 
+/// SSE chunk 按网络帧对齐，多字节 UTF-8 字符可能被拆到两个 chunk；
+/// 逐块 lossy 转换会把半个字符变成 U+FFFD。把末尾不完整的序列留给下一块。
+fn split_incomplete_utf8(carry: &mut Vec<u8>, chunk: &[u8]) -> Vec<u8> {
+    carry.extend_from_slice(chunk);
+    let mut cut = carry.len();
+    if let Some(pos) = carry.iter().rposition(|&b| b & 0xC0 != 0x80) {
+        let need = match carry[pos] {
+            b if b < 0x80 => 0,
+            b if b >= 0xF0 => 4,
+            b if b >= 0xE0 => 3,
+            b if b >= 0xC0 => 2,
+            _ => 0,
+        };
+        if need > 0 && carry.len() - pos < need {
+            cut = pos;
+        }
+    } else {
+        cut = 0;
+    }
+    carry.drain(..cut).collect()
+}
+
 fn money_of(u: &Value) -> f64 {
     util::f64_or(u.get("balance"), 0.0)
 }
@@ -1200,6 +1222,7 @@ async fn run_pump(
         }};
     }
 
+    let mut utf8_carry: Vec<u8> = Vec::new();
     if let Some(fc) = first_chunk {
         out_bytes += fc.len();
         first_chunk_at = util::now_f();
@@ -1209,7 +1232,8 @@ async fn run_pump(
             train.extend_from_slice(&fc);
         }
         if is_convert {
-            feed_conv!(&String::from_utf8_lossy(&fc));
+            let ready = split_incomplete_utf8(&mut utf8_carry, &fc);
+            feed_conv!(&String::from_utf8_lossy(&ready));
         } else {
             emit_bytes!(fc);
         }
@@ -1263,7 +1287,8 @@ async fn run_pump(
             train.extend_from_slice(&chunk);
         }
         if is_convert {
-            feed_conv!(&String::from_utf8_lossy(&chunk));
+            let ready = split_incomplete_utf8(&mut utf8_carry, &chunk);
+            feed_conv!(&String::from_utf8_lossy(&ready));
             continue;
         }
         let mut b: Vec<u8> = chunk.to_vec();
@@ -1316,7 +1341,12 @@ async fn run_pump(
         };
         emit_bytes!(Bytes::from(b));
     }
-    // 收尾：截断要显式告知下游，不能把半截内容当完整回复（静默截断比显式报错危险）
+    // 收尾：先把残留在 carry 里的最后几字节（跨块截断的字符）喂给状态机，再做终端事件
+    if is_convert && !utf8_carry.is_empty() {
+        let rest = std::mem::take(&mut utf8_carry);
+        feed_conv!(&String::from_utf8_lossy(&rest));
+    }
+    // 截断要显式告知下游，不能把半截内容当完整回复（静默截断比显式报错危险）
     if !client_gone && !truncated.is_empty() {
         if is_convert {
             let mut pend = String::new();
@@ -1392,8 +1422,9 @@ async fn run_pump(
         0,
     )
     .await;
-    // 多用户计费：仅成功调用计费，渠道未设价的模型免费
-    if st == ctx.status {
+    // 多用户计费：仅完整成功的调用计费（「仅成功计费」口径与面板提示一致）；
+    // 客户端断连（499）与上游截断/中断的半截回复不扣费
+    if st == ctx.status && !client_gone && truncated.is_empty() {
         if let Some((uid, kid)) = &ctx.user {
             crate::users::bill(
                 uid, kid,
@@ -1871,6 +1902,37 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
             continue;
         }
+        // 400 参数类降级重试：必须在释放之前 continue —— 账号保持持有（INFLIGHT 计数正确），
+        // 否则旧号已回池而重试仍在用，并发限额被绕过、最终释放记为 odd release
+        if rstatus == 400 && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            if convert::strip_reasoning_from_messages(&mut req) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        if rstatus == 400 && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
+            if convert::downgrade_thinking(&mut req, &up_model, &tdefs) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        if rstatus == 400 && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            if convert::coerce_all_types(&mut req) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        if rstatus == 400 && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            if convert::strip_unsupported_params(&mut req, &rbody) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
         let usage = build_usage(
             &json!({"status": rstatus, "body": rbody, "streamed": false, "out_bytes": 0, "usage": null}),
             &body,
@@ -1982,34 +2044,6 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         if rstatus == 401 || rstatus == 403 {
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
         }
-        if rstatus == 400 && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            if convert::strip_reasoning_from_messages(&mut req) {
-                continue;
-            }
-        }
-        if rstatus == 400 && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
-            if convert::downgrade_thinking(&mut req, &up_model, &tdefs) {
-                reuse_key = Some(key);
-                continue;
-            }
-        }
-        if rstatus == 400 && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            if convert::coerce_all_types(&mut req) {
-                reuse_key = Some(key);
-                continue;
-            }
-        }
-        if rstatus == 400 && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            if convert::strip_unsupported_params(&mut req, &rbody) {
-                reuse_key = Some(key);
-                continue;
-            }
-        }
         // 渠道级不可用：同一渠道所有账号共享渠道池，换号/重试都注定失败 → 快速失败
         if convert::is_channel_exhausted(&rbody) {
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
@@ -2017,25 +2051,17 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         if !(rstatus == 0 || rstatus == 429 || rstatus >= 500) {
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
         }
-        // 429 吸收：释放当前号(触发 429 冷却)后换号重试，不透传 429 给下游。
-        // 必须先释放再 continue —— 否则旧号 in-flight 泄漏
+        // 429 吸收：换号重试，不透传 429 给下游。账号已在上方统一释放（触发 429 冷却），
+        // 这里绝不能再 arelease 一次 —— 否则冷却翻倍、统计/日志/失败计数全部双记
         if rstatus == 429 && rl_left > 0 && cfg.get("queue_enabled").map(util::truthy).unwrap_or(true) {
             rl_left -= 1;
             max_attempts += 1;
-            pool::arelease(
-                util::str_or(key.get("id"), ""),
-                false,
-                rstatus,
-                err.clone(),
-                Some(usage.clone()),
-                Some(release_log(ep_tag, &model, rstatus, ms, &err, attempt, Some(&key), &ctx.ip, &up_model, stream, ms, 0, 0, &tok)),
-                0,
-            )
-            .await;
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
             continue;
         }
-        tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+        if attempt < max_attempts {
+            tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+        }
     };
     hold.clear();
     match out {
@@ -2153,6 +2179,7 @@ fn slow_start_response(
         }
         // 2xx：交给统一的流式 pump 正常透传（复用改名/心跳/统计/释放逻辑）
         hold.clear();
+        let capture_train = !no_training(&ctx.headers);
         let sctx = StreamCtx {
             ep: ep2.clone(),
             ep_tag: ep2.clone(),
@@ -2168,7 +2195,7 @@ fn slow_start_response(
             heartbeat: false,
             ttfb_deadline: deadline,
             protocol,
-            capture_train: true,
+            capture_train,
             user,
         };
         run_pump(resp, key, None, sctx, tx).await;
@@ -2673,6 +2700,36 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
             continue;
         }
+        // 400 参数类降级重试：必须在释放之前 continue —— 账号保持持有（INFLIGHT 计数正确）
+        if rstatus == 400 && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            if convert::strip_reasoning_from_messages(&mut chat_req) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        if rstatus == 400 && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
+            if convert::downgrade_thinking(&mut chat_req, &up_model, &tdefs) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        if rstatus == 400 && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            if convert::coerce_all_types(&mut chat_req) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        if rstatus == 400 && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
+            downgraded = true;
+            if convert::strip_unsupported_params(&mut chat_req, &rbody) {
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
         let usage = build_usage(
             &json!({"status": rstatus, "body": rbody, "streamed": false, "out_bytes": 0, "usage": null}),
             &raw,
@@ -2767,58 +2824,22 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         if rstatus == 401 || rstatus == 403 {
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
         }
-        if rstatus == 400 && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            if convert::strip_reasoning_from_messages(&mut chat_req) {
-                reuse_key = Some(key);
-                continue;
-            }
-        }
-        if rstatus == 400 && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
-            if convert::downgrade_thinking(&mut chat_req, &up_model, &tdefs) {
-                reuse_key = Some(key);
-                continue;
-            }
-        }
-        if rstatus == 400 && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            if convert::coerce_all_types(&mut chat_req) {
-                reuse_key = Some(key);
-                continue;
-            }
-        }
-        if rstatus == 400 && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
-            downgraded = true;
-            if convert::strip_unsupported_params(&mut chat_req, &rbody) {
-                reuse_key = Some(key);
-                continue;
-            }
-        }
         if convert::is_channel_exhausted(&rbody) {
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
         }
         if !(rstatus == 0 || rstatus == 429 || rstatus >= 500) {
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
         }
+        // 429 吸收：账号已在上方统一释放（触发 429 冷却），这里不能再 arelease 一次
         if rstatus == 429 && rl_left > 0 && cfg.get("queue_enabled").map(util::truthy).unwrap_or(true) {
             rl_left -= 1;
             max_attempts += 1;
-            pool::arelease(
-                util::str_or(key.get("id"), ""),
-                false,
-                rstatus,
-                err.clone(),
-                Some(usage.clone()),
-                Some(release_log(ep, &model, rstatus, ms, &err, attempt, Some(&key), &ctx.ip, &up_model, stream, ms, 0, 0, &tok)),
-                0,
-            )
-            .await;
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
             continue;
         }
-        tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+        if attempt < max_attempts {
+            tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+        }
     };
     hold.clear();
     match out {

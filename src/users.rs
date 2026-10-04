@@ -147,8 +147,11 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                         err = "密码至少 6 位".into();
                         return;
                     }
+                    let next_epoch = user_pw_epoch(u) + 1;
                     if let Some(o) = u.as_object_mut() {
                         o.insert("password_hash".into(), Value::from(crate::store::hash_password(&pw)));
+                        // 改密即踢会话：纪元 +1，所有旧 Cookie 的签名载荷里的纪元即刻不匹配
+                        o.insert("pw_epoch".into(), json!(next_epoch));
                     }
                     ok = true;
                 }
@@ -192,23 +195,54 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
 // ---------------------------------------------------------------- 用户会话
 
 /// 用户会话 Cookie：base64(user_id).HMAC(secret, "user:"+user_id)——无状态、不可伪造。
+/// 会话有效期（秒）：30 天强制过期，配合改密失效把「永久有效 Cookie」风险兜住
+const USER_SESSION_TTL: i64 = 30 * 24 * 3600;
+
+/// 该用户当前会话纪元：改密时 +1，所有携旧纪元的 Cookie 即刻失效（精确，无秒级边界）
+fn user_pw_epoch(user: &Value) -> i64 {
+    util::int_or(user.get("pw_epoch"), 0)
+}
+
 pub fn user_session_value(secret: &str, user_id: &str) -> String {
     use base64::Engine;
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(user_id.as_bytes());
-    let sig = crate::store::hmac_hex(secret.as_bytes(), format!("user:{}", user_id).as_bytes());
+    let epoch = get_user_by_id(user_id).map(|u| user_pw_epoch(&u)).unwrap_or(0);
+    let issued = util::now_i();
+    let payload = format!("{}|{}|{}", user_id, epoch, issued);
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
+    let sig = crate::store::hmac_hex(secret.as_bytes(), format!("user:{}", payload).as_bytes());
     format!("{}.{}", b64, sig)
 }
 
-/// 校验会话 Cookie 并还原 user_id。
-pub fn user_session_id(secret: &str, cookie_value: &str) -> Option<String> {
+/// 校验会话 Cookie 并还原 (user_id, 纪元, 签发时间)。
+fn user_session_info(secret: &str, cookie_value: &str) -> Option<(String, i64, i64)> {
     let (b64, sig) = cookie_value.split_once('.')?;
     use base64::Engine;
-    let user_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64).ok()?;
-    let user_id = String::from_utf8(user_id).ok()?;
-    let expect = crate::store::hmac_hex(secret.as_bytes(), format!("user:{}", user_id).as_bytes());
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64).ok()?;
+    let payload = String::from_utf8(payload).ok()?;
+    let expect = crate::store::hmac_hex(secret.as_bytes(), format!("user:{}", payload).as_bytes());
     use subtle::ConstantTimeEq;
-    if sig.as_bytes().ct_eq(expect.as_bytes()).into() {
-        Some(user_id)
+    let ok: bool = sig.as_bytes().ct_eq(expect.as_bytes()).into();
+    if !ok {
+        return None;
+    }
+    let (user_id, rest) = payload.split_once('|')?;
+    let (epoch, issued) = rest.split_once('|')?;
+    let (epoch, issued) = (epoch.parse::<i64>().ok()?, issued.parse::<i64>().ok()?);
+    if issued <= 0 || util::now_i() - issued > USER_SESSION_TTL {
+        return None;
+    }
+    Some((user_id.to_string(), epoch, issued))
+}
+
+/// 校验会话 Cookie 并还原 user_id：签名 + 有效期 + 改密失效（纪元不匹配拒绝）。
+pub fn user_session_id(secret: &str, cookie_value: &str) -> Option<String> {
+    let (uid, epoch, _issued) = user_session_info(secret, cookie_value)?;
+    let u = get_user_by_id(&uid)?;
+    if user_pw_epoch(&u) != epoch {
+        return None;
+    }
+    if auth_user(&uid).is_some() {
+        Some(uid)
     } else {
         None
     }
