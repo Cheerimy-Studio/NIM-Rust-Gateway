@@ -417,3 +417,8 @@ pub fn char_prefix(s: &str, n: usize) -> &str {
         None => s,
     }
 }
+
+/// 金额统一保留 6 位小数，避免二进制浮点尾差入库。
+pub fn round6(f: f64) -> f64 {
+    (f * 1_000_000.0).round() / 1_000_000.0
+}

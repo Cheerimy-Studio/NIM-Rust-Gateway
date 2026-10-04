@@ -168,6 +168,32 @@ fn join_lines(raw: &Value) -> String {
     util::str_cut(&joined, 2000)
 }
 
+/// 解析模型价格表：每行 model=价格（元/次），容忍逗号分隔与字面量对象。
+/// 价格 ≤0 或非法的行忽略（忽略即免费）。
+pub fn parse_price_map(raw: &Value) -> Obj {
+    let mut out = Obj::new();
+    for line in util::literal_items(raw) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let (model, price) = (line[..eq].trim(), line[eq + 1..].trim());
+        if model.is_empty() || model.chars().count() > 160 {
+            continue;
+        }
+        let Ok(v) = price.parse::<f64>() else { continue };
+        if !(v.is_finite()) || v <= 0.0 {
+            continue;
+        }
+        out.insert(model.to_string(), serde_json::json!(util::round6(v)));
+        if out.len() >= 500 {
+            break;
+        }
+    }
+    out
+}
+
 pub fn parse_model_map(raw: &Value) -> Obj {
     let mut out = Obj::new();
     for line in util::literal_items(raw) {
@@ -609,6 +635,7 @@ pub fn validate_save(data: &Value) -> (Option<Value>, String) {
         "breaker_seconds": clamp(data.get("breaker_seconds").unwrap_or(&Value::from(0)), 0, 86_400, 0),
         "models": models,
         "model_map": parse_model_map(data.get("model_map").unwrap_or(&Value::Object(Obj::new()))),
+        "prices": parse_price_map(data.get("prices").unwrap_or(&Value::Object(Obj::new()))),
         "hide_errors": clamp(data.get("hide_errors").unwrap_or(&Value::from(0)), 0, 2, 0),
         "hide_mapped": clamp(data.get("hide_mapped").unwrap_or(&Value::from(0)), 0, 2, 0),
         "param_overrides": parse_param_overrides(data.get("param_overrides").unwrap_or(&Value::Object(Obj::new()))),

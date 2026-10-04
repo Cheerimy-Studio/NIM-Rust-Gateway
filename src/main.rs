@@ -2,6 +2,7 @@
 
 mod admin;
 mod convert;
+mod user_api;
 mod pool;
 mod proxy;
 mod queue;
@@ -9,6 +10,7 @@ mod store;
 mod streams;
 mod upstreams;
 mod update;
+mod users;
 mod util;
 mod webhttp;
 
@@ -435,6 +437,118 @@ async fn h_config_export(headers: HeaderMap) -> Response {
 
 async fn h_config_import(headers: HeaderMap, body: Bytes) -> Response {
     admin::config_import(&headers, body).await
+}
+
+// ---------------------------------------------------------------- 用户面板
+
+async fn h_user_page(headers: HeaderMap) -> Response {
+    let cfg = store().load();
+    let secret = util::str_or(cfg.get("config").and_then(|c| c.get("session_secret")), "");
+    let session = user_api::cookie_get(&headers, "ngw_user").unwrap_or_default();
+    let authed = user_api::user_session_id_pub(&secret, &session)
+        .map(|uid| user_api::auth_user_pub(&uid).is_some())
+        .unwrap_or(false);
+    if !authed {
+        let mut resp = web_assets::USER_LOGIN_HTML.to_string().into_response();
+        resp.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+        );
+        resp.headers_mut().insert(
+            axum::http::header::X_FRAME_OPTIONS,
+            axum::http::HeaderValue::from_static("DENY"),
+        );
+        resp.headers_mut().insert(
+            axum::http::header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        );
+        return resp;
+    }
+    let mut resp = web_assets::USER_HTML.to_string().into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
+async fn h_user_js() -> Response {
+    let mut resp = web_assets::USER_JS.to_string().into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/javascript"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
+async fn h_user_login(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::login(&headers, body).await
+}
+
+async fn h_user_logout() -> Response {
+    user_api::logout().await
+}
+
+async fn h_user_session(headers: HeaderMap) -> Response {
+    user_api::refresh_login(&headers).await
+}
+
+async fn h_user_me(headers: HeaderMap) -> Response {
+    user_api::me(&headers).await
+}
+
+async fn h_user_keys(headers: HeaderMap) -> Response {
+    user_api::keys(&headers).await
+}
+
+async fn h_user_keys_add(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::keys_add(&headers, body).await
+}
+
+async fn h_user_keys_op(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::keys_op(&headers, body).await
+}
+
+async fn h_user_logs(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    user_api::logs(&headers, raw_query.0).await
+}
+
+async fn h_user_models(headers: HeaderMap) -> Response {
+    user_api::models(&headers).await
+}
+
+// ---------------------------------------------------------------- 管理端用户管理
+
+async fn h_users_list(headers: HeaderMap) -> Response {
+    admin::users_list(&headers).await
+}
+
+async fn h_users_add(headers: HeaderMap, body: Bytes) -> Response {
+    admin::users_add(&headers, body).await
+}
+
+async fn h_users_op(headers: HeaderMap, body: Bytes) -> Response {
+    admin::users_op(&headers, body).await
 }
 
 // ---------------------------------------------------------------- 看门狗 / 自重启
@@ -1039,6 +1153,19 @@ fn build_router() -> Router {
         .route("/api/sessions/clear", post(h_sessions_clear))
         .route("/api/config/export", get(h_config_export))
         .route("/api/config/import", post(h_config_import))
+        // 多用户
+        .route("/user", get(h_user_page))
+        .route("/assets/user.js", get(h_user_js))
+        .route("/api/user/login", post(h_user_login))
+        .route("/api/user/logout", post(h_user_logout))
+        .route("/api/user/session", get(h_user_session))
+        .route("/api/user/me", get(h_user_me))
+        .route("/api/user/keys", get(h_user_keys).post(h_user_keys_add))
+        .route("/api/user/keys/op", post(h_user_keys_op))
+        .route("/api/user/logs", get(h_user_logs))
+        .route("/api/user/models", get(h_user_models))
+        .route("/api/users", get(h_users_list).post(h_users_add))
+        .route("/api/users/op", post(h_users_op))
         // axum 默认把请求体限制在 2MB：不显式放宽，MAX_BODY=20MB 永远不会生效，
         // 大 prompt 会在提取器阶段被 413 掉。层上限比 MAX_BODY 高 1MB：边界请求
         // 进到处理器里返回友好的「请求体过大」，超过层上限才走 axum 的通用 413

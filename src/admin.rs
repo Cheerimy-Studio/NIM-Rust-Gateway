@@ -1658,3 +1658,92 @@ pub async fn remote_rollback(headers: &HeaderMap) -> Response {
     }
     json_resp(json!({"ok": true, "note": msg}))
 }
+
+
+// ============================================================ 多用户管理
+
+pub async fn users_list(headers: &HeaderMap) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    let rows = crate::users::list_users();
+    let token_counts = |uid: &str| -> usize {
+        store()
+            .load()
+            .get("user_tokens")
+            .and_then(|t| t.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|t| {
+                        util::str_or(t.get("user_id"), "") == uid
+                            && t.get("enabled").map(util::truthy).unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .map(|mut r| {
+            let uid = util::str_or(r.get("id"), "");
+            if let Some(o) = r.as_object_mut() {
+                o.insert("key_count".into(), json!(token_counts(&uid)));
+            }
+            r
+        })
+        .collect();
+    json_resp(json!({"rows": rows}))
+}
+
+pub async fn users_add(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let (row, err) = crate::users::add_user(
+        &util::str_or(body.get("username"), ""),
+        &util::str_or(body.get("password"), ""),
+        util::f64_or(body.get("balance"), 0.0),
+        util::int_or(body.get("free_rpm"), 10).max(0),
+        util::int_or(body.get("paid_rpm"), 0).max(0),
+    );
+    if let Some(e) = (!err.is_empty()).then_some(err) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": e}})),
+        )
+            .into_response();
+    }
+    json_resp(json!({"ok": true, "user": row}))
+}
+
+pub async fn users_op(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let uid = util::str_or(body.get("id"), "");
+    let op = util::str_or(body.get("op"), "");
+    let (ok, err) = crate::users::user_op(&uid, &op, &body);
+    if !ok {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": err}})),
+        )
+            .into_response();
+    }
+    store().flush();
+    json_resp(json!({"ok": true}))
+}

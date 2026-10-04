@@ -28,6 +28,9 @@ pub mod web_assets {
     pub const LANDING_HTML: &str = include_str!("../web/landing.html");
     pub const LOGIN_HTML: &str = include_str!("../web/login.html");
     pub const QUEUE_HTML: &str = include_str!("../web/queue.html");
+    pub const USER_HTML: &str = include_str!("../web/user.html");
+    pub const USER_LOGIN_HTML: &str = include_str!("../web/user_login.html");
+    pub const USER_JS: &str = include_str!("../web/user.js");
 }
 
 pub fn cors_headers() -> Vec<(String, String)> {

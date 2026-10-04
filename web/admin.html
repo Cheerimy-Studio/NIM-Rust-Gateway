@@ -248,6 +248,7 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-pane="upstreams"><i class="bi bi-hdd-network"></i>上游</a>
     <a href="javascript:void(0)" data-pane="import"><i class="bi bi-upload"></i>导入</a>
     <a href="javascript:void(0)" data-pane="tokens"><i class="bi bi-shield-lock"></i>访问令牌</a>
+    <a href="javascript:void(0)" data-pane="users"><i class="bi bi-people"></i>用户</a>
     <a href="javascript:void(0)" data-pane="intercept"><i class="bi bi-slash-circle"></i>拦截</a>
     <div class="nav-label">数据</div>
     <a href="javascript:void(0)" data-pane="test"><i class="bi bi-chat-dots"></i>模型测试</a>
@@ -387,6 +388,8 @@ details.upgrp[open]{background:#fff}
         <div class="row g-3 pt-1">
           <div class="col-12"><label class="form-label" for="up-models">渠道可用模型（空=不限）</label>
             <textarea class="form-control form-control-sm font-monospace" id="up-models" rows="2" placeholder="deepseek-ai/deepseek-r1&#10;meta/llama-3.3-70b-instruct"></textarea></div>
+          <div class="col-12"><label class="form-label" for="up-prices">模型价格（每行 模型=价格，元/次；未列出的模型为免费）</label>
+            <textarea id="up-prices" class="form-control font-monospace" rows="3" placeholder="kimi-k3=0.02&#10;glm-5.3=0.01"></textarea></div>
           <div class="col-12"><label class="form-label" for="up-map">模型映射（每行 客户端模型=上游模型）</label>
             <textarea class="form-control form-control-sm font-monospace" id="up-map" rows="2" placeholder="gpt-4o=meta/llama-3.3-70b-instruct"></textarea></div>
         </div>
@@ -558,6 +561,35 @@ details.upgrp[open]{background:#fff}
   </div>
 </section>
 
+
+<section class="pane" id="pane-users">
+  <h2 class="pane-title">用户</h2>
+  <div class="card mb-3">
+    <div class="card-header">添加用户</div>
+    <div class="card-body">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3"><label class="form-label" for="usr-name">用户名</label>
+          <input class="form-control form-control-sm" id="usr-name"></div>
+        <div class="col-md-3"><label class="form-label" for="usr-pw">初始密码</label>
+          <input class="form-control form-control-sm" id="usr-pw" placeholder="至少 6 位"></div>
+        <div class="col-md-2"><label class="form-label" for="usr-bal">初始余额（元）</label>
+          <input type="number" step="0.01" min="0" class="form-control form-control-sm" id="usr-bal" value="0"></div>
+        <div class="col-md-2"><label class="form-label" for="usr-frpm">免费模型限速（次/分）</label>
+          <input type="number" min="0" class="form-control form-control-sm" id="usr-frpm" value="10"></div>
+        <div class="col-md-2"><button id="usr-add" class="btn btn-sm btn-primary w-100">添加</button></div>
+      </div>
+      <div class="form-text small mt-2 mb-0">付费模型限速默认关闭，添加后可在列表中设置。用户登录入口：<code>/user</code></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>用户名</th><th>余额</th><th>Key 数</th><th>免费限速</th><th>付费限速</th><th>状态</th><th>创建时间</th><th class="text-end">操作</th></tr></thead>
+      <tbody id="usr-rows"></tbody>
+    </table>
+    </div>
+  </div>
+</section>
 
 <section class="pane" id="pane-intercept">
   <h2 class="pane-title">拦截</h2>

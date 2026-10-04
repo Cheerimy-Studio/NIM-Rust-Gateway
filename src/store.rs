@@ -66,6 +66,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("sessions", &["sessions"]),
     ("intercepted", &["intercepted"]),
     ("queue", &["queue"]),
+    ("users", &["users", "user_tokens", "user_logs", "user_rpm"]),
     (
         "metrics",
         &[
@@ -159,7 +160,7 @@ pub fn csrf_token(cfg: &Value) -> String {
     hmac_hex(secret.as_bytes(), b"csrf")
 }
 
-fn hmac_hex(key: &[u8], msg: &[u8]) -> String {
+pub fn hmac_hex(key: &[u8], msg: &[u8]) -> String {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac key");
     mac.update(msg);
     let out = mac.finalize().into_bytes();
@@ -531,9 +532,14 @@ pub fn migrate(db: &mut Value) {
         "queue",
         "sessions",
         "channel_presets",
+        "users",
+        "user_tokens",
+        "user_logs",
+        "user_rpm",
     ] {
         obj.entry(k)
-            .or_insert(if k == "upstreams" || k == "keys" || k == "logs" || k == "queue" || k == "sessions" {
+            .or_insert(if k == "upstreams" || k == "keys" || k == "logs" || k == "queue" || k == "sessions"
+                || k == "users" || k == "user_tokens" || k == "user_logs" {
                 Value::Array(vec![])
             } else {
                 Value::Object(Obj::new())
@@ -557,6 +563,10 @@ pub fn migrate(db: &mut Value) {
         ("training", "arr"),
         ("keys", "arr"),
         ("queue", "arr"),
+        ("users", "arr"),
+        ("user_tokens", "arr"),
+        ("user_logs", "arr"),
+        ("user_rpm", "obj"),
         ("buckets", "obj"),
         ("pool_buckets", "obj"),
         ("pool_daily", "obj"),
