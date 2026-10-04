@@ -1748,23 +1748,23 @@ pub async fn users_op(headers: &HeaderMap, body: Bytes) -> Response {
     json_resp(json!({"ok": true}))
 }
 
-/// 管理端查看某个用户的调用日志。GET /api/user-logs?id=<uid>&n=200
+/// 管理端查看某个用户的调用日志。GET /api/user-logs?id=<uid>&kind=all|paid|free&page=1&per=100
 pub async fn user_logs_admin(headers: &HeaderMap, raw_query: Option<String>) -> Response {
     if let Err(e) = require(headers, false) {
         return e;
     }
     let mut id = String::new();
-    let mut n: usize = 200;
+    let mut kind = String::from("all");
+    let mut page: i64 = 1;
+    let mut per: usize = 100;
     if let Some(q) = raw_query {
         for kv in q.split('&') {
             if let Some((k, v)) = kv.split_once('=') {
                 match k {
                     "id" => id = v.to_string(),
-                    "n" => {
-                        if let Ok(x) = v.parse::<usize>() {
-                            n = x;
-                        }
-                    }
+                    "kind" => kind = v.to_string(),
+                    "page" => page = v.parse::<i64>().unwrap_or(1),
+                    "per" => per = v.parse::<usize>().unwrap_or(100),
                     _ => {}
                 }
             }
@@ -1784,7 +1784,12 @@ pub async fn user_logs_admin(headers: &HeaderMap, raw_query: Option<String>) -> 
         )
             .into_response();
     }
-    json_resp(json!({"rows": crate::users::user_logs(&id, n.clamp(1, 500))}))
+    let kind = match kind.as_str() {
+        "paid" | "free" => kind,
+        _ => "all".to_string(),
+    };
+    let (rows, total) = crate::users::user_logs_page(&id, &kind, page, per.clamp(1, 300));
+    json_resp(json!({"rows": rows, "total": total, "kind": kind, "per": per.clamp(1, 300)}))
 }
 
 

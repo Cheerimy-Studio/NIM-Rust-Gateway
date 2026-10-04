@@ -57,6 +57,7 @@ function fallbackCopy(text) {
 function uiConfirm(msg) { return window.confirm(msg); }
 
 let ME = null;
+bindLogsKind();
 
 function showLogin() {
   $('#login-view').style.display = 'flex';
@@ -133,11 +134,41 @@ async function loadKeys() {
   }
 }
 
+let LOGS_STATE = {kind: 'all', page: 1};
+const LOGS_PER = 50;
+
+function logsKindBtns() {
+  return [
+    ['all', $('#logs-kind-all')],
+    ['paid', $('#logs-kind-paid')],
+    ['free', $('#logs-kind-free')],
+  ];
+}
+
+function bindLogsKind() {
+  for (const [kind, btn] of logsKindBtns()) {
+    btn.onclick = () => {
+      LOGS_STATE = {kind, page: 1};
+      logsKindBtns().forEach(([k, b]) => b.classList.toggle('active', k === kind));
+      run(() => loadLogs());
+    };
+  }
+}
+
 async function loadLogs() {
-  const rows = (await api('logs?n=200')).rows || [];
+  const d = await api('logs?kind=' + LOGS_STATE.kind + '&page=' + LOGS_STATE.page + '&per=' + LOGS_PER);
+  const rows = d.rows || [];
+  const total = d.total || 0;
+  const per = d.per || LOGS_PER;
+  const pages = Math.max(1, Math.ceil(total / per));
+  LOGS_STATE.page = Math.min(LOGS_STATE.page, pages);
   const tb = $('#log-rows');
   tb.innerHTML = '';
-  if (!rows.length) { tb.innerHTML = '<tr><td colspan="7" class="hint">暂无调用记录</td></tr>'; return; }
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="hint text-center py-4">'
+      + (LOGS_STATE.kind === 'paid' ? '暂无付费模型调用记录' : LOGS_STATE.kind === 'free' ? '暂无免费模型调用记录' : '暂无调用记录')
+      + '</td></tr>';
+  }
   for (const r of rows) {
     const tr = document.createElement('tr');
     const st = r.st >= 200 && r.st < 400
@@ -152,6 +183,27 @@ async function loadLogs() {
       + '<td class="small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
     tb.appendChild(tr);
   }
+  $('#logs-meta').textContent = '共 ' + total + ' 条 · 每页 ' + per + ' 条';
+  const nav = $('#logs-pages');
+  nav.innerHTML = '';
+  const mk = (label, page, disabled, active) => {
+    const li = document.createElement('li');
+    li.className = 'page-item' + (disabled ? ' disabled' : '') + (active ? ' active' : '');
+    const a = document.createElement('a');
+    a.className = 'page-link';
+    a.href = 'javascript:void(0)';
+    a.textContent = label;
+    a.onclick = () => {
+      if (disabled || active) return;
+      LOGS_STATE.page = page;
+      run(() => loadLogs());
+    };
+    li.appendChild(a);
+    nav.appendChild(li);
+  };
+  mk('‹', LOGS_STATE.page - 1, LOGS_STATE.page <= 1, false);
+  mk(LOGS_STATE.page + ' / ' + pages, LOGS_STATE.page, true, true);
+  mk('›', LOGS_STATE.page + 1, LOGS_STATE.page >= pages, false);
 }
 
 async function loadModels() {

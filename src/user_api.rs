@@ -263,17 +263,27 @@ pub async fn keys_op(headers: &HeaderMap, body: Bytes) -> Response {
 
 pub async fn logs(headers: &HeaderMap, raw_query: Option<String>) -> Response {
     let Ok(uid) = user_require(headers, false) else { return user_require_err() };
-    let n: usize = raw_query
-        .as_deref()
-        .and_then(|q| {
-            q.split('&').find_map(|kv| {
-                let (k, v) = kv.split_once('=')?;
-                if k == "n" { v.parse::<usize>().ok() } else { None }
-            })
-        })
-        .unwrap_or(100)
-        .clamp(1, 500);
-    json_resp(json!({"rows": users::user_logs(&uid, n)}))
+    let mut kind = String::from("all");
+    let mut page: i64 = 1;
+    let mut per: usize = 50;
+    if let Some(q) = raw_query {
+        for kv in q.split('&') {
+            if let Some((k, v)) = kv.split_once('=') {
+                match k {
+                    "kind" => kind = v.to_string(),
+                    "page" => page = v.parse::<i64>().unwrap_or(1),
+                    "per" => per = v.parse::<usize>().unwrap_or(50),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let kind = match kind.as_str() {
+        "paid" | "free" => kind,
+        _ => "all".to_string(),
+    };
+    let (rows, total) = users::user_logs_page(&uid, &kind, page, per.clamp(1, 300));
+    json_resp(json!({"rows": rows, "total": total, "kind": kind, "per": per.clamp(1, 300)}))
 }
 
 /// 模型广场：对外可用模型 + 免费/价格。
@@ -332,8 +342,12 @@ pub async fn refresh_login(headers: &HeaderMap) -> Response {
 pub async fn stats(headers: &HeaderMap) -> Response {
     let Ok(uid) = user_require(headers, false) else { return user_require_err() };
     let db = store().load();
-    let logs = db.get("user_logs").and_then(|l| l.as_array()).cloned().unwrap_or_default();
-    let my_logs: Vec<&Value> = logs.iter().filter(|r| util::str_or(r.get("user_id"), "") == uid).collect();
+    let mut my_logs: Vec<Value> = Vec::new();
+    for key in ["user_logs_paid", "user_logs_free"] {
+        if let Some(a) = db.get(key).and_then(|l| l.as_array()) {
+            my_logs.extend(a.iter().filter(|r| util::str_or(r.get("user_id"), "") == uid).cloned());
+        }
+    }
     let total_calls = my_logs.len() as i64;
     let total_cost: f64 = my_logs.iter().map(|r| util::f64_or(r.get("cost"), 0.0)).sum();
     let key_count = db.get("user_tokens").and_then(|t| t.as_array())

@@ -1855,8 +1855,8 @@ async function loadUsers() {
     const lg = document.createElement('button');
     lg.className = 'btn btn-sm btn-outline-secondary me-1'; lg.textContent = '日志';
     lg.onclick = () => run(async () => {
-      const d = await api('user-logs?id=' + encodeURIComponent(u.id) + '&n=200');
-      showUserLogs(u, d.rows || []);
+      const d = await api('user-logs?id=' + encodeURIComponent(u.id) + '&kind=all&page=1&per=100');
+      showUserLogs(u, d.rows || [], d.total || 0);
     });
     const tog = document.createElement('button');
     tog.className = 'btn btn-sm btn-outline-secondary me-1';
@@ -1879,7 +1879,7 @@ async function loadUsers() {
   if (!rows.length) tb.innerHTML = '<tr><td colspan="8" class="text-muted small">还没有用户</td></tr>';
 }
 
-function showUserLogs(u, rows) {
+function showUserLogs(u, rows, total) {
   const tb = el('table', 'table table-sm table-hover align-middle');
   tb.innerHTML = '<thead><tr><th>时间</th><th>模型</th><th>状态</th><th class="text-end">耗时</th>'
     + '<th class="text-end">输入</th><th class="text-end">输出</th><th class="text-end">费用</th></tr></thead>';
@@ -1900,7 +1900,10 @@ function showUserLogs(u, rows) {
     body.appendChild(tr);
   }
   tb.appendChild(body);
-  uiPanel('调用日志 · ' + u.username, tb);
+  const note = el('div', 'small text-muted mt-2', '付费/免费日志分开保留（付费 250 条、免费 50 条），此为合并视图最近 ' + rows.length + ' 条' + (total > rows.length ? '（共 ' + total + ' 条）' : ''));
+  const wrap = el('div');
+  wrap.append(tb, note);
+  uiPanel('调用日志 · ' + u.username, wrap);
 }
 
 $('#usr-add').onclick = guard(async () => {

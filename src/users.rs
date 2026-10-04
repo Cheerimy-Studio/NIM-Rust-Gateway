@@ -440,6 +440,8 @@ pub fn check_user_rpm(user_id: &str, kind: &str, rpm: i64) -> Result<(), f64> {
 }
 
 /// 成功调用计费 + 用户调用日志。channel 上未设置价格的模型 = 免费（cost=0 也记日志）。
+/// 日志按付费/免费分表：付费保留 user_log_paid_max（默认 250）条，免费保留
+/// user_log_free_max（默认 50）条，均为「每个用户」各自的保留条数。
 pub fn bill(
     user_id: &str,
     key_id: &str,
@@ -469,18 +471,33 @@ pub fn bill(
         "out_tok": out_tok,
         "stream": stream,
     });
-    let cap = {
+    let (arr_key, cap) = {
         let cfg = store().load();
-        util::cfg_int(cfg.get("config").unwrap_or(&json!({})), "user_log_max", 1000).max(0) as usize
+        let empty = json!({});
+        let c = cfg.get("config").unwrap_or(&empty);
+        if cost > 0.0 {
+            ("user_logs_paid", util::cfg_int(c, "user_log_paid_max", 250).clamp(0, 5000) as usize)
+        } else {
+            ("user_logs_free", util::cfg_int(c, "user_log_free_max", 50).clamp(0, 5000) as usize)
+        }
     };
     store().update(|db| {
-        // 日志（全局上限 user_log_max，默认 1000）
+        // 旧版混存表（单数组、全局上限）拆分为付费/免费两张表
+        split_legacy_user_logs(db);
+        // 日志：插入该用户的分表，并只把「该用户」的条数截到保留上限
         {
             let obj = db.as_object_mut().unwrap();
-            let logs = obj.entry("user_logs").or_insert_with(|| Value::Array(vec![]));
+            let logs = obj.entry(arr_key).or_insert_with(|| Value::Array(vec![]));
             if let Some(a) = logs.as_array_mut() {
                 a.insert(0, row);
-                a.truncate(cap);
+                let mut seen = 0usize;
+                a.retain(|r| {
+                    if util::str_or(r.get("user_id"), "") != user_id {
+                        return true;
+                    }
+                    seen += 1;
+                    seen <= cap
+                });
             }
         }
         // 扣费（仅付费模型）
@@ -502,20 +519,96 @@ pub fn bill(
     cost
 }
 
-/// 用户调用日志（时间倒序，n 条）。
-pub fn user_logs(user_id: &str, n: usize) -> Vec<Value> {
-    store()
-        .load()
-        .get("user_logs")
-        .and_then(|l| l.as_array())
+/// 旧版混存日志表（user_logs 单数组）按 cost>0 拆到付费/免费两张表；拆完移除旧键。
+fn split_legacy_user_logs(db: &mut Value) {
+    let Some(obj) = db.as_object_mut() else { return };
+    let Some(legacy) = obj.remove("user_logs") else { return };
+    let arr = legacy.as_array().cloned().unwrap_or_default();
+    let mut paid: Vec<Value> = Vec::new();
+    let mut free: Vec<Value> = Vec::new();
+    for r in arr {
+        if util::f64_or(r.get("cost"), 0.0) > 0.0 {
+            paid.push(r);
+        } else {
+            free.push(r);
+        }
+    }
+    // 旧表本就时间倒序，截断即保留最近
+    paid.truncate(250);
+    free.truncate(50);
+    obj.entry("user_logs_paid")
+        .or_insert_with(|| Value::Array(vec![]))
+        .as_array_mut()
         .map(|a| {
-            a.iter()
-                .filter(|r| util::str_or(r.get("user_id"), "") == user_id)
-                .take(n)
-                .cloned()
-                .collect()
+            let mut merged = paid;
+            merged.extend(a.iter().cloned());
+            merged.sort_by_key(|r| -util::int_or(r.get("t"), 0));
+            *a = merged;
+        });
+    obj.entry("user_logs_free")
+        .or_insert_with(|| Value::Array(vec![]))
+        .as_array_mut()
+        .map(|a| {
+            let mut merged = free;
+            merged.extend(a.iter().cloned());
+            merged.sort_by_key(|r| -util::int_or(r.get("t"), 0));
+            *a = merged;
+        });
+}
+
+/// 用户调用日志（分页）。kind: "paid" / "free" / "all"（合并按时间倒序）。
+/// 返回 (当前页行, 总条数)。每页 per 条，page 越界自动收敛到最后一页。
+pub fn user_logs_page(user_id: &str, kind: &str, page: i64, per: usize) -> (Vec<Value>, i64) {
+    {
+        // 旧版混存表迁移（存在才写一次）
+        let has_legacy = store().load().get("user_logs").and_then(|l| l.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+        if has_legacy {
+            store().update(|db| split_legacy_user_logs(db));
+        }
+    }
+    let db = store().load();
+    let collect = |key: &str| -> Vec<Value> {
+        db.get(key)
+            .and_then(|l| l.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|r| util::str_or(r.get("user_id"), "") == user_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut rows = match kind {
+        "paid" => collect("user_logs_paid"),
+        "free" => collect("user_logs_free"),
+        _ => {
+            let mut all = collect("user_logs_paid");
+            all.extend(collect("user_logs_free"));
+            all.sort_by_key(|r| -util::int_or(r.get("t"), 0));
+            all
+        }
+    };
+    let total = rows.len() as i64;
+    let per = per.max(1) as i64;
+    let pages = ((total + per - 1) / per).max(1);
+    let page = page.clamp(1, pages);
+    let start = ((page - 1) * per) as usize;
+    rows = rows.into_iter().skip(start).take(per as usize).collect();
+    (rows, total)
+}
+
+/// 该用户日志总条数（概览/统计用）：付费 + 免费。
+pub fn user_logs_count(user_id: &str) -> i64 {
+    let db = store().load();
+    ["user_logs_paid", "user_logs_free"]
+        .iter()
+        .map(|k| {
+            db.get(*k)
+                .and_then(|l| l.as_array())
+                .map(|a| a.iter().filter(|r| util::str_or(r.get("user_id"), "") == user_id).count() as i64)
+                .unwrap_or(0)
         })
-        .unwrap_or_default()
+        .sum()
 }
 
 /// 模型广场：对外可用模型 + 价格（取各渠道最低价；无价 = 免费）。
