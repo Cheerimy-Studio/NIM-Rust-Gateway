@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
 
 pub const MAX_BODY: usize = 20 * 1024 * 1024;
-pub const VERSION: &str = "1.7.6";
+pub const VERSION: &str = "1.7.7";
 
 pub const FALLBACK_MODELS: &[&str] = &[
     "deepseek-ai/deepseek-r1",
