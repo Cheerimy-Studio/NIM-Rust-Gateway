@@ -7,93 +7,171 @@
 <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 <style>
-body{min-height:100vh;background:linear-gradient(160deg,#0d1526 0%,#0a1120 100%);
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-  padding:22px 0 60px}
-.top{display:flex;align-items:center;gap:12px;margin-bottom:20px}
-.mark{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;
-  background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-weight:800;font-size:17px;
-  box-shadow:0 4px 14px rgba(16,185,129,.4)}
-.top-title{color:#fff;font-weight:700;font-size:16px}
-.top-sub{color:#8fa0bd;font-size:11px;letter-spacing:1.4px;text-transform:uppercase}
-.balance-card{border:0;border-radius:16px;color:#fff;padding:24px 26px;
-  background:linear-gradient(135deg,#059669,#0d9488);box-shadow:0 14px 40px rgba(13,148,136,.35)}
-.balance-label{font-size:12px;opacity:.85;letter-spacing:1px}
-.balance-num{font-size:34px;font-weight:800;font-variant-numeric:tabular-nums}
-.balance-unit{font-size:14px;opacity:.85;font-weight:600}
-.lim-chip{display:inline-block;background:rgba(255,255,255,.16);border-radius:8px;padding:4px 12px;font-size:12px;margin-right:6px}
+:root{--acc:#10b981;--bg:#f3f5f9;--line:#e7ecf3;--txt:#1c2536;--mut:#68758a;
+  --r-xs:6px;--r-sm:8px;--r-md:10px;--r:12px;--r-lg:14px;--r-pill:999px}
+*{scrollbar-width:thin}
+body{background:var(--bg);color:var(--txt);font-size:14px;-webkit-font-smoothing:antialiased;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+a{text-decoration:none}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:202px;background:linear-gradient(180deg,#0e1729 0%,#0b1120 100%);color:#8d9bb2;flex-shrink:0;
+  display:flex;flex-direction:column;position:sticky;top:0;height:100vh;border-right:1px solid rgba(255,255,255,.045)}
+.brand{display:flex;align-items:center;gap:11px;padding:15px 15px;border-bottom:1px solid rgba(255,255,255,.06)}
+.brand .mark{width:31px;height:31px;border-radius:var(--r-md);flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-weight:800;font-size:15px;
+  box-shadow:0 3px 10px rgba(16,185,129,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.brand .bt{color:#fff;font-weight:700;font-size:14px;letter-spacing:.2px;line-height:1.2}
+.brand .bt small{display:block;font-weight:500;font-size:10px;color:#5d6b83;letter-spacing:1.2px;text-transform:uppercase;margin-top:2px}
+.sidebar nav{flex:1;overflow-y:auto;padding:10px}
+.sidebar nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;color:#8d9bb2;font-size:13.5px;
+  border-radius:var(--r-sm);margin-bottom:2px;position:relative;transition:background .14s ease,color .14s ease}
+.sidebar nav a i{font-size:15px;width:18px;text-align:center}
+.sidebar nav a:hover{color:#e3eaf5;background:rgba(255,255,255,.05)}
+.sidebar nav a.active{color:#fff;background:linear-gradient(90deg,rgba(16,185,129,.3),rgba(16,185,129,.05))}
+.sidebar nav a.active::before{content:"";position:absolute;left:-10px;top:8px;bottom:8px;width:3px;border-radius:3px;background:#10b981}
+.sidebar .nav-label{font-size:10px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;
+  color:#57657d;padding:13px 12px 5px}
+.sidebar .foot{padding:8px 10px;border-top:1px solid rgba(255,255,255,.06)}
+.sidebar .foot button{color:#8d9bb2;font-size:13px;border-radius:var(--r-sm);padding:7px 11px;display:inline-flex;align-items:center;gap:6px;
+  transition:all .13s ease;border:0;background:transparent;cursor:pointer;width:100%}
+.sidebar .foot button:hover{color:#f87171;background:rgba(248,113,113,.09)}
+.content{flex:1;padding:22px 26px;min-width:0}
 .pane{display:none}
-.pane.active{display:block}
-.cardx{border:0;border-radius:14px;box-shadow:0 10px 30px rgba(2,8,20,.35)}
-.nav-pills .nav-link{border-radius:10px;font-size:13.5px;font-weight:600;color:#c6d2e6;padding:.5rem 1rem}
-.nav-pills .nav-link.active{background:linear-gradient(135deg,#3576f0,#2a5ce0);color:#fff}
-table{font-size:13.5px}
-.key-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
-.badge-free{background:#d1fae5;color:#047857;font-weight:600}
-.badge-paid{background:#fef3c7;color:#92400e;font-weight:600}
-.model-card{border:0;border-radius:12px;box-shadow:0 4px 14px rgba(2,8,20,.08)}
-.hint{font-size:12px;color:#8fa0bd}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.pane.active{display:block;animation:fadein .18s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.pane-title{font-size:17px;font-weight:700;margin:0 0 15px;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+.pane-title::before{content:"";width:3px;height:15px;border-radius:2px;background:linear-gradient(180deg,#10b981,#059669);flex-shrink:0}
+.card{border:1px solid var(--line);border-radius:var(--r);background:#fff;
+  box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.03)}
+.card:hover{border-color:#dbe2ec}
+.card-header{background:#fff;border-bottom:1px solid var(--line);font-weight:600;font-size:13px;color:#2c3a52;
+  border-radius:var(--r) var(--r) 0 0!important;padding:.6rem .95rem}
+.table{font-size:13px;margin-bottom:0;--bs-table-border-color:#eef2f7}
+.table thead th{color:#8492a6;font-weight:600;font-size:11.5px;letter-spacing:.5px;background:#fafbfd;border-bottom:1px solid var(--line);white-space:nowrap}
+.table td,.table th{padding:.5rem .65rem}
+.table>:not(caption)>*>*:first-child{padding-left:.95rem}
+.table>:not(caption)>*>*:last-child{padding-right:.95rem}
+.table-hover tbody tr:hover{background:#f7f9fc}
+.stat{padding:.95rem 1.05rem;position:relative;overflow:hidden}
+.stat .lbl{font-size:12px;color:var(--mut);letter-spacing:.3px}
+.stat .num{font-size:1.45rem;font-weight:700;line-height:1.3;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:11.5px;color:#98a3b8}
+.stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:0 2px 2px 0;background:transparent}
+.stat.green::before{background:#10b981}
+.stat.accent::before{background:var(--acc)}
+.card.stat:hover{box-shadow:0 8px 22px rgba(16,24,40,.09);transform:translateY(-1px);border-color:#d5deea}
+.key-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
+.btn{border-radius:var(--r-sm);font-size:13px;white-space:nowrap;transition:all .15s ease;--bs-btn-font-size:13px}
+.btn-sm{border-radius:var(--r-sm);padding:.3rem .68rem;--bs-btn-padding-y:.3rem}
+.btn-primary{background:linear-gradient(135deg,#10b981,#059669);border-color:transparent;box-shadow:0 1px 3px rgba(16,185,129,.28)}
+.btn-primary:hover{background:linear-gradient(135deg,#059669,#047857);border-color:transparent}
+.btn-outline-secondary{--bs-btn-color:#5b6b84;--bs-btn-border-color:#d3dbe7;--bs-btn-hover-bg:#f2f5fa;
+  --bs-btn-hover-border-color:#c4cfdf;--bs-btn-hover-color:#3a4a63}
+.form-control{border-radius:var(--r-sm);border-color:#dde4ee}
+.form-control-sm{font-size:13px}
+.form-control:hover{border-color:#c9d4e4}
+.form-control:focus{border-color:#10b981;box-shadow:0 0 0 .18rem rgba(16,185,129,.13)}
+.form-label{font-size:12px;color:var(--mut);margin-bottom:3px}
+.badge{font-weight:600;letter-spacing:.2px;border-radius:var(--r-pill);font-size:11px;padding:.34em .72em}
+.badge-free{background:#d1fae5;color:#047857}
+.badge-paid{background:#fef3c7;color:#92400e}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
+.model-card{border:1px solid var(--line);border-radius:var(--r);background:#fff;transition:all .15s ease}
+.model-card:hover{border-color:#d5deea;box-shadow:0 4px 14px rgba(16,24,40,.08)}
+.hint{font-size:12px;color:var(--mut)}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#c6d0de;border-radius:6px}
+@media(max-width:860px){
+  .layout{flex-direction:column}
+  .sidebar{width:100%;height:auto;position:static}
+  .sidebar nav{display:flex;flex-wrap:wrap;padding:6px}
+  .sidebar nav a{margin-bottom:0}
+  .sidebar nav a.active::before{display:none}
+  .content{padding:14px}
+}
 </style>
 </head>
 <body>
-<div class="container-xl">
-  <div class="top">
-    <div class="mark">U</div>
-    <div><div class="top-title">用户中心</div><div class="top-sub">USER PORTAL</div></div>
-    <div class="ms-auto"><button class="btn btn-sm btn-outline-light" id="btn-logout">退出登录</button></div>
+<div class="layout">
+<aside class="sidebar">
+  <div class="brand"><span class="mark">U</span><span class="bt">用户中心<small>User Portal</small></span></div>
+  <nav>
+    <div class="nav-label">账户</div>
+    <a href="javascript:void(0)" data-p="overview" class="active"><i class="bi bi-speedometer2"></i>概览</a>
+    <div class="nav-label">开发</div>
+    <a href="javascript:void(0)" data-p="keys"><i class="bi bi-key"></i>API Key</a>
+    <a href="javascript:void(0)" data-p="logs"><i class="bi bi-list-ul"></i>调用日志</a>
+    <a href="javascript:void(0)" data-p="models"><i class="bi bi-grid-3x3-gap"></i>模型广场</a>
+  </nav>
+  <div class="foot">
+    <button id="btn-logout"><i class="bi bi-box-arrow-left"></i>退出登录</button>
   </div>
+</aside>
+<div class="content">
 
+<div class="pane active" id="pane-overview">
+  <h2 class="pane-title">概览</h2>
   <div class="row g-3 mb-3">
-    <div class="col-md-5">
-      <div class="balance-card">
-        <div class="balance-label">账户余额</div>
-        <div><span class="balance-num" id="balance">-</span> <span class="balance-unit">元</span></div>
-        <div style="margin-top:10px">
-          <span class="lim-chip" id="chip-free">免费模型限速 -</span>
-          <span class="lim-chip" id="chip-paid">付费模型限速 -</span>
-        </div>
-      </div>
+    <div class="col-md-4">
+      <div class="card stat green"><div class="stat">
+        <div class="lbl">账户余额</div><div class="num" id="ov-balance">-</div><div class="sub">元</div>
+      </div></div>
     </div>
-    <div class="col-md-7">
-      <ul class="nav nav-pills gap-2">
-        <li class="nav-item"><a class="nav-link active" data-p="keys" href="#">API Key</a></li>
-        <li class="nav-item"><a class="nav-link" data-p="logs" href="#">调用日志</a></li>
-        <li class="nav-item"><a class="nav-link" data-p="models" href="#">模型广场</a></li>
-      </ul>
+    <div class="col-md-4">
+      <div class="card stat accent"><div class="stat">
+        <div class="lbl">免费模型限速</div><div class="num" id="ov-frpm">-</div><div class="sub">次 / 分钟</div>
+      </div></div>
+    </div>
+    <div class="col-md-4">
+      <div class="card stat"><div class="stat">
+        <div class="lbl">付费模型限速</div><div class="num" id="ov-prpm">-</div><div class="sub" id="ov-prpm-sub"></div>
+      </div></div>
     </div>
   </div>
+  <div class="card"><div class="card-body">
+    <div class="small" style="color:var(--mut)">
+      <i class="bi bi-info-circle me-1"></i>
+      使用 <code class="mono">Authorization: Bearer sk-usr-…</code> 调用网关接口。
+      未设价的模型为免费模型，余额为 0 也可调用。
+    </div>
+  </div></div>
+</div>
 
-  <div class="pane active" id="pane-keys">
-    <div class="card cardx mb-3"><div class="card-body">
-      <div class="d-flex gap-2 align-items-end flex-wrap">
-        <div><label class="form-label small fw-semibold mb-1">Key 名称</label>
-          <input class="form-control form-control-sm" id="key-name" placeholder="可选，便于识别" style="min-width:220px"></div>
-        <button class="btn btn-sm btn-success" id="key-add">生成新 Key</button>
-        <span class="hint">调用方式与网关令牌一致：Authorization: Bearer sk-usr-…</span>
-      </div>
-    </div></div>
-    <div class="card cardx"><div class="card-body">
-      <table class="table table-hover align-middle mb-0">
-        <thead><tr><th>名称</th><th>Key</th><th>状态</th><th>最近调用</th><th></th></tr></thead>
-        <tbody id="key-rows"></tbody>
-      </table>
-    </div></div>
-  </div>
+<div class="pane" id="pane-keys">
+  <h2 class="pane-title">API Key</h2>
+  <div class="card mb-3"><div class="card-body">
+    <div class="d-flex gap-2 align-items-end flex-wrap">
+      <div style="min-width:200px"><label class="form-label" for="key-name">名称</label>
+        <input class="form-control form-control-sm" id="key-name" placeholder="可选，便于识别"></div>
+      <button class="btn btn-sm btn-primary" id="key-add">生成新 Key</button>
+    </div>
+  </div></div>
+  <div class="card"><div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>名称</th><th>Key</th><th>状态</th><th>最近调用</th><th class="text-end">操作</th></tr></thead>
+      <tbody id="key-rows"></tbody>
+    </table>
+  </div></div>
+</div>
 
-  <div class="pane" id="pane-logs">
-    <div class="card cardx"><div class="card-body">
-      <table class="table table-hover align-middle mb-0">
-        <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>耗时</th><th>输入</th><th>输出</th><th>费用</th></tr></thead>
-        <tbody id="log-rows"></tbody>
-      </table>
-    </div></div>
-  </div>
+<div class="pane" id="pane-logs">
+  <h2 class="pane-title">调用日志</h2>
+  <div class="card"><div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>耗时</th><th>输入</th><th>输出</th><th>费用</th></tr></thead>
+      <tbody id="log-rows"></tbody>
+    </table>
+  </div></div>
+</div>
 
-  <div class="pane" id="pane-models">
-    <div class="hint mb-2">标有「免费」的模型余额为 0 也可调用；标价为该模型单次成功调用的费用。</div>
-    <div class="row g-3" id="model-cards"></div>
-  </div>
+<div class="pane" id="pane-models">
+  <h2 class="pane-title">模型广场</h2>
+  <div class="hint mb-3">标有「免费」的模型余额为 0 也可调用；标价为单次成功调用的费用（失败不计费）。</div>
+  <div class="row g-3" id="model-cards"></div>
+</div>
+
+</div>
 </div>
 <script src="/assets/user.js"></script>
 </body>
