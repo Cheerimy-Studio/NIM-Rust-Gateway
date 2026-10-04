@@ -500,11 +500,10 @@ pub fn model_square() -> Vec<Value> {
                 order.push(m);
             }
         }
-        // model_map 别名同样进广场（价格按目标模型）
+        // model_map 别名同样进广场（按别名自身计价，与计费口径一致）
         if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
-            for (alias, target) in mm {
-                let target = util::str_or(Some(target), "");
-                let price = prices.get(&target).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            for (alias, _target) in mm {
+                let price = prices.get(alias).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let e = best.entry(alias.clone()).or_insert(f64::INFINITY);
                 if price < *e {
                     *e = price;

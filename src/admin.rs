@@ -1813,12 +1813,11 @@ pub async fn prices_list(headers: &HeaderMap) -> Response {
                     "free": price <= 0.0, "enabled": enabled}));
             }
         }
-        // model_map 别名
+        // model_map 别名（按别名自身计价，与计费/保存口径一致）
         if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
-            for (alias, target) in mm {
-                let target_name = util::str_or(Some(target), "");
-                if target_name.is_empty() || !seen.insert(alias.clone()) { continue; }
-                let price = prices.get(&target_name).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            for (alias, _target) in mm {
+                if alias.is_empty() || !seen.insert(alias.clone()) { continue; }
+                let price = prices.get(alias).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 rows.push(json!({"channel_id": ch_id, "channel_name": ch_name,
                     "model": alias, "price": if price > 0.0 { json!(util::round6(price)) } else { json!(0) },
                     "free": price <= 0.0, "enabled": enabled}));

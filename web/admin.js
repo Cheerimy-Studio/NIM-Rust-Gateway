@@ -577,7 +577,7 @@ async function loadUpstreams() {
       $('#up-rpm').value = u.rpm_cap;
       $('#up-daily').value = u.daily_cap;
       $('#up-models').value = (u.models || []).join('\n');
-      $('#up-map').value = Object.entries(u.model_map || {}).map(([k, v]) => `${k}=${v}`).join('\\n');
+      $('#up-map').value = Object.entries(u.model_map || {}).map(([k, v]) => `${k}=${v}`).join('\n');
       for (const [id, key] of UP_FIELDS) $('#' + id).value = u[key] || 0;
       $('#up-herr').value = String(u.hide_errors || 0);
       $('#up-hname').value = String(u.hide_mapped || 0);

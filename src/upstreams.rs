@@ -603,7 +603,7 @@ pub fn validate_save(data: &Value) -> (Option<Value>, String) {
     let models_raw = data.get("models").cloned().unwrap_or(Value::from(""));
     let mut models = util::parse_model_list(&models_raw);
     models.truncate(300);
-    let row = serde_json::json!({
+    let mut row = serde_json::json!({
         "name": util::str_cut(&name, 40),
         "base": base,
         "weight": clamp(data.get("weight").unwrap_or(&Value::from(10)), 1, 100, 10),
@@ -642,6 +642,13 @@ pub fn validate_save(data: &Value) -> (Option<Value>, String) {
         "thinking_defaults": join_lines(data.get("thinking_defaults").unwrap_or(&Value::Null)),
         "enabled": util::as_bool(data.get("enabled").unwrap_or(&Value::Bool(true)), true),
     });
+    // 载荷未带 prices 时不要插入空对象：否则 save() 的旧字段保留循环会认为
+    // 新行已有该键，导致渠道表单保存（前端从不发送 prices）抹掉已设定价
+    if data.get("prices").is_none() {
+        if let Some(o) = row.as_object_mut() {
+            o.remove("prices");
+        }
+    }
     (Some(row), String::new())
 }
 
