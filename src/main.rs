@@ -685,7 +685,7 @@ pub fn self_restart(reason: &str) -> bool {
         }
     };
     prepare_restart(reason, "watch");
-    eprintln!("[restart] {}，重启进程", reason);
+    eprintln!("[restart] {}，重启", reason);
     // 必须透传原始启动参数（--port 等）：否则 --port 12345 的实例重启后会绑回默认端口
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Unix 用 execv：同 PID 替换进程映像、监听端口随之释放，与 Python 版语义一致；
@@ -716,7 +716,7 @@ pub fn self_restart(reason: &str) -> bool {
             }
         }
         RESTARTING.store(false, Ordering::SeqCst);
-        eprintln!("[restart] 无法自助重启: {}", last);
+        eprintln!("[restart] 重启失败: {}", last);
         // 界面上已显示「更新完成」，这里必须留下可见痕迹，否则版本静默停留在旧版
         let row = json!([
             util::now_i(), "watch", "updater", "-", 500, 0,
@@ -765,7 +765,7 @@ async fn update_auto_loop() {
             continue;
         }
         let wait = if first { 60 } else { hours as u64 * 3600 };
-        eprintln!("[update] 自动检查已启用，间隔 {} 小时", hours);
+        eprintln!("[update] 自动检查已启用（间隔 {}h）", hours);
         first = false;
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         let hours_now = {
@@ -777,7 +777,7 @@ async fn update_auto_loop() {
         }
         match update::check_newer_tag().await {
             Ok(Some(tag)) => {
-                eprintln!("[update] 发现新版本 {}，开始自动升级", tag);
+                eprintln!("[update] 发现 {}，开始升级", tag);
                 let row = json!([
                     util::now_i(), "watch", "updater", "-", 200, 0,
                     util::str_cut(&format!("自动检查更新:发现 {},开始自动升级", tag), 140),
@@ -806,7 +806,7 @@ async fn update_auto_loop() {
                     }
                 });
                 let (ok, msg) = update::remote_update().await;
-                eprintln!("[update] 升级结果: ok={} {}", ok, msg);
+                eprintln!("[update] 升级结果 ok={} {}", ok, msg);
                 if ok {
                     return; // remote_update 已安排自重启
                 }
@@ -1015,7 +1015,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    eprintln!("[start] NIM Gateway (Rust) 监听 0.0.0.0:{}，后台 /admin", port);
+    eprintln!("[start] 监听 0.0.0.0:{}，后台 /admin", port);
     if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

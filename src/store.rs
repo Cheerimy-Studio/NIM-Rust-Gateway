@@ -53,7 +53,7 @@ pub fn db_dir() -> PathBuf {
 }
 
 fn warn_persist(msg: &str) {
-    eprintln!("[store] 落盘失败({}): 数据保留在内存，将自动重试", msg);
+    eprintln!("[store] 写盘失败({}): 数据在内存中，等待下次写入", msg);
 }
 
 /// 表名 → 顶层键 的分组（组内键同文件落盘）。
@@ -248,7 +248,7 @@ fn read_group_file(group: &str) -> Value {
             // 损坏：另存副本并告警，该表按空表继续（不影响其它表）
             let bak = format!("{}.corrupt-{}", path.display(), util::now_i());
             let _ = fs::rename(&path, &bak);
-            eprintln!("[store] {}.json 解析失败，原文件已另存，该表以空数据继续", group);
+            eprintln!("[store] {}.json 解析失败，已另存原文件，该表重置为空", group);
             Value::Object(Obj::new())
         }
     }
@@ -381,7 +381,7 @@ impl Store {
                     if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
                         if v.is_object() {
                             db = v;
-                            eprintln!("[store] 旧版 db.json 已迁移至 db/ 分表存储，原文件留存为 db.json.migrated");
+                            eprintln!("[store] db.json 已迁移至 db/ 分表，原文件留存为 db.json.migrated");
                         }
                     }
                 }

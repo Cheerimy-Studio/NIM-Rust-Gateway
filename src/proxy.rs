@@ -282,7 +282,7 @@ pub fn conn_reason(e: &reqwest::Error) -> String {
     if e.is_builder() {
         return util::str_cut(&format!("InvalidURL: {}", e), 300);
     }
-    let txt = format!("reqwest::Error: {}", e);
+    let txt = format!("{}", e);
     let low = txt.to_lowercase();
     let hint = if low.contains("dns")
         || low.contains("getaddrinfo")
@@ -1656,7 +1656,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         rstatus = 0;
                     }
                     Err(_) => {
-                        rerr = format!("reqwest::Error: 上游 {} 秒内未返回", read_to);
+                        rerr = format!("上游 {} 秒内未返回", read_to);
                         rstatus = 0;
                     }
                 }
@@ -2472,7 +2472,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         rstatus = 0;
                     }
                     Err(_) => {
-                        rerr = format!("reqwest::Error: 上游 {} 秒内未返回", read_to);
+                        rerr = format!("上游 {} 秒内未返回", read_to);
                         rstatus = 0;
                     }
                 }

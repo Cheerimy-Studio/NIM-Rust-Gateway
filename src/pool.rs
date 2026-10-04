@@ -1635,9 +1635,11 @@ fn release_fn(
             util::int_or(log.get("out_tok"), 0),
             util::str_cut(&util::str_or(log.get("tok"), ""), 20),
         ]);
-        la.insert(0, row);
         let max_logs = cfg_int_("log_max", 200).max(0) as usize;
-        la.truncate(max_logs);
+        if max_logs > 0 {
+            la.insert(0, row);
+            la.truncate(max_logs);
+        }
     }
 
     // 访问令牌使用追踪

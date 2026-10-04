@@ -164,8 +164,13 @@ pub fn pool_size(cfg: &Value, accounts: i64) -> i64 {
 }
 
 fn build_client(verify_tls: bool, connect_to: i64) -> reqwest::Client {
+    // 关键：NVIDIA NIM 等上游会在 15-60s 内关闭空闲连接。空闲连接留在池里太久，
+    // 下一个请求复用死连接时 hyper 不会重试（请求带 body），结果就是 200s 超时。
+    // 短空闲超时 + TCP keepalive 确保死连接被及时清理。
     let mut b = reqwest::Client::builder()
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_idle_timeout(std::time::Duration::from_secs(15))
+        .pool_max_idle_per_host(10)
+        .tcp_keepalive(std::time::Duration::from_secs(15))
         .tcp_nodelay(true);
     if !verify_tls {
         b = b.danger_accept_invalid_certs(true);
