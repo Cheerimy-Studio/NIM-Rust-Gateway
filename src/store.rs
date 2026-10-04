@@ -53,10 +53,7 @@ pub fn db_dir() -> PathBuf {
 }
 
 fn warn_persist(msg: &str) {
-    eprintln!(
-        "[store] 落盘失败({});状态仍在内存、下一轮会重试,持续失败则重启会丢这段变更 —— 检查磁盘空间与 data/ 权限",
-        msg
-    );
+    eprintln!("[store] 落盘失败({}): 数据保留在内存，将自动重试", msg);
 }
 
 /// 表名 → 顶层键 的分组（组内键同文件落盘）。
@@ -250,10 +247,7 @@ fn read_group_file(group: &str) -> Value {
             // 损坏：另存副本并告警，该表按空表继续（不影响其它表）
             let bak = format!("{}.corrupt-{}", path.display(), util::now_i());
             let _ = fs::rename(&path, &bak);
-            eprintln!(
-                "[store] {}.json 解析失败,原文件已另存;该表以空数据继续",
-                group
-            );
+            eprintln!("[store] {}.json 解析失败，原文件已另存，该表以空数据继续", group);
             Value::Object(Obj::new())
         }
     }
@@ -335,10 +329,7 @@ impl Store {
         });
         self.flush();
         let user = util::str_or(db.pointer("/config/admin_username"), "admin");
-        eprintln!(
-            "[admin] 已按 NGW_ADMIN_PASSWORD 重置管理员密码（用户名 {}）；删掉该环境变量后不再覆盖",
-            user
-        );
+        eprintln!("[admin] 已按 NGW_ADMIN_PASSWORD 重置管理员密码（{}）", user);
     }
 
     /// 读取快照（克隆）。分表目录为空且存在旧版 db.json 时做一次性拆分迁移。
@@ -389,9 +380,7 @@ impl Store {
                     if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
                         if v.is_object() {
                             db = v;
-                            eprintln!(
-                                "[store] 检测到旧版单文件 db.json：拆分为 db/ 目录分表存储，原文件改名 db.json.migrated"
-                            );
+                            eprintln!("[store] 旧版 db.json 已迁移至 db/ 分表存储，原文件留存为 db.json.migrated");
                         }
                     }
                 }

@@ -69,7 +69,7 @@ async fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
                 Err(e) => last = format!("下载失败: {}", e),
             },
             Ok(r) if r.status() == reqwest::StatusCode::FORBIDDEN || r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                return Err("更新源限流（HTTP 403/429），请稍后再试，或用 NGW_UPDATE_URL 指向自建更新源".into());
+                return Err("更新源限流（HTTP 403/429），请稍后重试或改用自建更新源".into());
             }
             Ok(r) => return Err(format!("更新源返回 HTTP {}", r.status())),
             Err(e) => last = format!("下载失败: {}", e),
@@ -197,10 +197,7 @@ async fn fetch_payload() -> Result<Option<(Vec<u8>, String)>, String> {
             })
         });
     let Some(asset_url) = asset_url else {
-        return Err(format!(
-            "Release {} 没有 {} 平台的更新包（期望资产名含 {}）",
-            tag, want, want
-        ));
+        return Err(format!("Release {} 缺少 {} 平台的更新包", tag, want));
     };
     let data = http_get_bytes(&asset_url).await?;
     Ok(Some((data, format!("已更新到 {}", tag))))
@@ -245,10 +242,7 @@ fn backup_current() -> Result<(), String> {
             Ok(_) => {}
             // 启动后文件被替换/删除（面板重新部署过）时源文件可能已不存在：
             // 不能因此把整个更新卡死——数据备份照做，只是本次没有二进制可回滚
-            Err(e) => eprintln!(
-                "[update] 警示：备份当前二进制失败（{}: {}）；本次更新的回滚将只能还原数据",
-                exe.display(), e
-            ),
+            Err(e) => eprintln!("[update] 备份二进制失败（{}: {}），本次更新无二进制回滚", exe.display(), e),
         }
     }
     // 数据备份：分表目录整目录拷贝（保留旧版单文件兼容）
@@ -328,14 +322,14 @@ async fn remote_update_inner() -> (bool, String) {
             Some(b) => new_bin = b,
             None => {
                 let _ = std::fs::remove_dir_all(&tmp);
-                return (false, "更新包里没有当前平台的二进制：更新源需提供 Rust 版二进制（tarball 内含 nim-gateway 文件，或直接指向裸二进制）".into());
+                return (false, "更新包缺少当前平台的二进制，更新源需提供 Rust 版二进制".into());
             }
         }
     }
     // 演练模式（NGW_UPDATE_DRYRUN=1）：下载→解包→自检，不覆盖、不重启
     if std::env::var("NGW_UPDATE_DRYRUN").as_deref() == Ok("1") {
         let _ = std::fs::remove_dir_all(&tmp);
-        return (true, "演练通过:更新包完整,二进制在位;DRYRUN 未覆盖文件".into());
+        return (true, "演练通过，更新包完整，未覆盖文件".into());
     }
     let Some(exe) = exe_path() else {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -369,7 +363,7 @@ async fn remote_update_inner() -> (bool, String) {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         crate::self_restart("远程更新完成");
     });
-    (true, format!("{},网关正在自动重启(数秒)", label))
+    (true, format!("{},网关正在自动重启", label))
 }
 
 /// 回滚到上次更新前（可执行文件 + 数据）。只能回滚一次，备份用完即删。

@@ -1695,6 +1695,12 @@ $('#gen-updtok').onclick = () => {
   $('#set-updtok').value = tok;
   copyText(tok).then(ok => toast(ok ? '更新令牌已生成并复制' : '更新令牌已生成，复制失败请手动复制'));
 };
+$('#btn-update').onclick = guard(async () => {
+  if (!await uiConfirm('检查并安装最新版本？安装完成后网关将自动重启。', {okText: '检查更新'})) return;
+  const r = await api('update', {method: 'POST'});
+  toast(r.note || '已开始更新');
+  setTimeout(() => location.reload(), 5000);
+});
 $('#btn-rollback').onclick = guard(async () => {
   if (!await uiConfirm('回滚到上次更新前的版本？数据也会恢复到更新前的状态，此操作只能执行一次。',
       {danger: true, okText: '回滚'})) return;
