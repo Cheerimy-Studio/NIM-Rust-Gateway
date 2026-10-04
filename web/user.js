@@ -134,10 +134,17 @@ async function loadModels() {
     const badge = m.free
       ? '<span class="badge badge-free">免费</span>'
       : '<span class="badge badge-paid">¥' + m.price + ' / 次</span>';
+    let health = '';
+    if (m.health !== null && m.health !== undefined) {
+      const h = m.health;
+      const cls = h >= 80 ? 'text-success' : h >= 50 ? 'text-warning' : 'text-danger';
+      const icon = h >= 80 ? 'bi-heart-pulse-fill' : h >= 50 ? 'bi-heart-pulse' : 'bi-heartbreak-fill';
+      health = '<div class="small mt-1"><i class="bi ' + icon + ' ' + cls + '"></i> 健康度 ' + h + '%</div>';
+    }
     col.innerHTML = '<div class="card model-card h-100"><div class="card-body">'
-      + '<div class="d-flex justify-content-between align-items-start mb-2">'
+      + '<div class="d-flex justify-content-between align-items-start mb-1">'
       + '<span class="mono fw-semibold" style="font-size:12.5px;word-break:break-all">' + m.model + '</span>' + badge
-      + '</div></div></div>';
+      + '</div>' + health + '</div></div>';
     box.appendChild(col);
   }
 }

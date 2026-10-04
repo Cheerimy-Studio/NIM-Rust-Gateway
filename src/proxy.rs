@@ -2899,5 +2899,3 @@ pub async fn v1_model_retrieve(ctx: Ctx, model_id: String) -> Response {
     json_resp(json!({"id": model_id, "object": "model", "created": 0, "owned_by": "gateway"}))
 }
 
-#[allow(unused)]
-fn touch_map(m: Map<String, Value>) {}

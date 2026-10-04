@@ -467,11 +467,6 @@ fn unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[allow(unused)]
-fn touch() {
-    let _ = store();
-    let _ = util::now_i();
-}
 
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {

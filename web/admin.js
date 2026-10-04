@@ -672,7 +672,6 @@ async function loadUpstreams() {
       $('#up-daily').value = u.daily_cap;
       $('#up-models').value = (u.models || []).join('\n');
       $('#up-map').value = Object.entries(u.model_map || {}).map(([k, v]) => `${k}=${v}`).join('\\n');
-      $('#up-prices').value = Object.entries(u.prices || {}).map(([k, v]) => `${k}=${v}`).join('\n');
       for (const [id, key] of UP_FIELDS) $('#' + id).value = u[key] || 0;
       $('#up-herr').value = String(u.hide_errors || 0);
       $('#up-hname').value = String(u.hide_mapped || 0);
@@ -892,7 +891,6 @@ function bindUpstreams() {
       daily_cap: $('#up-daily').value,
       models: $('#up-models').value,
       model_map: $('#up-map').value,
-      prices: $('#up-prices').value,
       hide_errors: $('#up-herr').value,
       hide_mapped: $('#up-hname').value,
       thinking_defaults: tdefDump(),

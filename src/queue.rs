@@ -164,7 +164,3 @@ pub fn stats(public: bool) -> Value {
     })
 }
 
-#[allow(unused)]
-fn _touch() {
-    let _ = Obj::new();
-}

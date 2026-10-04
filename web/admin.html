@@ -219,6 +219,9 @@ details.upgrp[open]{background:#fff}
 .badge.bg-success-subtle{background-color:rgba(25,135,84,.13);color:#198754}
 .badge.bg-danger-subtle{background-color:rgba(220,53,69,.13);color:#d33b4c}
 .badge.bg-secondary-subtle{background-color:rgba(108,117,125,.13);color:#6c757d}
+.badge-free{background:#d1fae5;color:#047857;font-weight:600}
+.badge-paid{background:#fef3c7;color:#92400e;font-weight:600}
+.price-input{width:100px}
 .badge.bg-purple-subtle{background-color:rgba(111,66,193,.13);color:#6f42c1}
 .nav-pills .nav-link{border-radius:var(--r-sm)}
 @media(max-width:860px){
@@ -389,8 +392,6 @@ details.upgrp[open]{background:#fff}
         <div class="row g-3 pt-1">
           <div class="col-12"><label class="form-label" for="up-models">渠道可用模型（空=不限）</label>
             <textarea class="form-control form-control-sm font-monospace" id="up-models" rows="2" placeholder="deepseek-ai/deepseek-r1&#10;meta/llama-3.3-70b-instruct"></textarea></div>
-          <div class="col-12"><label class="form-label" for="up-prices">模型价格（每行 模型=价格，元/次；未列出的模型为免费）</label>
-            <textarea id="up-prices" class="form-control font-monospace" rows="3" placeholder="kimi-k3=0.02&#10;glm-5.3=0.01"></textarea></div>
           <div class="col-12"><label class="form-label" for="up-map">模型映射（每行 客户端模型=上游模型）</label>
             <textarea class="form-control form-control-sm font-monospace" id="up-map" rows="2" placeholder="gpt-4o=meta/llama-3.3-70b-instruct"></textarea></div>
         </div>

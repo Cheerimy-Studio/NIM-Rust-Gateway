@@ -515,14 +515,31 @@ pub fn model_square() -> Vec<Value> {
             }
         }
     }
+    // 健康度：从 up_recent 取各渠道该模型的最近成功率，取最优值
+    let up_recent = db.get("up_recent").and_then(|r| r.as_object()).cloned().unwrap_or_default();
+    let ups_list = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
     order
         .into_iter()
         .map(|m| {
             let price = best.get(&m).copied().unwrap_or(f64::INFINITY);
+            let mut health: Option<f64> = None;
+            for u in &ups_list {
+                let ch_id = util::str_or(u.get("id"), "");
+                if ch_id.is_empty() { continue; }
+                let key = format!("{}{}{}", ch_id, '\u{0}', m);
+                if let Some(rec) = up_recent.get(&key).and_then(|r| r.as_array()) {
+                    if rec.is_empty() { continue; }
+                    let ok = rec.iter().filter(|v| v.as_i64().unwrap_or(0) != 0).count();
+                    let ratio = ok as f64 / rec.len() as f64;
+                    if health.map_or(true, |h| ratio > h) { health = Some(ratio); }
+                }
+            }
+            let health_pct = health.map(|h| (h * 100.0).round() as i64);
             json!({
                 "model": m,
                 "free": !(price.is_finite() && price > 0.0),
                 "price": if price.is_finite() && price > 0.0 { json!(util::round6(price)) } else { json!(0) },
+                "health": health_pct,
             })
         })
         .collect()
@@ -546,5 +563,3 @@ pub fn rpm_snapshot(user_id: &str) -> Value {
     json!({"free": count("free_window"), "paid": count("paid_window")})
 }
 
-#[allow(unused)]
-fn touch(m: Map<String, Value>) {}
