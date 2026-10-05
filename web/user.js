@@ -71,11 +71,14 @@ function showPanel() {
 async function loadMe() {
   ME = await api('me');
   $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
-  $('#ov-frpm').textContent = ME.free_rpm > 0 ? ME.free_rpm + ' 次 / 分' : '不限';
-  $('#ov-prpm').textContent = ME.paid_rpm > 0 ? ME.paid_rpm + ' 次 / 分' : '关闭';
+  $('#ov-grant').textContent = '¥' + (ME.grant ?? 0).toFixed(4);
+  $('#ov-grant-total').textContent = '¥' + (ME.grant_total ?? 0).toFixed(4);
+  $('#ov-recharge').textContent = '¥' + (ME.recharge ?? 0).toFixed(4);
+  $('#ov-recharge-total').textContent = '¥' + (ME.recharge_total ?? 0).toFixed(4);
   try {
     const s = await api('stats');
     $('#ov-calls').textContent = s.total_calls ?? 0;
+    $('#ov-calls-sub').textContent = '免费 ' + (s.free_calls ?? 0) + ' / 付费 ' + (s.paid_calls ?? 0);
     $('#ov-cost').textContent = '¥' + (s.total_cost ?? 0).toFixed(2);
     $('#ov-keys').textContent = s.key_count ?? 0;
     const tb = $('#ov-recent');
@@ -90,23 +93,59 @@ async function loadMe() {
         ? '<span class="badge bg-success">OK</span>'
         : '<span class="badge bg-danger">' + r.st + '</span>';
       tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
-        + '<td class="small text-truncate" style="max-width:160px">' + (r.model || '-') + '</td>'
+        + '<td class="small text-truncate" style="max-width:160px">' + esc(r.model || '-') + '</td>'
         + '<td>' + st + '</td>'
         + '<td class="text-end small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
       tb.appendChild(tr);
     }
   } catch (e) { }
+  loadSign();
 }
+
+async function loadSign() {
+  try {
+    const d = await api('sign');
+    if (!d.enabled) return;
+    $('#sign-box').style.removeProperty('display');
+    const btn = $('#btn-sign');
+    const hint = $('#sign-hint');
+    if (d.signed_today) {
+      btn.disabled = true;
+      btn.textContent = '已签到';
+      hint.textContent = '今日已领 ¥' + (d.today_amount ?? 0).toFixed(4);
+    } else {
+      btn.disabled = false;
+      btn.textContent = '签到';
+      hint.textContent = '每日签到领赠金';
+    }
+  } catch (e) { }
+}
+
+$('#btn-sign').onclick = () => run(async () => {
+  const d = await api('sign', {method: 'POST'});
+  toast('签到成功，赠金 +¥' + (d.amount ?? 0).toFixed(4));
+  ME = await api('me');
+  $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
+  $('#ov-grant').textContent = '¥' + (ME.grant ?? 0).toFixed(4);
+  $('#ov-grant-total').textContent = '¥' + (ME.grant_total ?? 0).toFixed(4);
+  loadSign();
+});
 
 async function loadKeys() {
   const rows = (await api('keys')).rows || [];
   const tb = $('#key-rows');
   tb.innerHTML = '';
-  if (!rows.length) { tb.innerHTML = '<tr><td colspan="5" class="hint">还没有 Key</td></tr>'; return; }
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="6" class="hint">还没有 Key</td></tr>'; return; }
+  const kindBadge = k => k === 'free'
+    ? '<span class="badge bg-success-subtle text-success">仅免费</span>'
+    : k === 'paid'
+      ? '<span class="badge bg-warning-subtle text-warning-emphasis">仅付费</span>'
+      : '<span class="badge bg-secondary-subtle text-secondary">全部</span>';
   for (const k of rows) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td>' + esc(k.name || '未命名') + '</td>'
       + '<td class="key-mono">' + esc(k.key.slice(0, 14)) + '…</td>'
+      + '<td>' + kindBadge(k.kind || 'all') + '</td>'
       + '<td>' + (k.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>'
       + '<td class="small text-muted">' + fmtTime(k.last_used_at) + '</td>'
       + '<td class="text-end"></td>';
@@ -241,6 +280,8 @@ document.querySelectorAll('.sidebar nav a').forEach(a => {
     if (a.dataset.p === 'logs') run(() => loadLogs());
     if (a.dataset.p === 'models') run(() => loadModels());
     if (a.dataset.p === 'test') run(() => loadTestModels());
+    if (a.dataset.p === 'wheel') run(() => loadWheels());
+    if (a.dataset.p === 'prizes') run(() => loadPrizes());
   });
 });
 
@@ -262,7 +303,7 @@ async function loadTestModels() {
   for (const m of rows) {
     const o = document.createElement('option');
     o.value = m.model;
-    o.textContent = m.free ? m.model + '（免费）' : m.model + '（¥' + m.price + ' / 次）';
+    o.textContent = m.free ? m.model + ' · 免费' : m.model + ' · ¥' + m.price + ' / 次';
     sel.appendChild(o);
   }
   if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
@@ -395,7 +436,7 @@ $('#t-input').addEventListener('keydown', e => {
 });
 
 $('#key-add').onclick = () => run(async () => {
-  await api('keys', {method: 'POST', json: {name: $('#key-name').value}});
+  await api('keys', {method: 'POST', json: {name: $('#key-name').value, kind: $('#key-kind').value}});
   $('#key-name').value = '';
   toast('新 Key 已生成');
   loadKeys();
@@ -434,3 +475,234 @@ $('#login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#l
     showLogin();
   }
 })();
+
+
+// ---------------- 抽奖活动 ----------------
+
+const WHEEL_COLORS = {
+  gold: {ring: '#f59e0b', chip: 'bg-warning-subtle text-warning-emphasis'},
+  blue: {ring: '#3b82f6', chip: 'bg-primary-subtle text-primary'},
+  orange: {ring: '#f97316', chip: 'bg-orange-subtle text-orange'},
+  green: {ring: '#10b981', chip: 'bg-success-subtle text-success'},
+  purple: {ring: '#8b5cf6', chip: 'bg-purple-subtle text-purple'},
+  gray: {ring: '#64748b', chip: 'bg-secondary-subtle text-secondary'},
+};
+const PRIZE_TYPE_NAMES = {
+  recharge: '充值余额', grant: '赠金', model_unlimited: '体验卡',
+  model_quota: '专属额度', none: '谢谢参与',
+};
+
+let WHEELS = [];
+
+function prizeDesc(p) {
+  if (p.type === 'recharge' || p.type === 'grant') return '¥' + (p.amount ?? 0).toFixed(4);
+  if (p.type === 'model_unlimited') return esc(p.model || '') + (p.duration_hours > 0 ? ' · ' + p.duration_hours + 'h' : ' · 长期');
+  if (p.type === 'model_quota') return esc(p.model || '') + ' · ' + (p.quota ?? 0) + ' 次';
+  return '—';
+}
+
+async function loadWheels() {
+  const d = await api('wheels');
+  WHEELS = d.rows || [];
+  const box = $('#wheel-cards');
+  box.innerHTML = '';
+  if (!WHEELS.length) {
+    box.innerHTML = '<div class="col-12"><div class="hint text-center py-5">暂无可参与的抽奖活动</div></div>';
+    return;
+  }
+  for (const w of WHEELS) {
+    const col = document.createElement('div');
+    col.className = 'col-md-6 col-lg-4';
+    const top = (w.prizes || []).slice(0, 3).map(p => {
+      const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
+      return '<span class="type-chip ' + c.chip + ' me-1">' + esc(p.label) + '</span>';
+    }).join('');
+    col.innerHTML = '<div class="card h-100 wheel-activity" data-w="' + esc(w.id) + '" role="button">'
+      + '<div class="card-body">'
+      + '<div class="d-flex justify-content-between align-items-center mb-2">'
+      + '<span class="fw-semibold fs-6">' + esc(w.name) + '</span>'
+      + '<span class="badge bg-dark-subtle text-dark">' + (w.cost > 0 ? '¥' + w.cost + ' / 次' : '免费') + '</span></div>'
+      + '<div class="small text-muted mb-2">奖品 ' + (w.prizes?.length ?? 0) + ' 项 · 概率合计 100%</div>'
+      + '<div>' + top + ((w.prizes?.length ?? 0) > 3 ? '<span class="small text-muted">等 ' + w.prizes.length + ' 项</span>' : '') + '</div>'
+      + '<div class="small text-primary mt-2">进入活动 →</div>'
+      + '</div></div>';
+    col.querySelector('.wheel-activity').onclick = () => openWheelDetail(w);
+    box.appendChild(col);
+  }
+}
+
+function openWheelDetail(w) {
+  $('#wheel-list-view').style.display = 'none';
+  $('#wheel-detail-view').style.display = 'block';
+  $('#wd-name').textContent = w.name;
+  $('#wd-cost').textContent = w.cost > 0 ? '¥' + w.cost + ' / 次' : '免费';
+  $('#wd-cost-note').textContent = w.cost > 0 ? '消耗优先从赠金扣除' : '';
+  // 转盘盘面按展示权重(=概率%)分色
+  const disc = $('#wd-disc');
+  const colors = (w.prizes || []).map(p => WHEEL_COLORS[p.color] || WHEEL_COLORS.gray);
+  const n = (w.prizes || []).length || 1;
+  let acc = 0;
+  const segs = (w.prizes || []).map((p, i) => {
+    const from = acc, to = acc + (p.weight ?? 0);
+    acc = to;
+    return `${colors[i].ring} ${from}% ${to}%`;
+  });
+  disc.style.background = 'conic-gradient(' + segs.join(',') + ')';
+  disc.style.transition = 'none';
+  disc.style.transform = 'rotate(0deg)';
+  $('#wd-center').textContent = 'GO';
+  // 奖项表：概率 = 展示权重（总和恒为 100）
+  const tb = $('#wd-prizes');
+  tb.innerHTML = '';
+  for (const p of (w.prizes || [])) {
+    const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td><span class="type-chip ' + c.chip + ' me-2" style="width:12px">&nbsp;</span>' + esc(p.label) + '</td>'
+      + '<td class="small text-muted">' + PRIZE_TYPE_NAMES[p.type] + ' · ' + prizeDesc(p) + '</td>'
+      + '<td class="text-end fw-semibold">' + (p.weight ?? 0) + '%</td>';
+    tb.appendChild(tr);
+  }
+  const btn = $('#wd-draw');
+  btn.disabled = false;
+  btn.onclick = () => confirmDraw(w, btn);
+}
+
+function backToWheelList() {
+  $('#wheel-detail-view').style.display = 'none';
+  $('#wheel-list-view').style.display = 'block';
+}
+$('#wheel-back').onclick = backToWheelList;
+
+function wheelModal(title, bodyHtml, okText, onCancel) {
+  $('#wheel-modal-title').textContent = title;
+  $('#wheel-modal-body').innerHTML = bodyHtml;
+  $('#wheel-modal-ok').textContent = okText;
+  const mask = $('#wheel-modal');
+  mask.style.display = 'flex';
+  const close = () => { mask.style.display = 'none'; };
+  $('#wheel-modal-cancel').onclick = () => { close(); if (onCancel) onCancel(); };
+  mask.onclick = e => { if (e.target === mask) { close(); if (onCancel) onCancel(); } };
+  return {ok: $('#wheel-modal-ok'), close};
+}
+
+let drawing = false;
+
+function confirmDraw(w, btn) {
+  if (drawing) return;
+  const costHtml = w.cost > 0
+    ? '本次抽奖将消耗 <b>¥' + w.cost + '</b>（优先扣赠金，不足部分扣充值）。'
+    : '本次抽奖免费。';
+  const body = '<div>' + costHtml + '</div>'
+    + '<div class="mt-2 small text-muted">中奖结果以本次抽奖为准，余额奖品即时到账。</div>';
+  const m = wheelModal('确认抽奖 · ' + w.name, body, '开始抽奖');
+  m.ok.onclick = () => {
+    m.close();
+    doDraw(w, btn);
+  };
+}
+
+function doDraw(w, btn) {
+  drawing = true;
+  btn.disabled = true;
+  const disc = $('#wd-disc');
+  const center = $('#wd-center');
+  const turns = 5;
+  disc.style.transition = 'none';
+  disc.style.transform = 'rotate(0deg)';
+  void disc.offsetWidth;
+  disc.style.transition = 'transform 2.8s cubic-bezier(.15,.6,.2,1)';
+  disc.style.transform = 'rotate(' + turns * 360 + 'deg)';
+  center.textContent = '…';
+  api('wheels/draw', {method: 'POST', json: {id: w.id}}).then(d => {
+    setTimeout(() => showDrawResult(d, btn), 2800);
+  }).catch(e => {
+    disc.style.transition = '';
+    disc.style.transform = '';
+    center.textContent = 'GO';
+    drawing = false;
+    btn.disabled = false;
+    wheelModal('抽奖失败', esc(e.message || '请求失败'), '知道了');
+  });
+}
+
+function showDrawResult(d, btn) {
+  const disc = $('#wd-disc');
+  disc.style.transition = '';
+  disc.style.transform = '';
+  $('#wd-center').textContent = 'GO';
+  drawing = false;
+  btn.disabled = false;
+  const p = d.prize || {};
+  const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
+  let detail = '';
+  if (p.type === 'recharge' || p.type === 'grant') detail = '¥' + (p.amount ?? 0).toFixed(4) + ' 已存入' + (p.type === 'recharge' ? '充值' : '赠金') + '账本';
+  else if (p.type === 'model_unlimited') detail = '模型 ' + esc(p.model) + ' 体验卡已发放，Key 见「奖品中心」';
+  else if (p.type === 'model_quota') detail = '模型 ' + esc(p.model) + ' 专属额度 ' + (p.quota ?? 0) + ' 次，Key 见「奖品中心」';
+  else detail = '感谢参与，再接再厉！';
+  const cost = d.cost || {};
+  const costLine = (cost.grant > 0 || cost.recharge > 0)
+    ? '<div class="small text-muted mt-2">本次消耗：赠金 ¥' + (cost.grant ?? 0).toFixed(4) + ' + 充值 ¥' + (cost.recharge ?? 0).toFixed(4) + '</div>'
+    : '';
+  const body = '<div class="text-center py-2">'
+    + '<div class="type-chip ' + c.chip + ' px-3 py-2 fs-6 fw-semibold mb-2">' + esc(p.label || '谢谢参与') + '</div>'
+    + '<div>' + detail + '</div>' + costLine + '</div>';
+  wheelModal('抽奖结果', body, '收下');
+  // 刷新钱包 + 奖品列表
+  run(async () => {
+    ME = await api('me');
+    $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
+    $('#ov-grant').textContent = '¥' + (ME.grant ?? 0).toFixed(4);
+    $('#ov-grant-total').textContent = '¥' + (ME.grant_total ?? 0).toFixed(4);
+    $('#ov-recharge').textContent = '¥' + (ME.recharge ?? 0).toFixed(4);
+    $('#ov-recharge-total').textContent = '¥' + (ME.recharge_total ?? 0).toFixed(4);
+  });
+  loadPrizes();
+}
+
+async function loadPrizes() {
+  const [kd, ld] = await Promise.all([api('prize-keys'), api('draw-logs')]);
+  const tb = $('#prize-rows');
+  tb.innerHTML = '';
+  const rows = kd.rows || [];
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="hint text-center py-4">还没有奖品 Key，去抽奖活动试试手气</td></tr>';
+  }
+  const now = Math.floor(Date.now() / 1000);
+  for (const k of rows) {
+    const tr = document.createElement('tr');
+    const expired = k.expires_at > 0 && now >= k.expires_at;
+    const exhausted = k.quota > 0 && (k.used ?? 0) >= k.quota;
+    const st = !k.enabled ? '<span class="badge bg-secondary">停用</span>'
+      : expired ? '<span class="badge bg-danger">已过期</span>'
+      : exhausted ? '<span class="badge bg-danger">已用尽</span>'
+      : '<span class="badge bg-success">可用</span>';
+    tr.innerHTML = '<td class="key-mono small">' + esc(k.key.slice(0, 14)) + '…</td>'
+      + '<td class="small">' + (k.type === 'model_unlimited' ? '体验卡' : '专属额度') + '</td>'
+      + '<td class="small mono">' + esc(k.model || '-') + '</td>'
+      + '<td class="small">' + (k.quota > 0 ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
+      + '<td class="small text-muted">' + (k.expires_at > 0 ? new Date(k.expires_at * 1000).toLocaleString() : '不限') + '</td>'
+      + '<td>' + st + '</td>'
+      + '<td class="text-end"></td>';
+    const td = tr.lastElementChild;
+    const copy = document.createElement('button');
+    copy.className = 'btn btn-sm btn-outline-secondary';
+    copy.textContent = '复制 Key';
+    copy.onclick = () => copyText(k.key);
+    td.appendChild(copy);
+    tb.appendChild(tr);
+  }
+  const tb2 = $('#drawlog-rows');
+  tb2.innerHTML = '';
+  const logs = ld.rows || [];
+  if (!logs.length) {
+    tb2.innerHTML = '<tr><td colspan="4" class="hint text-center py-3">暂无抽奖记录</td></tr>';
+  }
+  for (const r of logs) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
+      + '<td class="small">' + esc(r.wheel_name || '-') + '</td>'
+      + '<td class="small">' + esc(r.label || '-') + '</td>'
+      + '<td class="text-end small">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
+    tb2.appendChild(tr);
+  }
+}

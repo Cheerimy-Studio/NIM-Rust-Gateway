@@ -13,6 +13,7 @@ mod update;
 mod users;
 mod util;
 mod webhttp;
+mod wheel;
 
 use crate::store::{csrf_token, session_cookie, store};
 use crate::webhttp::*;
@@ -474,6 +475,12 @@ async fn h_user_js() -> Response {
         axum::http::header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
     );
+    // 与 h_admin_js 同口径：不带版本参数的裸 JS 引用必须靠 no-cache 保证升级后
+    // 浏览器不拿旧缓存（admin.js 曾因缓存旧文件出过批量操作全失效的事故）
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
     resp
 }
 
@@ -491,6 +498,54 @@ async fn h_user_session(headers: HeaderMap) -> Response {
 
 async fn h_user_me(headers: HeaderMap) -> Response {
     user_api::me(&headers).await
+}
+
+async fn h_user_sign_status(headers: HeaderMap) -> Response {
+    user_api::sign_status(&headers).await
+}
+
+async fn h_user_sign(headers: HeaderMap) -> Response {
+    user_api::sign(&headers).await
+}
+
+async fn h_user_wallet(headers: HeaderMap) -> Response {
+    user_api::wallet(&headers).await
+}
+
+async fn h_user_wheels(headers: HeaderMap) -> Response {
+    user_api::wheels(&headers).await
+}
+
+async fn h_user_wheels_draw(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::wheels_draw(&headers, body).await
+}
+
+async fn h_user_prize_keys(headers: HeaderMap) -> Response {
+    user_api::prize_keys(&headers).await
+}
+
+async fn h_user_draw_logs(headers: HeaderMap) -> Response {
+    user_api::draw_logs(&headers).await
+}
+
+async fn h_wheels_admin(headers: HeaderMap) -> Response {
+    admin::wheels_admin(&headers).await
+}
+
+async fn h_wheels_save(headers: HeaderMap, body: Bytes) -> Response {
+    admin::wheels_save(&headers, body).await
+}
+
+async fn h_wheels_delete(headers: HeaderMap, body: Bytes) -> Response {
+    admin::wheels_delete(&headers, body).await
+}
+
+async fn h_prize_keys_admin(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::prize_keys_admin(&headers, raw_query.0).await
+}
+
+async fn h_prize_keys_op(headers: HeaderMap, body: Bytes) -> Response {
+    admin::prize_keys_op(&headers, body).await
 }
 
 async fn h_user_keys(headers: HeaderMap) -> Response {
@@ -978,6 +1033,10 @@ fn apply_tz_from_config() {
 #[tokio::main]
 async fn main() {
     apply_tz_from_config();
+    // 旧混存用户日志表启动即拆分：概览统计/日志计数只读分表，不迁移就一直显示 0
+    crate::users::migrate_legacy_logs_once();
+    // 老用户行补账本字段与累计计数器（累计口径不再依赖会被裁剪的日志）
+    crate::users::migrate_user_fields_once();
     let mut port: u16 = 8100;
     let args: Vec<String> = std::env::args().collect();
     let mut it = args.iter().peekable();
@@ -1182,6 +1241,15 @@ fn build_router() -> Router {
         .route("/api/user/logout", post(h_user_logout))
         .route("/api/user/session", get(h_user_session))
         .route("/api/user/me", get(h_user_me))
+    .route("/api/user/sign", get(h_user_sign_status).post(h_user_sign))
+    .route("/api/user/wallet", get(h_user_wallet))
+    .route("/api/user/wheels", get(h_user_wheels))
+    .route("/api/user/wheels/draw", post(h_user_wheels_draw))
+    .route("/api/user/prize-keys", get(h_user_prize_keys))
+    .route("/api/user/draw-logs", get(h_user_draw_logs))
+    .route("/api/wheels", get(h_wheels_admin).post(h_wheels_save))
+    .route("/api/wheels/delete", post(h_wheels_delete))
+    .route("/api/prize-keys", get(h_prize_keys_admin).post(h_prize_keys_op))
         .route("/api/user/keys", get(h_user_keys).post(h_user_keys_add))
         .route("/api/user/keys/op", post(h_user_keys_op))
         .route("/api/user/logs", get(h_user_logs))

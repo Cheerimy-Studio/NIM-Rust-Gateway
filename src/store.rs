@@ -52,6 +52,11 @@ pub fn db_dir() -> PathBuf {
     data_dir().join("db")
 }
 
+/// 签到记录目录：DATA_DIR/db/signs/（每天一个文件，按天分片）。
+pub fn signs_dir() -> PathBuf {
+    db_dir().join("signs")
+}
+
 fn warn_persist(msg: &str) {
     eprintln!("[store] 写盘失败({}): 数据在内存中，等待下次写入", msg);
 }
@@ -67,6 +72,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("intercepted", &["intercepted"]),
     ("queue", &["queue"]),
     ("users", &["users", "user_tokens", "user_logs", "user_logs_paid", "user_logs_free", "user_rpm"]),
+    ("wheels", &["wheels", "prize_keys", "draw_logs"]),
     (
         "metrics",
         &[
@@ -145,6 +151,9 @@ pub fn default_config() -> Vec<(&'static str, Value)> {
         ("timezone", json!("Asia/Shanghai")),
         ("verify_tls", json!(true)),
         ("admin_username", json!("admin")),
+        ("sign_enabled", json!(false)),
+        ("sign_min", json!(0.001)),
+        ("sign_max", json!(0.01)),
     ]
 }
 
@@ -553,11 +562,15 @@ pub fn migrate(db: &mut Value) {
         "user_logs_paid",
         "user_logs_free",
         "user_rpm",
+        "wheels",
+        "prize_keys",
+        "draw_logs",
     ] {
         obj.entry(k)
             .or_insert(if k == "upstreams" || k == "keys" || k == "logs" || k == "queue" || k == "sessions"
                 || k == "users" || k == "user_tokens" || k == "user_logs"
-                || k == "user_logs_paid" || k == "user_logs_free" {
+                || k == "user_logs_paid" || k == "user_logs_free"
+                || k == "wheels" || k == "prize_keys" || k == "draw_logs" {
                 Value::Array(vec![])
             } else {
                 Value::Object(Obj::new())
@@ -587,6 +600,9 @@ pub fn migrate(db: &mut Value) {
         ("user_logs_paid", "arr"),
         ("user_logs_free", "arr"),
         ("user_rpm", "obj"),
+        ("wheels", "arr"),
+        ("prize_keys", "arr"),
+        ("draw_logs", "arr"),
         ("buckets", "obj"),
         ("pool_buckets", "obj"),
         ("pool_daily", "obj"),

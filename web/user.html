@@ -111,6 +111,26 @@ a{text-decoration:none}
   .sidebar nav a.active::before{display:none}
   .content{padding:14px}
 }
+.wheel-disc{position:relative;width:120px;height:120px;border-radius:50%;
+  background:conic-gradient(#f59e0b 0 40deg,#3b82f6 40deg 110deg,#10b981 110deg 170deg,#8b5cf6 170deg 240deg,#f97316 240deg 310deg,#64748b 310deg 360deg);
+  border:4px solid rgba(255,255,255,.14);box-shadow:inset 0 0 22px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
+.wheel-pointer{position:absolute;top:2px;left:50%;transform:translateX(-50%);width:0;height:0;
+  border-left:6px solid transparent;border-right:6px solid transparent;border-top:11px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
+.wheel-center{position:relative;z-index:1;width:44px;height:44px;border-radius:50%;background:#0d1526;color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;cursor:default;
+  box-shadow:0 0 0 3px rgba(255,255,255,.14)}
+.bg-orange-subtle{background-color:rgba(249,115,22,.12)!important}
+.text-orange{color:#f97316!important}
+.modal-mask{position:fixed;inset:0;background:rgba(5,10,22,.62);backdrop-filter:blur(3px);
+  z-index:3000;display:flex;align-items:center;justify-content:center}
+.modal-box{width:min(400px,92vw);border-radius:14px;background:#101a2e;border:1px solid rgba(255,255,255,.1);
+  box-shadow:0 24px 70px rgba(2,8,20,.6);padding:18px 20px}
+.modal-title{font-size:15px;font-weight:700;color:#fff;margin-bottom:10px}
+.modal-body{font-size:13.5px;color:#c9d4e6;line-height:1.7}
+.modal-body .prize-line{display:flex;justify-content:space-between;padding:3px 0}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.wheel-disc{width:190px;height:190px}
+.type-chip{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px}
 </style>
 </head>
 <body>
@@ -137,8 +157,10 @@ a{text-decoration:none}
   <nav>
     <div class="nav-label">账户</div>
     <a href="javascript:void(0)" data-p="overview" class="active"><i class="bi bi-speedometer2"></i>概览</a>
+    <a href="javascript:void(0)" data-p="wheel"><i class="bi bi-database"></i>大转盘</a>
     <div class="nav-label">开发</div>
     <a href="javascript:void(0)" data-p="keys"><i class="bi bi-key"></i>API Key</a>
+    <a href="javascript:void(0)" data-p="prizes"><i class="bi bi-gift"></i>奖品中心</a>
     <a href="javascript:void(0)" data-p="logs"><i class="bi bi-list-ul"></i>调用日志</a>
     <a href="javascript:void(0)" data-p="models"><i class="bi bi-grid-3x3-gap"></i>模型广场</a>
     <a href="javascript:void(0)" data-p="test"><i class="bi bi-chat-dots"></i>对话测试</a>
@@ -154,12 +176,12 @@ a{text-decoration:none}
   <div class="row g-3 mb-3">
     <div class="col-md-3 col-6">
       <div class="card stat green"><div class="stat">
-        <div class="lbl">账户余额</div><div class="num" id="ov-balance">-</div><div class="sub">元</div>
+        <div class="lbl">可用余额</div><div class="num" id="ov-balance">-</div><div class="sub">元</div>
       </div></div>
     </div>
     <div class="col-md-3 col-6">
       <div class="card stat accent"><div class="stat">
-        <div class="lbl">累计调用</div><div class="num" id="ov-calls">-</div><div class="sub">次（成功）</div>
+        <div class="lbl">累计调用</div><div class="num" id="ov-calls">-</div><div class="sub" id="ov-calls-sub">次</div>
       </div></div>
     </div>
     <div class="col-md-3 col-6">
@@ -175,17 +197,24 @@ a{text-decoration:none}
   </div>
   <div class="row g-3 mb-3">
     <div class="col-lg-5">
-      <div class="card h-100"><div class="card-header"><i class="bi bi-speedometer me-2 text-muted"></i>限速</div>
+      <div class="card h-100"><div class="card-header"><i class="bi bi-wallet2 me-2 text-muted"></i>我的钱包</div>
         <div class="card-body">
           <table class="table table-sm align-middle mb-0">
+            <thead><tr><th></th><th class="text-end">当前</th><th class="text-end">累计</th></tr></thead>
             <tbody>
-              <tr><td class="small" style="color:var(--mut)">免费模型</td>
-                <td class="text-end fw-semibold" id="ov-frpm">-</td></tr>
-              <tr><td class="small" style="color:var(--mut)">付费模型</td>
-                <td class="text-end fw-semibold" id="ov-prpm">-</td></tr>
+              <tr><td class="small" style="color:var(--mut)">赠金</td>
+                <td class="text-end fw-semibold" id="ov-grant">-</td>
+                <td class="text-end small" id="ov-grant-total">-</td></tr>
+              <tr><td class="small" style="color:var(--mut)">充值</td>
+                <td class="text-end fw-semibold" id="ov-recharge">-</td>
+                <td class="text-end small" id="ov-recharge-total">-</td></tr>
             </tbody>
           </table>
-          <div class="hint mt-2 mb-0">未设价的模型为免费模型，余额为 0 也可调用；标价模型按「元 / 次」计费，失败不计费。</div>
+          <div class="hint mt-2 mb-0">计费优先使用赠金，赠金用尽后扣充值。</div>
+          <div class="d-flex align-items-center gap-2 mt-2" id="sign-box" style="display:none !important">
+            <button class="btn btn-sm btn-success" id="btn-sign">签到</button>
+            <span class="small text-muted" id="sign-hint"></span>
+          </div>
         </div>
       </div>
     </div>
@@ -202,18 +231,79 @@ a{text-decoration:none}
   </div>
 </div>
 
+<div class="pane" id="pane-wheel">
+  <div id="wheel-list-view">
+    <h2 class="pane-title">抽奖活动</h2>
+    <div class="hint mb-3">消耗余额参与抽奖，优先扣赠金；余额奖品直接到账，体验卡 / 专属额度到「奖品中心」领取 Key。</div>
+    <div class="row g-3" id="wheel-cards"></div>
+  </div>
+  <div id="wheel-detail-view" style="display:none">
+    <div class="d-flex align-items-center gap-2 mb-1">
+      <button class="btn btn-sm btn-outline-secondary" id="wheel-back">← 返回活动列表</button>
+    </div>
+    <h2 class="pane-title" id="wd-name">-</h2>
+    <div class="row g-3">
+      <div class="col-lg-5">
+        <div class="card h-100"><div class="card-body d-flex flex-column align-items-center justify-content-center py-4">
+          <div class="wheel-disc" id="wd-disc">
+            <div class="wheel-pointer"></div>
+            <div class="wheel-center" id="wd-center">GO</div>
+          </div>
+          <div class="d-flex align-items-center gap-2 mt-4">
+            <span class="fw-semibold" id="wd-cost">-</span>
+            <button class="btn btn-primary px-4" id="wd-draw">立即抽奖</button>
+          </div>
+          <div class="hint mt-2 mb-0" id="wd-cost-note"></div>
+        </div></div>
+      </div>
+      <div class="col-lg-7">
+        <div class="card h-100"><div class="card-header">奖项与概率</div>
+          <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+              <thead><tr><th>奖项</th><th>类型</th><th class="text-end">概率</th></tr></thead>
+              <tbody id="wd-prizes"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="pane" id="pane-prizes">
+  <h2 class="pane-title">奖品中心</h2>
+  <div class="card mb-3"><div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>Key</th><th>类型</th><th>模型</th><th>额度 / 已用</th><th>到期</th><th>状态</th><th class="text-end">操作</th></tr></thead>
+      <tbody id="prize-rows"></tbody>
+    </table>
+  </div></div>
+  <div class="card"><div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>时间</th><th>转盘</th><th>奖品</th><th class="text-end">消耗</th></tr></thead>
+      <tbody id="drawlog-rows"></tbody>
+    </table>
+  </div></div>
+</div>
+
 <div class="pane" id="pane-keys">
   <h2 class="pane-title">API Key</h2>
   <div class="card mb-3"><div class="card-body">
     <div class="d-flex gap-2 align-items-end flex-wrap">
       <div style="min-width:200px"><label class="form-label" for="key-name">名称</label>
         <input class="form-control form-control-sm" id="key-name" placeholder="可选，便于识别"></div>
+      <div style="min-width:140px"><label class="form-label" for="key-kind">可用模型</label>
+        <select class="form-select form-select-sm" id="key-kind">
+          <option value="all" selected>全部模型</option>
+          <option value="free">仅免费模型</option>
+          <option value="paid">仅付费模型</option>
+        </select></div>
       <button class="btn btn-sm btn-primary" id="key-add">生成新 Key</button>
     </div>
   </div></div>
   <div class="card"><div class="table-responsive">
     <table class="table table-hover align-middle">
-      <thead><tr><th>名称</th><th>Key</th><th>状态</th><th>最近调用</th><th class="text-end">操作</th></tr></thead>
+      <thead><tr><th>名称</th><th>Key</th><th>类型</th><th>状态</th><th>最近调用</th><th class="text-end">操作</th></tr></thead>
       <tbody id="key-rows"></tbody>
     </table>
   </div></div>
@@ -242,7 +332,7 @@ a{text-decoration:none}
 
 <div class="pane" id="pane-models">
   <h2 class="pane-title">模型广场</h2>
-  <div class="hint mb-3">标有「免费」的模型余额为 0 也可调用；标价为单次成功调用的费用（失败不计费）。</div>
+  <div class="hint mb-3">标有「免费」的模型余额为 0 也可调用；标价为单次成功调用的费用。</div>
   <div class="row g-3" id="model-cards"></div>
 </div>
 
@@ -263,13 +353,24 @@ a{text-decoration:none}
   </div>
   <div class="d-flex gap-2">
     <textarea id="t-input" class="form-control form-control-sm" rows="2"
-      placeholder="输入消息后按 Enter 发送（Shift+Enter 换行）"></textarea>
+      placeholder="输入消息后按 Enter 发送"></textarea>
     <button id="t-send" class="btn btn-primary px-4">发送</button>
   </div>
 </div>
 
 </div>
 </div>
+</div>
+
+<div class="modal-mask" id="wheel-modal" style="display:none">
+  <div class="modal-box">
+    <div class="modal-title" id="wheel-modal-title">确认</div>
+    <div class="modal-body" id="wheel-modal-body"></div>
+    <div class="modal-foot">
+      <button class="btn btn-sm btn-outline-secondary" id="wheel-modal-cancel">取消</button>
+      <button class="btn btn-sm btn-primary" id="wheel-modal-ok">确定</button>
+    </div>
+  </div>
 </div>
 
 <script src="/assets/user.js"></script>

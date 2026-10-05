@@ -9,7 +9,11 @@
 - 请求处理：失败自动换号重试、429 吸收、同号快速重试、无可用账号时排队等待
 - 流式：SSE 逐块透传，慢推理模型心跳保活，首字节超时与空闲超时独立控制
 - 协议：OpenAI Chat / Completions / Embeddings / Responses 与 Anthropic Messages，含流式事件转换
-- 管理后台：账号、渠道、限额、日志、排队、拦截规则、训练资料、配置导入导出
+- 多用户计费：用户与调用 Key（可限定免费 / 付费 / 全部模型）、按渠道模型定价、余额预检、用户级限速、调用日志与模型广场
+- 账本：赠金与充值分离记账，计费优先扣赠金；累计调用与累计消费按用户持久累计（不受日志裁剪影响）
+- 福利：每日签到（可选开启）、抽奖活动（多活动、奖项概率合计 100%、可设真实权重）
+- 奖品：余额 / 赠金直接入账；模型体验卡与专属额度发放独立 Key（单模型锁定、并发上限、次数额度、到期时间）
+- 管理后台：账号、渠道、限额、日志、排队、拦截规则、训练资料、用户、模型定价、抽奖、配置导入导出
 - 自动更新：GitHub Releases 正式版，手动触发或定时自动检查，带备份与一键回滚
 
 ## 构建
@@ -71,6 +75,9 @@ data/db/sessions.json     会话审计
 data/db/intercepted.json  拦截记录
 data/db/queue.json        排队
 data/db/metrics.json      统计、限速窗口、熔断与负缓存
+data/db/users.json        用户、调用 Key、调用日志、限速窗口
+data/db/wheels.json       抽奖活动、奖品 Key、抽奖记录
+data/db/signs/            签到记录（每天一个文件）
 ```
 
 从旧版单文件升级：首次启动自动拆分迁移，原 `db.json` 改名 `db.json.migrated` 留存。
@@ -86,10 +93,12 @@ POST /v1/responses             含流式事件转换
 POST /v1/messages              Anthropic，含流式事件转换
 GET  /v1/models、/v1/models/{id}
 GET  /admin                    管理后台
+GET  /user                     用户中心
 GET  /queue                    公开排队页
 ```
 
-鉴权：后台生成访问令牌，`Authorization: Bearer <令牌>` 调用；令牌留空时不校验。
+
+鉴权：用户在用户中心生成 API Key（`sk-usr-` 前缀），`Authorization: Bearer <Key>` 调用；也可在后台生成访问令牌。奖品 Key（`sk-prz-` 前缀）仅能调用其锁定的模型。
 
 ## 许可
 

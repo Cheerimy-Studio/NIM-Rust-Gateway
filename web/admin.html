@@ -253,6 +253,7 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-pane="tokens"><i class="bi bi-shield-lock"></i>访问令牌</a>
     <a href="javascript:void(0)" data-pane="users"><i class="bi bi-people"></i>用户</a>
     <a href="javascript:void(0)" data-pane="prices"><i class="bi bi-tags"></i>模型定价</a>
+    <a href="javascript:void(0)" data-pane="wheels"><i class="bi bi-database"></i>大转盘</a>
     <a href="javascript:void(0)" data-pane="intercept"><i class="bi bi-slash-circle"></i>拦截</a>
     <div class="nav-label">数据</div>
     <a href="javascript:void(0)" data-pane="test"><i class="bi bi-chat-dots"></i>模型测试</a>
@@ -585,6 +586,65 @@ details.upgrp[open]{background:#fff}
   <div class="mt-2"><button id="prices-save" class="btn btn-sm btn-primary">保存全部定价</button></div>
 </section>
 
+<section class="pane" id="pane-wheels">
+  <h2 class="pane-title">大转盘</h2>
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>转盘编辑</span>
+      <button id="wh-new" class="btn btn-sm btn-primary">新建转盘</button>
+    </div>
+    <div class="card-body" id="wh-editor" style="display:none">
+      <div class="row g-2 mb-2">
+        <div class="col-md-4"><label class="form-label" for="wh-name">转盘名称</label>
+          <input class="form-control form-control-sm" id="wh-name" placeholder="如 每日福利抽"></div>
+        <div class="col-md-3"><label class="form-label" for="wh-cost">单次消耗 · 元</label>
+          <input type="number" step="0.001" min="0" class="form-control form-control-sm" id="wh-cost" value="0.01"></div>
+        <div class="col-md-3 d-flex align-items-end pb-1">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="wh-enabled" checked>
+            <label class="form-check-label small" for="wh-enabled">启用</label>
+          </div>
+        </div>
+        <input type="hidden" id="wh-id">
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-2">
+          <thead><tr><th>奖品名</th><th>类型</th><th>颜色</th><th style="min-width:90px">展示权重</th><th style="min-width:90px">真实权重</th><th>金额 / 模型</th><th>参数</th><th></th></tr></thead>
+          <tbody id="wh-prize-rows"></tbody>
+        </table>
+      </div>
+      <div class="d-flex gap-2 align-items-center">
+        <button id="wh-prize-add" class="btn btn-sm btn-outline-secondary">加奖品</button>
+        <button id="wh-save" class="btn btn-sm btn-primary">保存转盘</button>
+        <button id="wh-cancel" class="btn btn-sm btn-outline-secondary">取消</button>
+        <span class="small ms-auto">展示权重合计：<span id="wh-sum" class="fw-semibold">0</span> / 100</span>
+      </div>
+      <div class="hint mt-2 mb-0">展示权重即用户看到的概率百分比，合计必须为 100；真实权重决定实际概率，留空与展示权重一致。余额类填金额；体验卡/专属额度填模型名，体验卡可设时长小时与并发，专属额度填次数。</div>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header">转盘列表</div>
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead><tr><th>名称</th><th>单次消耗</th><th>奖品数</th><th>状态</th><th class="text-end">操作</th></tr></thead>
+        <tbody id="wh-rows"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>奖品 Key（体验卡 / 专属额度）</span>
+      <button id="pk-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead><tr><th>Key</th><th>类型</th><th>模型</th><th>并发</th><th>额度 / 已用</th><th>到期</th><th>状态</th><th class="text-end">操作</th></tr></thead>
+        <tbody id="pk-rows"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
 <section class="pane" id="pane-users">
   <h2 class="pane-title">用户</h2>
   <div class="card mb-3">
@@ -595,9 +655,9 @@ details.upgrp[open]{background:#fff}
           <input class="form-control form-control-sm" id="usr-name"></div>
         <div class="col-md-3"><label class="form-label" for="usr-pw">初始密码</label>
           <input class="form-control form-control-sm" id="usr-pw" placeholder="至少 6 位"></div>
-        <div class="col-md-2"><label class="form-label" for="usr-bal">初始余额（元）</label>
+        <div class="col-md-2"><label class="form-label" for="usr-bal">初始余额 · 元</label>
           <input type="number" step="0.01" min="0" class="form-control form-control-sm" id="usr-bal" value="0"></div>
-        <div class="col-md-2"><label class="form-label" for="usr-frpm">免费模型限速（次/分）</label>
+        <div class="col-md-2"><label class="form-label" for="usr-frpm">免费限速 · 次/分</label>
           <input type="number" min="0" class="form-control form-control-sm" id="usr-frpm" value="10"></div>
         <div class="col-md-2"><button id="usr-add" class="btn btn-sm btn-primary w-100">添加</button></div>
       </div>
@@ -607,7 +667,7 @@ details.upgrp[open]{background:#fff}
   <div class="card">
     <div class="table-responsive">
     <table class="table table-hover align-middle">
-      <thead><tr><th>用户名</th><th>余额</th><th>Key 数</th><th>免费限速</th><th>付费限速</th><th>状态</th><th>创建时间</th><th class="text-end">操作</th></tr></thead>
+      <thead><tr><th>用户名</th><th>赠金</th><th>充值</th><th>调用次数</th><th>Key 数</th><th>免费限速</th><th>付费限速</th><th>状态</th><th>创建时间</th><th class="text-end">操作</th></tr></thead>
       <tbody id="usr-rows"></tbody>
     </table>
     </div>
@@ -817,6 +877,7 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-sec="sec-model">模型</a>
     <a href="javascript:void(0)" data-sec="sec-privacy">隐私</a>
     <a href="javascript:void(0)" data-sec="sec-misc">排队日志</a>
+    <a href="javascript:void(0)" data-sec="sec-sign">签到</a>
     <a href="javascript:void(0)" data-sec="sec-sync">同步</a>
     <a href="javascript:void(0)" data-sec="sec-passwd">密码</a>
     <a href="javascript:void(0)" data-sec="sec-danger" class="text-danger">危险</a>
@@ -952,6 +1013,23 @@ details.upgrp[open]{background:#fff}
                 <label class="form-check-label small" for="set-breaker">模型熔断器</label>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-sign">
+        <div class="card-header"><i class="bi bi-calendar-check me-2 text-muted"></i>签到</div>
+        <div class="card-body">
+          <div class="row g-3 align-items-end">
+            <div class="col-md-3 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-signen">
+                <label class="form-check-label small" for="set-signen">开启每日签到</label>
+              </div>
+            </div>
+            <div class="col-md-3"><label class="form-label" for="set-signmin">金额下限 · 元</label>
+              <input type="number" step="0.001" min="0.000001" class="form-control form-control-sm" id="set-signmin"></div>
+            <div class="col-md-3"><label class="form-label" for="set-signmax">金额上限 · 元</label>
+              <input type="number" step="0.001" min="0.000001" class="form-control form-control-sm" id="set-signmax"></div>
           </div>
         </div>
       </div>

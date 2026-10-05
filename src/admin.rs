@@ -854,7 +854,10 @@ const BOOL_SETTINGS: &[&str] = &[
     "hide_mapped_names",
     "breaker_enabled",
     "watchdog_enabled",
+    "sign_enabled",
 ];
+/// 浮点设置（金额类）：round6 量化，负值忽略。
+const FLOAT_SETTINGS: &[&str] = &["sign_min", "sign_max"];
 
 fn cfg_without_secrets(cfg: &Value) -> Value {
     let mut c = cfg.clone();
@@ -897,6 +900,18 @@ fn apply_settings(db: &mut Value, incoming: &Value, applied: &mut i64) {
             let default = cfg.get(*k).map(util::truthy).unwrap_or(false);
             cfg.insert(k.to_string(), Value::from(util::as_bool(v, default)));
             *applied += 1;
+        }
+    }
+    for k in FLOAT_SETTINGS {
+        if let Some(v) = incoming.get(*k) {
+            let s = util::str_or(Some(v), "");
+            if !s.is_empty() {
+                let f = util::f64_or(Some(v), -1.0);
+                if f >= 0.0 {
+                    cfg.insert(k.to_string(), serde_json::json!(util::round6(f)));
+                    *applied += 1;
+                }
+            }
         }
     }
     // gateway_tokens 文本形式：token|model1,model2
@@ -1873,4 +1888,117 @@ pub async fn prices_save(headers: &HeaderMap, body: Bytes) -> Response {
     });
     store().flush();
     json_resp(json!({"ok": true}))
+}
+
+
+// ---------------------------------------------------------------- 大转盘
+
+/// GET /api/wheels — 全量（含 real_weight，仅管理端）。
+pub async fn wheels_admin(headers: &HeaderMap) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    json_resp(json!({"rows": crate::wheel::all_wheels()}))
+}
+
+/// POST /api/wheels — 新建/保存。
+pub async fn wheels_save(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let (row, err) = crate::wheel::save_wheel(&body);
+    if let Some(e) = (!err.is_empty()).then_some(err) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": e}})),
+        )
+            .into_response();
+    }
+    json_resp(json!({"ok": true, "wheel": row}))
+}
+
+/// POST /api/wheels/delete。
+pub async fn wheels_delete(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let id = util::str_or(body.get("id"), "");
+    let ok = crate::wheel::delete_wheel(&id);
+    json_resp(json!({"ok": ok}))
+}
+
+/// GET /api/prize-keys?wheel=<id> — 奖品 Key 列表。
+pub async fn prize_keys_admin(headers: &HeaderMap, raw_query: Option<String>) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    let mut wid = String::new();
+    if let Some(q) = raw_query {
+        for kv in q.split('&') {
+            if let Some((k, v)) = kv.split_once('=') {
+                if k == "wheel" {
+                    wid = v.to_string();
+                }
+            }
+        }
+    }
+    json_resp(json!({"rows": crate::wheel::list_prize_keys(&wid)}))
+}
+
+/// POST /api/prize-keys/op — enable/disable/delete。
+pub async fn prize_keys_op(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let id = util::str_or(body.get("id"), "");
+    let op = util::str_or(body.get("op"), "");
+    if !["enable", "disable", "delete"].contains(&op.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "未知操作"}})),
+        )
+            .into_response();
+    }
+    let mut ok = false;
+    store().update(|db| {
+        if let Some(a) = db.get_mut("prize_keys").and_then(|k| k.as_array_mut()) {
+            if op == "delete" {
+                let before = a.len();
+                a.retain(|k| util::str_or(k.get("id"), "") != id);
+                ok = a.len() < before;
+            } else {
+                for k in a.iter_mut() {
+                    if util::str_or(k.get("id"), "") == id {
+                        if let Some(o) = k.as_object_mut() {
+                            o.insert("enabled".into(), Value::from(op == "enable"));
+                        }
+                        ok = true;
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    json_resp(json!({"ok": ok}))
 }

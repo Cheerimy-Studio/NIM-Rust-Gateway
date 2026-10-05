@@ -2,8 +2,7 @@
 //!
 //! 会话：ngw_user cookie（HMAC 签名，含用户 id）；POST 双提交校验 ngw_ucsrfs cookie。
 
-use crate::store::{csrf_token, session_cookie, store};
-pub fn user_session_id_pub(secret: &str, cookie: &str) -> Option<String> {
+use crate::store::{csrf_token, session_cookie, store};pub fn user_session_id_pub(secret: &str, cookie: &str) -> Option<String> {
     crate::users::user_session_id(secret, cookie)
 }
 pub fn auth_user_pub(uid: &str) -> Option<Value> {
@@ -195,11 +194,103 @@ fn me_row(u: &Value) -> Value {
     json!({
         "id": util::str_or(u.get("id"), ""),
         "username": util::str_or(u.get("username"), ""),
-        "balance": util::round6(util::f64_or(u.get("balance"), 0.0)),
+        "balance": users::balance_of(u),
+        "grant": util::round6(users::grant_of(u)),
+        "grant_total": util::round6(util::f64_or(u.get("grant_total"), 0.0)),
+        "recharge": util::round6(users::recharge_of(u)),
+        "recharge_total": util::round6(util::f64_or(u.get("recharge_total"), 0.0)),
         "free_rpm": util::int_or(u.get("free_rpm"), 0),
         "paid_rpm": util::int_or(u.get("paid_rpm"), 0),
         "created_at": util::int_or(u.get("created_at"), 0),
     })
+}
+
+/// 签到状态：今日是否已签 + 当前设置（开关与金额区间，供前端渲染）。
+pub async fn sign_status(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
+    let cfg_v = crate::store::store().load();
+    let cfg = cfg_v.get("config").cloned().unwrap_or(json!({}));
+    let (enabled, min, max) = users::sign_config(&cfg);
+    let day = util::local_day(util::now_i());
+    let signed_today = users::sign_store_get(&day, &uid).is_some();
+    let today_amount = users::sign_store_get(&day, &uid).unwrap_or(0.0);
+    json_resp(json!({
+        "enabled": enabled,
+        "min": min,
+        "max": max,
+        "signed_today": signed_today,
+        "today_amount": util::round6(today_amount),
+    }))
+}
+
+/// 用户签到（POST）：一天一次，金额随机入赠金。
+pub async fn sign(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, true) else { return user_require_err() };
+    let (ok, msg, amount) = users::sign_today(&uid);
+    if !ok {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": msg}})),
+        )
+            .into_response();
+    }
+    // 返回最新钱包
+    let Some(u) = users::auth_user(&uid) else {
+        return user_require_err();
+    };
+    json_resp(json!({"ok": true, "message": msg, "amount": util::round6(amount), "wallet": users::wallet_row(&u)}))
+}
+
+/// 赠金/充值账本：当前与累计。
+pub async fn wallet(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
+    let Some(u) = users::auth_user(&uid) else { return user_require_err() };
+    json_resp(json!({"wallet": users::wallet_row(&u)}))
+}
+
+/// 用户端转盘列表（不含真实权重）。
+pub async fn wheels(headers: &HeaderMap) -> Response {
+    if let Err(e) = user_require(headers, false) { return e; }
+    json_resp(json!({"rows": crate::wheel::user_wheels()}))
+}
+
+/// 抽奖（POST /api/user/wheels/draw {id}）。
+pub async fn wheels_draw(headers: &HeaderMap, body: Bytes) -> Response {
+    let Ok(uid) = user_require(headers, true) else { return user_require_err() };
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let id = util::str_or(body.get("id"), "");
+    let (ok, body) = crate::wheel::draw(&uid, &id);
+    if ok {
+        json_resp(body)
+    } else {
+        let status = if body.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str())
+            .map(|m| m.contains("余额不足"))
+            .unwrap_or(false)
+        {
+            StatusCode::PAYMENT_REQUIRED
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        (status, axum::Json(body)).into_response()
+    }
+}
+
+/// 我的奖品 Key（体验卡/专属额度）。
+pub async fn prize_keys(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
+    json_resp(json!({"rows": crate::wheel::user_prize_keys(&uid)}))
+}
+
+/// 我的抽奖记录。
+pub async fn draw_logs(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
+    json_resp(json!({"rows": crate::wheel::user_draw_logs(&uid)}))
 }
 
 pub async fn me(headers: &HeaderMap) -> Response {
@@ -235,7 +326,8 @@ pub async fn keys_add(headers: &HeaderMap, body: Bytes) -> Response {
             .into_response();
     };
     let name = util::str_or(body.get("name"), "");
-    let row = users::add_key(&uid, &name);
+    let kind = util::str_or(body.get("kind"), "all");
+    let row = users::add_key_kind(&uid, &name, &kind);
     json_resp(json!({"ok": true, "key": row}))
 }
 
@@ -342,18 +434,29 @@ pub async fn refresh_login(headers: &HeaderMap) -> Response {
 pub async fn stats(headers: &HeaderMap) -> Response {
     let Ok(uid) = user_require(headers, false) else { return user_require_err() };
     let db = store().load();
+    // 累计口径读用户行上的持久计数器（bill 时累加）：日志有保留上限会被裁剪，
+    // 对日志求和只会越用越少，不是真累计
+    let Some(u) = db
+        .get("users")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.iter().find(|u| util::str_or(u.get("id"), "") == uid))
+    else {
+        return user_require_err();
+    };
+    let total_calls = util::int_or(u.get("paid_calls"), 0) + util::int_or(u.get("free_calls"), 0);
+    let total_cost = util::f64_or(u.get("total_cost"), 0.0);
+    let key_count = db.get("user_tokens").and_then(|t| t.as_array())
+        .map(|a| a.iter().filter(|t| util::str_or(t.get("user_id"), "") == uid
+            && t.get("enabled").map(util::truthy).unwrap_or(false)).count())
+        .unwrap_or(0);
+    // 最近调用仍来自日志（只展示，不承担累计口径）
     let mut my_logs: Vec<Value> = Vec::new();
     for key in ["user_logs_paid", "user_logs_free"] {
         if let Some(a) = db.get(key).and_then(|l| l.as_array()) {
             my_logs.extend(a.iter().filter(|r| util::str_or(r.get("user_id"), "") == uid).cloned());
         }
     }
-    let total_calls = my_logs.len() as i64;
-    let total_cost: f64 = my_logs.iter().map(|r| util::f64_or(r.get("cost"), 0.0)).sum();
-    let key_count = db.get("user_tokens").and_then(|t| t.as_array())
-        .map(|a| a.iter().filter(|t| util::str_or(t.get("user_id"), "") == uid
-            && t.get("enabled").map(util::truthy).unwrap_or(false)).count())
-        .unwrap_or(0);
+    my_logs.sort_by_key(|r| -util::int_or(r.get("t"), 0));
     let recent: Vec<Value> = my_logs.iter().take(5).map(|r| json!({
         "t": util::int_or(r.get("t"), 0),
         "model": util::str_or(r.get("model"), ""),
@@ -362,6 +465,8 @@ pub async fn stats(headers: &HeaderMap) -> Response {
     })).collect();
     json_resp(json!({
         "total_calls": total_calls,
+        "free_calls": util::int_or(u.get("free_calls"), 0),
+        "paid_calls": util::int_or(u.get("paid_calls"), 0),
         "total_cost": util::round6(total_cost),
         "key_count": key_count,
         "recent": recent,
