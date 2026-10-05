@@ -71,7 +71,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("sessions", &["sessions"]),
     ("intercepted", &["intercepted"]),
     ("queue", &["queue"]),
-    ("users", &["users", "user_tokens", "user_logs", "user_logs_paid", "user_logs_free", "user_rpm"]),
+    ("users", &["users", "user_tokens", "user_logs", "user_logs_paid", "user_logs_free", "user_rpm", "fund_logs"]),
     ("wheels", &["wheels", "prize_keys", "draw_logs"]),
     (
         "metrics",
@@ -562,6 +562,7 @@ pub fn migrate(db: &mut Value) {
         "user_logs_paid",
         "user_logs_free",
         "user_rpm",
+        "fund_logs",
         "wheels",
         "prize_keys",
         "draw_logs",
@@ -570,6 +571,7 @@ pub fn migrate(db: &mut Value) {
             .or_insert(if k == "upstreams" || k == "keys" || k == "logs" || k == "queue" || k == "sessions"
                 || k == "users" || k == "user_tokens" || k == "user_logs"
                 || k == "user_logs_paid" || k == "user_logs_free"
+                || k == "fund_logs"
                 || k == "wheels" || k == "prize_keys" || k == "draw_logs" {
                 Value::Array(vec![])
             } else {
@@ -600,6 +602,7 @@ pub fn migrate(db: &mut Value) {
         ("user_logs_paid", "arr"),
         ("user_logs_free", "arr"),
         ("user_rpm", "obj"),
+        ("fund_logs", "arr"),
         ("wheels", "arr"),
         ("prize_keys", "arr"),
         ("draw_logs", "arr"),

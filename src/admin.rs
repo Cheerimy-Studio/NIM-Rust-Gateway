@@ -2002,3 +2002,73 @@ pub async fn prize_keys_op(headers: &HeaderMap, body: Bytes) -> Response {
     });
     json_resp(json!({"ok": ok}))
 }
+
+
+// ---------------------------------------------------------------- 用户资金/抽奖明细（管理端）
+
+fn parse_id_page(raw: &Option<String>) -> (String, i64, usize) {
+    let mut id = String::new();
+    let mut page: i64 = 1;
+    let mut per: usize = 100;
+    if let Some(q) = raw {
+        for kv in q.split('&') {
+            if let Some((k, v)) = kv.split_once('=') {
+                match k {
+                    "id" => id = v.to_string(),
+                    "page" => page = v.parse::<i64>().unwrap_or(1),
+                    "per" => per = v.parse::<usize>().unwrap_or(100),
+                    _ => {}
+                }
+            }
+        }
+    }
+    (id, page, per.clamp(1, 300))
+}
+
+/// GET /api/user-funds?id=&page=&per= — 用户资金变动流水。
+pub async fn user_funds_admin(headers: &HeaderMap, raw_query: Option<String>) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    let (id, page, per) = parse_id_page(&raw_query);
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "缺少 id 参数"}})),
+        )
+            .into_response();
+    }
+    if crate::users::get_user_by_id(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": {"message": "用户不存在"}})),
+        )
+            .into_response();
+    }
+    let (rows, total) = crate::users::user_funds_page(&id, page, per);
+    json_resp(json!({"rows": rows, "total": total, "per": per}))
+}
+
+/// GET /api/user-draws?id=&page=&per= — 用户抽奖记录。
+pub async fn user_draws_admin(headers: &HeaderMap, raw_query: Option<String>) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    let (id, page, per) = parse_id_page(&raw_query);
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "缺少 id 参数"}})),
+        )
+            .into_response();
+    }
+    if crate::users::get_user_by_id(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": {"message": "用户不存在"}})),
+        )
+            .into_response();
+    }
+    let (rows, total) = crate::users::user_draws_page(&id, page, per);
+    json_resp(json!({"rows": rows, "total": total, "per": per}))
+}

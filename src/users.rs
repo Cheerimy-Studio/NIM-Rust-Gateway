@@ -86,6 +86,8 @@ pub fn add_user(username: &str, password: &str, balance: f64, free_rpm: i64, pai
     }
     let mut out: Option<Value> = None;
     let mut err = String::new();
+    let bal = util::round6(balance.max(0.0));
+    let mut created_id = String::new();
     store().update(|db| {
         users_mut(db, |arr| {
             if arr.iter().any(|u| {
@@ -96,7 +98,6 @@ pub fn add_user(username: &str, password: &str, balance: f64, free_rpm: i64, pai
             }
             let now = util::now_i();
             // 建户余额全部划入充值账本（注册赠送走 gift-balance 才是赠金）
-            let bal = util::round6(balance.max(0.0));
             let row = json!({
                 "id": format!("u8_{}", util::rand_hex(5)),
                 "username": username,
@@ -112,9 +113,15 @@ pub fn add_user(username: &str, password: &str, balance: f64, free_rpm: i64, pai
                 "updated_at": now,
                 "note": "",
             });
+            let new_id = util::str_or(row.get("id"), "");
             out = Some(row.clone());
             arr.push(row);
+            created_id = new_id;
         });
+        // users_mut 借用结束后再写流水（同一次 update 内，不嵌套加锁）
+        if !created_id.is_empty() && bal > 0.0 {
+            fund_log(db, &created_id, "recharge", 0.0, bal, "建户初始余额");
+        }
     });
     (out, err)
 }
@@ -124,6 +131,7 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
     let mut ok = false;
     let mut err = String::new();
     let mut disable_keys = false;
+    let mut note: Option<(&'static str, f64, f64, String)> = None;
     store().update(|db| {
         users_mut(db, |arr| {
             let Some(u) = find_user_mut(arr, user_id) else {
@@ -134,7 +142,12 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                 "set-balance" => {
                     // kind=recharge（默认，兼容旧调用）设充值当前；kind=grant 设赠金当前
                     let v = money(body.get("balance"));
+                    if v < 0.0 {
+                        err = "余额不能为负数".into();
+                        return;
+                    }
                     let kind = util::str_or(body.get("kind"), "recharge");
+                    let (before_g, before_r) = (grant_of(u), recharge_of(u));
                     if let Some(o) = u.as_object_mut() {
                         if kind == "grant" {
                             o.insert("grant".into(), json!(util::round6(v)));
@@ -148,11 +161,22 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                             }
                         }
                     }
+                    let (after_g, after_r) = (grant_of(u), recharge_of(u));
+                    note = Some((
+                        "adjust",
+                        util::round6(after_g - before_g),
+                        util::round6(after_r - before_r),
+                        format!("设置{}余额", if kind == "grant" { "赠金" } else { "充值" }),
+                    ));
                     ok = true;
                 }
                 "add-balance" => {
                     // kind=recharge（默认，兼容旧调用）加充值账本并计累计
                     let v = money(body.get("amount"));
+                    if v < 0.0 {
+                        err = "金额不能为负数（扣减请用 set-balance）".into();
+                        return;
+                    }
                     let kind = util::str_or(body.get("kind"), "recharge");
                     if let Some(o) = u.as_object_mut() {
                         if kind == "grant" {
@@ -161,22 +185,38 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                             credit(u, "recharge", v);
                         }
                     }
+                    note = Some((
+                        if kind == "grant" { "grant" } else { "recharge" },
+                        if kind == "grant" { util::round6(v) } else { 0.0 },
+                        if kind == "recharge" { util::round6(v) } else { 0.0 },
+                        "管理员发放".into(),
+                    ));
                     ok = true;
                 }
                 "gift-balance" => {
                     // 注册赠送：金额入充值账本且计累计（语义=运营送的充值额度）
                     let v = money(body.get("amount"));
+                    if v < 0.0 {
+                        err = "金额不能为负数".into();
+                        return;
+                    }
                     if let Some(o) = u.as_object_mut() {
                         credit(u, "recharge", v);
                     }
+                    note = Some(("recharge", 0.0, util::round6(v), "注册赠送".into()));
                     ok = true;
                 }
                 "gift-grant" => {
                     // 赠金发放（含签到以外的运营补偿）
                     let v = money(body.get("amount"));
+                    if v < 0.0 {
+                        err = "金额不能为负数".into();
+                        return;
+                    }
                     if let Some(o) = u.as_object_mut() {
                         credit(u, "grant", v);
                     }
+                    note = Some(("grant", util::round6(v), 0.0, "管理员发放".into()));
                     ok = true;
                 }
                 "enable" | "disable" => {
@@ -220,6 +260,24 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                 _ => err = "未知操作".into(),
             }
         });
+        // 删用户时同步清掉资金流水/抽奖记录/奖品 Key，避免孤儿数据堆积
+        if ok && op == "delete" {
+            if let Some(a) = db.get_mut("fund_logs").and_then(|l| l.as_array_mut()) {
+                a.retain(|r| util::str_or(r.get("user_id"), "") != user_id);
+            }
+            if let Some(a) = db.get_mut("draw_logs").and_then(|l| l.as_array_mut()) {
+                a.retain(|r| util::str_or(r.get("user_id"), "") != user_id);
+            }
+            if let Some(a) = db.get_mut("prize_keys").and_then(|k| k.as_array_mut()) {
+                a.retain(|k| util::str_or(k.get("user_id"), "") != user_id);
+            }
+        }
+        // 资金变动流水（同一次 update 内写入，与账本变更原子）
+        if ok {
+            if let Some((kind, dg, dr, nt)) = note.take() {
+                fund_log(db, user_id, kind, dg, dr, &nt);
+            }
+        }
     });
     if disable_keys {
         store().update(|db| {
@@ -479,25 +537,108 @@ pub fn credit(user: &mut Value, kind: &str, amount: f64) {
 }
 
 /// 扣一笔计费：先扣赠金当前，不够再扣充值当前（round6 量化，避免浮点尾数）。
+/// 余额不足时允许扣成负数（记录欠款）：预检在请求入口拦截 balance_of<=0，
+/// 并发突发最多产生一段有账可查的欠款，充值后自动冲抵；若在此钳到 0，
+/// 欠款消失、记账与实扣脱节（等于每次充值后可无限白嫖到下一次预检）。
 /// 返回 (扣的赠金, 扣的充值)。
 pub fn debit_bill(user: &mut Value, cost: f64) -> (f64, f64) {
     let mut left = util::round6(cost);
     let mut from_grant = 0.0f64;
     let mut from_recharge = 0.0f64;
     if let Some(o) = user.as_object_mut() {
-        let g = util::round6(util::f64_or(o.get("grant"), 0.0)).max(0.0);
+        let g = util::round6(util::f64_or(o.get("grant"), 0.0));
         if g > 0.0 {
             from_grant = g.min(left);
             o.insert("grant".into(), json!(util::round6(g - from_grant)));
             left = util::round6(left - from_grant);
         }
         if left > 0.0 {
-            let r = util::round6(util::f64_or(o.get("balance"), 0.0)).max(0.0);
-            from_recharge = r.min(left);
+            let r = util::round6(util::f64_or(o.get("balance"), 0.0));
+            // 充值腿允许扣成负数（记录欠款；充值后自动冲抵）
+            from_recharge = left;
             o.insert("balance".into(), json!(util::round6(r - from_recharge)));
         }
     }
     (from_grant, from_recharge)
+}
+
+/// 记一笔资金变动（必须在 store().update() 闭包内调用）。
+/// kind: signup/adjust/grant/recharge/sign/draw/prize/call。dg/dr = 赠金/充值增减量。
+/// 每用户保留最近 500 条。
+pub fn fund_log(db: &mut Value, user_id: &str, kind: &str, dg: f64, dr: f64, note: &str) {
+    if dg == 0.0 && dr == 0.0 {
+        return;
+    }
+    let obj = match db.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    let arr = obj.entry("fund_logs").or_insert_with(|| Value::Array(vec![]));
+    if let Some(a) = arr.as_array_mut() {
+        a.insert(
+            0,
+            json!({
+                "t": util::now_i(),
+                "user_id": user_id,
+                "kind": kind,
+                "dg": util::round6(dg),
+                "dr": util::round6(dr),
+                "note": util::str_cut(note, 60),
+            }),
+        );
+        let mut seen = 0usize;
+        a.retain(|r| {
+            if util::str_or(r.get("user_id"), "") != user_id {
+                return true;
+            }
+            seen += 1;
+            seen <= 500
+        });
+    }
+}
+
+/// 用户资金变动流水（时间倒序，分页）。
+pub fn user_funds_page(user_id: &str, page: i64, per: usize) -> (Vec<Value>, i64) {
+    let db = store().load();
+    let mut rows: Vec<Value> = db
+        .get("fund_logs")
+        .and_then(|l| l.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|r| util::str_or(r.get("user_id"), "") == user_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let total = rows.len() as i64;
+    let per = per.max(1) as i64;
+    let pages = ((total + per - 1) / per).max(1);
+    let page = page.clamp(1, pages);
+    let start = ((page - 1) * per) as usize;
+    rows = rows.into_iter().skip(start).take(per as usize).collect();
+    (rows, total)
+}
+
+/// 用户抽奖记录（分页）。
+pub fn user_draws_page(user_id: &str, page: i64, per: usize) -> (Vec<Value>, i64) {
+    let db = store().load();
+    let mut rows: Vec<Value> = db
+        .get("draw_logs")
+        .and_then(|l| l.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|r| util::str_or(r.get("user_id"), "") == user_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let total = rows.len() as i64;
+    let per = per.max(1) as i64;
+    let pages = ((total + per - 1) / per).max(1);
+    let page = page.clamp(1, pages);
+    let start = ((page - 1) * per) as usize;
+    rows = rows.into_iter().skip(start).take(per as usize).collect();
+    (rows, total)
 }
 
 /// 迁移旧用户行：补 grant/grant_total/recharge_total 字段（老账本 balance 全额划入充值账本，
@@ -569,21 +710,36 @@ pub fn sign_today(uid: &str) -> (bool, String, f64) {
         return (false, "用户不存在".into(), 0.0);
     }
     let day = crate::util::local_day(crate::util::now_i());
-    if sign_store_get(&day, uid).is_some() {
-        return (false, "今天已经签到过了".into(), 0.0);
-    }
     let span = (max - min).max(0.0);
     let raw = min + rand::Rng::gen::<f64>(&mut rand::thread_rng()) * span;
     let amount = util::round6(raw).clamp(0.000001, 1000.0);
+    // 查重、入账、落签到记录必须在同一个串行化临界区（store 互斥锁）里完成：
+    // 签到记录是独立文件，若在锁外查重/落盘，并发请求可重复领奖（先查后写的竞态）
+    let mut already = false;
+    let mut credited = false;
     store().update(|db| {
+        if sign_store_get(&day, uid).is_some() {
+            already = true;
+            return;
+        }
+        let mut ok = false;
         users_mut(db, |arr| {
             if let Some(u) = find_user_mut(arr, uid) {
                 credit(u, "grant", amount);
+                ok = true;
             }
         });
+        // 只有真的入了账才记流水与签到记录（用户行消失时不留孤儿数据）
+        if ok {
+            fund_log(db, uid, "sign", amount, 0.0, "每日签到");
+            sign_store_set(&day, uid, amount);
+            credited = true;
+        }
     });
-    // 签到记录按天分文件落盘（不在 store 表里，避免撑大 users 组）
-    sign_store_set(&day, uid, amount);
+    if !credited {
+        let msg = if already { "今天已经签到过了" } else { "用户不存在" };
+        return (false, msg.to_string(), 0.0);
+    }
     (true, "签到成功".into(), amount)
 }
 
@@ -726,13 +882,14 @@ pub fn bill(
         // 累计计数器直接加在用户行上（free_calls/paid_calls/total_cost）：
         // 日志表有保留上限会被裁剪，对日志求和不是真累计
         {
+            let mut paid_split = (0.0f64, 0.0f64);
             if let Some(arr) = db.get_mut("users").and_then(|u| u.as_array_mut()) {
                 for u in arr.iter_mut() {
                     if util::str_or(u.get("id"), "") != user_id {
                         continue;
                     }
                     if cost > 0.0 {
-                        let _ = debit_bill(u, cost);
+                        paid_split = debit_bill(u, cost);
                     }
                     if let Some(o) = u.as_object_mut() {
                         let kind_key = if cost > 0.0 { "paid_calls" } else { "free_calls" };
@@ -743,6 +900,16 @@ pub fn bill(
                     }
                     break;
                 }
+            }
+            if cost > 0.0 {
+                fund_log(
+                    db,
+                    user_id,
+                    "call",
+                    -util::round6(paid_split.0),
+                    -util::round6(paid_split.1),
+                    model,
+                );
             }
         }
     });

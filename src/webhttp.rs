@@ -36,6 +36,11 @@ pub mod web_assets {
 
 pub fn cors_headers() -> Vec<(String, String)> {
     vec![
+        (
+            // 每响应唯一：ZCode 遥测读取，用户拿它对网关日志定位问题
+            "x-request-id".into(),
+            crate::util::rand_hex(16),
+        ),
         ("Access-Control-Allow-Origin".into(), "*".into()),
         ("Access-Control-Allow-Methods".into(), "GET, POST, OPTIONS".into()),
         (
@@ -88,8 +93,11 @@ pub fn error_resp(
             _ => "api_error",
         };
         let body = serde_json::json!({"type": "error", "error": {"type": t, "message": message}});
-        return with_cors(
-            (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), axum::Json(body)).into_response(),
+        return err_retry_after(
+            with_cors(
+                (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), axum::Json(body)).into_response(),
+            ),
+            status,
         );
     }
     if type_ == "invalid_request_error" {
@@ -102,9 +110,25 @@ pub fn error_resp(
     let body = serde_json::json!({
         "error": {"message": message, "type": type_, "param": null, "code": code},
     });
-    with_cors(
-        (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), axum::Json(body)).into_response(),
+    err_retry_after(
+        with_cors(
+            (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), axum::Json(body)).into_response(),
+        ),
+        status,
     )
+}
+
+/// 错误响应补 retry-after（ZCode 的重试策略读取）：429 默认 60s、5xx 默认 10s。
+/// 调用方的精确值（如用户限速的剩余秒数）在返回后 .insert 会覆盖这里的默认值。
+fn err_retry_after(mut resp: Response, status: u16) -> Response {
+    if status == 429 {
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("60"));
+    } else if status >= 500 {
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("10"));
+    }
+    resp
 }
 
 pub fn json_resp(v: Value) -> Response {

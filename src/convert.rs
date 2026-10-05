@@ -136,6 +136,25 @@ pub fn sanitize_request(body: &mut Value) {
             }
         }
     }
+    normalize_for_upstream(obj);
+}
+
+/// 转发前按上游最大公约数规范化请求字段（幂等，每次尝试前调用）。
+/// 目前处理 ZCode 0.16.x / @ai-sdk 2.x 注入的 max_completion_tokens：
+/// 旧版 NIM、vLLM、多数 OpenAI 兼容上游只认 max_tokens；新上游两者都认，
+/// 统一改名为 max_tokens 是严格超集兼容，且杜绝 strict 上游按 extra input 拒绝。
+fn normalize_for_upstream(obj: &mut serde_json::Map<String, Value>) {
+    match obj.get("max_completion_tokens") {
+        Some(_) if obj.contains_key("max_tokens") => {
+            obj.remove("max_completion_tokens"); // 已有等价字段，去重
+        }
+        Some(v) => {
+            let v = v.clone();
+            obj.remove("max_completion_tokens");
+            obj.insert("max_tokens".into(), v);
+        }
+        None => {}
+    }
 }
 
 /// Responses 协议的 usage（该协议的唯一产出点）。
@@ -986,6 +1005,13 @@ pub fn is_unsupported_param_error(body_text: &str, status: i64) -> bool {
     low.contains("unsupported parameter")
         || low.contains("unsupported parameter(s)")
         || (low.contains("validation:") && low.contains("unsupported"))
+        // NVIDIA Pydantic（严格模式）与新版 ZCode 场景：文案里没有参数名，
+        // param 字段形如 "thinking.type[0]"，靠特征词同样要触发自动降级
+        || low.contains("extra inputs are not permitted")
+        || low.contains("extra inputs are not allowed")
+        // 旧版 vLLM / 部分 python 上游
+        || low.contains("unexpected keyword argument")
+        || low.contains("unrecognized keyword argument")
 }
 
 /// 上游报不支持参数时，从请求体移除被点名的参数（含 thinking 相关）。
@@ -999,6 +1025,21 @@ pub fn strip_unsupported_params(body: &mut Value, body_text: &str) -> bool {
             let name = m.as_str().to_string();
             if !names.contains(&name) {
                 names.push(name);
+            }
+        }
+    }
+    // NVIDIA Pydantic 错误把参数名放在 JSON 的 error.param（如 "thinking.type[0]"），
+    // 消息文本里没有——直接解析取顶层名。结构键（对话本体/工具定义）绝不剥离：
+    // 剥掉 messages/tools 后即使重试成功，回复也不再基于客户端的原始请求
+    if let Ok(v) = serde_json::from_str::<Value>(body_text) {
+        if let Some(p) = v.pointer("/error/param").and_then(|x| x.as_str()) {
+            const STRUCTURAL: [&str; 6] = ["messages", "input", "tools", "model", "stream", "n"];
+            let top = p.split(['.', '[']).next().unwrap_or(p);
+            if !top.is_empty()
+                && !STRUCTURAL.contains(&top)
+                && !names.contains(&top.to_string())
+            {
+                names.push(top.to_string());
             }
         }
     }
@@ -1025,6 +1066,14 @@ pub fn strip_unsupported_params(body: &mut Value, body_text: &str) -> bool {
         }
         if ctk.is_empty() {
             obj.remove("chat_template_kwargs");
+        }
+    }
+    // 兜底：NVIDIA 只回 "Extra inputs are not permitted"（参数名在 param 字段，反引号
+    // 提取不到）；此时按已知注入集剥离——stream_options 上游不认时网关会自行补
+    // usage 尾帧，max_completion_tokens 与 max_tokens 等价（已预处理去重）。
+    for k in ["stream_options", "max_completion_tokens"] {
+        if obj.remove(k).map(|v| !v.is_null()).unwrap_or(false) {
+            changed = true;
         }
     }
     changed

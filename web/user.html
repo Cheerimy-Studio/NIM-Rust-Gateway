@@ -111,14 +111,26 @@ a{text-decoration:none}
   .sidebar nav a.active::before{display:none}
   .content{padding:14px}
 }
-.wheel-disc{position:relative;width:120px;height:120px;border-radius:50%;
+.wheel-stage{position:relative;width:210px;height:210px;flex-shrink:0}
+.wheel-disc{position:absolute;inset:0;border-radius:50%;
   background:conic-gradient(#f59e0b 0 40deg,#3b82f6 40deg 110deg,#10b981 110deg 170deg,#8b5cf6 170deg 240deg,#f97316 240deg 310deg,#64748b 310deg 360deg);
-  border:4px solid rgba(255,255,255,.14);box-shadow:inset 0 0 22px rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
-.wheel-pointer{position:absolute;top:2px;left:50%;transform:translateX(-50%);width:0;height:0;
-  border-left:6px solid transparent;border-right:6px solid transparent;border-top:11px solid #fff;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}
-.wheel-center{position:relative;z-index:1;width:44px;height:44px;border-radius:50%;background:#0d1526;color:#fff;
-  display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;cursor:default;
-  box-shadow:0 0 0 3px rgba(255,255,255,.14)}
+  border:5px solid rgba(255,255,255,.16);box-shadow:0 0 0 3px rgba(255,255,255,.05),0 14px 38px rgba(2,8,20,.55),inset 0 0 26px rgba(0,0,0,.45)}
+.wheel-lbl{position:absolute;left:50%;top:50%;z-index:1;font-size:11px;font-weight:600;color:#fff;
+  white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,.75);pointer-events:none;transform-origin:0 0}
+.wheel-pointer{position:absolute;top:-9px;left:50%;transform:translateX(-50%);z-index:3;width:0;height:0;
+  border-left:9px solid transparent;border-right:9px solid transparent;border-top:17px solid #fff;
+  filter:drop-shadow(0 2px 3px rgba(0,0,0,.6))}
+.wheel-pointer::after{content:"";position:absolute;top:-17px;left:-6px;width:12px;height:12px;
+  border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+.wheel-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:3;
+  width:54px;height:54px;border-radius:50%;background:linear-gradient(135deg,#0f1b33,#0b1224);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;cursor:default;
+  box-shadow:0 0 0 4px rgba(255,255,255,.16),0 4px 14px rgba(0,0,0,.5)}
+.prob-bar{width:78px;height:7px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden;flex-shrink:0}
+.prob-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#10b981,#34d399)}
+.wheel-activity{cursor:pointer;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease}
+.wheel-activity:hover{transform:translateY(-3px);border-color:rgba(52,211,153,.45);
+  box-shadow:0 12px 30px rgba(2,8,20,.5)}
 .bg-orange-subtle{background-color:rgba(249,115,22,.12)!important}
 .text-orange{color:#f97316!important}
 .modal-mask{position:fixed;inset:0;background:rgba(5,10,22,.62);backdrop-filter:blur(3px);
@@ -129,8 +141,61 @@ a{text-decoration:none}
 .modal-body{font-size:13.5px;color:#c9d4e6;line-height:1.7}
 .modal-body .prize-line{display:flex;justify-content:space-between;padding:3px 0}
 .modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
-.wheel-disc{width:190px;height:190px}
 .type-chip{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px}
+/* ── 抽奖结果：星空 + 票据卡（仿 ZCode Trust Build 风） ── */
+.prize-overlay{position:fixed;inset:0;z-index:4000;display:none;align-items:center;justify-content:center;
+  background:radial-gradient(1200px 600px at 50% -10%,#16264d 0%,transparent 60%),
+             radial-gradient(900px 500px at 85% 110%,#12224a 0%,transparent 55%),
+             linear-gradient(160deg,#0a1226 0%,#080f20 100%);
+  animation:pfade .35s ease both}
+@keyframes pfade{from{opacity:0}to{opacity:1}}
+.prize-stars{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+.prize-stars i{position:absolute;width:3px;height:3px;border-radius:50%;background:#fff;
+  animation:ptwk 3s ease-in-out infinite}
+@keyframes ptwk{0%,100%{opacity:.12;transform:scale(.6)}50%{opacity:.85;transform:scale(1.15)}}
+.prize-streak{position:absolute;height:1.5px;width:130px;border-radius:2px;
+  background:linear-gradient(90deg,transparent,rgba(160,190,255,.85),transparent);
+  animation:pfly 3.2s linear infinite;opacity:.75;pointer-events:none}
+@keyframes pfly{from{transform:translateX(-160px) rotate(9deg)}to{transform:translateX(110vw) rotate(9deg)}}
+.prize-wrap{position:relative;display:flex;flex-direction:column;align-items:center;max-height:96vh;
+  overflow-y:auto;overflow-x:hidden;padding:10px}
+.prize-card{position:relative;width:min(430px,86vw);background:#fff;border-radius:16px;color:#1c2536;
+  box-shadow:0 30px 80px rgba(2,8,20,.65);animation:pcard .75s cubic-bezier(.18,.9,.24,1.16) both}
+@keyframes pcard{from{opacity:0;transform:translateY(48px) scale(.85) rotate(-2.5deg)}
+  to{opacity:1;transform:none}}
+.prize-head{display:flex;align-items:center;justify-content:space-between;padding:18px 22px 6px}
+.prize-brand{display:flex;align-items:center;gap:9px;font-weight:800;font-size:14px;letter-spacing:.3px}
+.prize-brand .bm{width:26px;height:26px;border-radius:7px;background:#111827;color:#fff;display:flex;
+  align-items:center;justify-content:center;font-size:13px;font-weight:800}
+.prize-tag{color:#10b981;font-weight:700;font-size:12px;letter-spacing:1.5px}
+.prize-main{padding:4px 22px 4px}
+.prize-amount{font-size:34px;font-weight:800;letter-spacing:-.5px;font-variant-numeric:tabular-nums;
+  word-break:break-all}
+.prize-amount small{font-size:14px;font-weight:600;color:#5b6b84;margin-left:4px}
+.prize-line{display:flex;align-items:center;gap:7px;color:#3c4a63;font-size:14px;font-weight:600;margin-top:3px}
+.prize-line .bi{color:#10b981}
+.prize-cut{position:relative;margin-top:16px;border-top:1.5px dashed #d5dbe6}
+.prize-cut::before,.prize-cut::after{content:"";position:absolute;top:0;width:22px;height:22px;border-radius:50%;
+  background:#0a1226;transform:translateY(-50%)}
+.prize-cut::before{left:-11px}.prize-cut::after{right:-11px}
+.prize-valid{text-align:center;font-size:12.5px;color:#7c889d;padding:10px 22px 20px}
+.prize-foot{background:rgba(10,15,30,.55);backdrop-filter:blur(6px);padding:26px 26px 30px;text-align:center;
+  width:100%;margin-top:26px}
+.prize-title{color:#fff;font-size:22px;font-weight:800;margin-bottom:6px}
+.prize-sub{color:#a8b6cf;font-size:14px;margin-bottom:18px}
+.prize-sub b{color:#fff}
+.prize-btns{display:flex;gap:12px;justify-content:center}
+.pbtn{min-width:132px;padding:.6rem 1.4rem;border-radius:999px;font-size:14px;font-weight:700;cursor:pointer;
+  transition:all .15s ease;border:1px solid rgba(255,255,255,.28);background:transparent;color:#e5ecf7}
+.pbtn:hover{border-color:rgba(255,255,255,.55)}
+.pbtn.primary{background:#fff;color:#111827;border-color:#fff}
+.pbtn.primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(255,255,255,.22)}
+.prize-card.lost .prize-tag{color:#98a3b8}
+.prize-card.lost .prize-line .bi{color:#98a3b8}
+.prize-confetti{position:absolute;top:34%;left:50%;width:8px;height:13px;border-radius:2px;opacity:0;
+  animation:pconf 1.25s ease-out .4s both;pointer-events:none}
+@keyframes pconf{0%{opacity:1;transform:translate(0,0) rotate(0deg)}
+  100%{opacity:0;transform:translate(var(--dx),var(--dy)) rotate(560deg)}}
 </style>
 </head>
 <body>
@@ -245,7 +310,8 @@ a{text-decoration:none}
     <div class="row g-3">
       <div class="col-lg-5">
         <div class="card h-100"><div class="card-body d-flex flex-column align-items-center justify-content-center py-4">
-          <div class="wheel-disc" id="wd-disc">
+          <div class="wheel-stage">
+            <div class="wheel-disc" id="wd-disc"></div>
             <div class="wheel-pointer"></div>
             <div class="wheel-center" id="wd-center">GO</div>
           </div>
@@ -253,14 +319,13 @@ a{text-decoration:none}
             <span class="fw-semibold" id="wd-cost">-</span>
             <button class="btn btn-primary px-4" id="wd-draw">立即抽奖</button>
           </div>
-          <div class="hint mt-2 mb-0" id="wd-cost-note"></div>
         </div></div>
       </div>
       <div class="col-lg-7">
         <div class="card h-100"><div class="card-header">奖项与概率</div>
           <div class="table-responsive">
             <table class="table table-sm table-hover align-middle mb-0">
-              <thead><tr><th>奖项</th><th>类型</th><th class="text-end">概率</th></tr></thead>
+              <thead><tr><th>奖项</th><th>类型</th><th>详情</th><th class="text-end">概率</th></tr></thead>
               <tbody id="wd-prizes"></tbody>
             </table>
           </div>
@@ -369,6 +434,32 @@ a{text-decoration:none}
     <div class="modal-foot">
       <button class="btn btn-sm btn-outline-secondary" id="wheel-modal-cancel">取消</button>
       <button class="btn btn-sm btn-primary" id="wheel-modal-ok">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="prize-overlay" id="prize-overlay" style="display:none">
+  <div class="prize-stars" id="prize-stars"></div>
+  <div class="prize-wrap">
+    <div class="prize-card" id="prize-card">
+      <div class="prize-head">
+        <div class="prize-brand"><span class="bm">言</span>言灵中转</div>
+        <div class="prize-tag">抽奖凭证</div>
+      </div>
+      <div class="prize-main">
+        <div class="prize-amount" id="prize-amount"></div>
+        <div class="prize-line" id="prize-line"></div>
+      </div>
+      <div class="prize-cut"></div>
+      <div class="prize-valid" id="prize-valid"></div>
+    </div>
+    <div class="prize-foot">
+      <div class="prize-title" id="prize-title"></div>
+      <div class="prize-sub" id="prize-sub"></div>
+      <div class="prize-btns">
+        <button class="pbtn" id="prize-again">再来一次</button>
+        <button class="pbtn primary" id="prize-ok">收下</button>
+      </div>
     </div>
   </div>
 </div>

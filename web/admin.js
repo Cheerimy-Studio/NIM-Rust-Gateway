@@ -1879,6 +1879,15 @@ async function loadUsers() {
       const d = await api('user-logs?id=' + encodeURIComponent(u.id) + '&kind=all&page=1&per=100');
       showUserLogs(u, d.rows || [], d.total || 0);
     });
+    const fin = document.createElement('button');
+    fin.className = 'btn btn-sm btn-outline-secondary me-1'; fin.textContent = '资金';
+    fin.onclick = () => run(async () => {
+      const [fd, dd] = await Promise.all([
+        api('user-funds?id=' + encodeURIComponent(u.id) + '&page=1&per=100'),
+        api('user-draws?id=' + encodeURIComponent(u.id) + '&page=1&per=100'),
+      ]);
+      showUserFinance(u, fd, dd);
+    });
     const tog = document.createElement('button');
     tog.className = 'btn btn-sm btn-outline-secondary me-1';
     tog.textContent = u.enabled ? '停用' : '启用';
@@ -1893,7 +1902,7 @@ async function loadUsers() {
       await api('users/op', {method: 'POST', json: {id: u.id, op: 'delete'}});
       toast('已删除'); loadUsers();
     });
-    td.append(bal, gift, lim, pw, lg, tog, del);
+    td.append(bal, gift, lim, pw, lg, fin, tog, del);
     tr.appendChild(td);
     tb.appendChild(tr);
   }
@@ -1925,6 +1934,55 @@ function showUserLogs(u, rows, total) {
   const wrap = el('div');
   wrap.append(tb, note);
   uiPanel('调用日志 · ' + u.username, wrap);
+}
+
+const FUND_KINDS = {
+  signup: '建户', adjust: '余额调整', grant: '赠金发放', recharge: '充值',
+  sign: '签到', draw: '抽奖消耗', prize: '抽奖中奖', call: '调用计费',
+};
+
+function showUserFinance(u, fd, dd) {
+  const wrap = el('div');
+  const mk = (title, rows, cols, render) => {
+    const box = el('div', 'mb-3');
+    box.appendChild(el('div', 'fw-semibold mb-1', title));
+    const tb = el('table', 'table table-sm table-hover align-middle');
+    tb.innerHTML = '<thead><tr>' + cols.map(c => '<th>' + c + '</th>').join('') + '</tr></thead>';
+    const body = el('tbody');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="' + cols.length + '" class="text-muted small text-center py-3">暂无记录</td></tr>';
+    }
+    for (const r of rows) body.appendChild(render(r));
+    tb.appendChild(body);
+    box.appendChild(tb);
+    return box;
+  };
+  const fundRows = fd.rows || [];
+  const fundNote = el('div', 'small text-muted mb-1',
+    '共 ' + (fd.total ?? fundRows.length) + ' 条 · 每条为一次资金变动（+入账 / -扣减）');
+  wrap.appendChild(fundNote);
+  wrap.appendChild(mk('资金变动', fundRows, ['时间', '类型', '赠金', '充值', '备注'], r => {
+    const tr = el('tr');
+    const dg = r.dg ?? 0, dr = r.dr ?? 0;
+    const cls = v => v > 0 ? 'text-success fw-semibold' : v < 0 ? 'text-danger fw-semibold' : 'text-muted';
+    tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
+      + '<td class="small">' + (FUND_KINDS[r.kind] || r.kind) + '</td>'
+      + '<td class="small ' + cls(dg) + '">' + (dg > 0 ? '+' : '') + dg.toFixed(4) + '</td>'
+      + '<td class="small ' + cls(dr) + '">' + (dr > 0 ? '+' : '') + dr.toFixed(4) + '</td>'
+      + '<td class="small text-muted">' + esc(r.note || '-') + '</td>';
+    return tr;
+  }));
+  const drawRows = dd.rows || [];
+  wrap.appendChild(mk('抽奖记录', drawRows, ['时间', '转盘', '奖品', '消耗赠金', '消耗充值'], r => {
+    const tr = el('tr');
+    tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
+      + '<td class="small">' + esc(r.wheel_name || '-') + '</td>'
+      + '<td class="small">' + esc(r.label || '-') + '</td>'
+      + '<td class="small text-danger">' + (-(r.cost_grant ?? 0)).toFixed(4) + '</td>'
+      + '<td class="small text-danger">' + (-(r.cost_recharge ?? 0)).toFixed(4) + '</td>';
+    return tr;
+  }));
+  uiPanel('资金明细 · ' + u.username, wrap);
 }
 
 $('#usr-add').onclick = guard(async () => {
@@ -1960,18 +2018,33 @@ function prizeRowHtml(p = {}) {
     `<option value="${v}"${p.type === v ? ' selected' : ''}>${t}</option>`).join('');
   const colorOpts = PRIZE_COLORS.map(([v, t]) =>
     `<option value="${v}"${p.color === v ? ' selected' : ''}>${t}</option>`).join('');
+  // 金额/模型共用一个输入框：余额类回显金额、Key 类回显模型名。
+  // 不能用 amount ?? model —— 模型类奖品 amount 恒为 0（非 null），?? 短路回显成 0，
+  // 再点保存模型名就被写成 "0"。
+  const isAmt = p.type === 'recharge' || p.type === 'grant';
+  const amVal = isAmt ? (p.amount ? String(p.amount) : '') : (p.model ?? '');
   tr.innerHTML = '<td><input class="form-control form-control-sm wz-label" value="' + esc(p.label || '') + '"></td>'
     + '<td><select class="form-select form-select-sm wz-type">' + typeOpts + '</select></td>'
     + '<td><select class="form-select form-select-sm wz-color">' + colorOpts + '</select></td>'
     + '<td><input type="number" step="0.01" min="0.01" class="form-control form-control-sm wz-weight" value="' + (p.weight ?? 25) + '"></td>'
     + '<td><input type="number" step="0.01" min="0" class="form-control form-control-sm wz-real" value="' + (p.real_weight ?? '') + '" placeholder="同展示"></td>'
-    + '<td><input class="form-control form-control-sm wz-amount-model" value="' + esc(p.amount ?? p.model ?? '') + '" placeholder="金额或模型名"></td>'
+    + '<td><input class="form-control form-control-sm wz-amount-model" value="' + esc(amVal) + '" placeholder="' + (isAmt ? '金额' : '模型名') + '"></td>'
     + '<td class="text-nowrap"><input type="number" step="0.1" min="0" class="form-control form-control-sm wz-hours d-inline-block" style="width:74px" value="' + (p.duration_hours ?? '') + '" placeholder="小时"> '
     + '<input type="number" min="1" max="64" class="form-control form-control-sm wz-conc d-inline-block" style="width:66px" value="' + (p.concurrency ?? '') + '" placeholder="并发"> '
     + '<input type="number" step="1" min="0" class="form-control form-control-sm wz-quota d-inline-block" style="width:70px" value="' + (p.quota ?? '') + '" placeholder="次数"></td>'
     + '<td><button class="btn btn-sm btn-outline-danger wz-del">删</button></td>';
+  tr._prize = p;
   tr.querySelector('.wz-del').onclick = () => { tr.remove(); wheelSum(); };
   tr.querySelector('.wz-weight').addEventListener('input', wheelSum);
+  // 切换类型时按原始奖品数据切换回显（金额 ↔ 模型名），两个语义共用输入框不串值
+  tr.querySelector('.wz-type').addEventListener('change', () => {
+    const t = tr.querySelector('.wz-type').value;
+    const inp = tr.querySelector('.wz-amount-model');
+    const amt = t === 'recharge' || t === 'grant';
+    const src = tr._prize || {};
+    inp.value = amt ? (src.amount ? String(src.amount) : '') : (src.model ?? '');
+    inp.placeholder = amt ? '金额' : '模型名';
+  });
   return tr;
 }
 
@@ -2023,6 +2096,8 @@ function collectWheel() {
       quota: parseFloat(q('.wz-quota').value) || 0,
     };
     if (q('.wz-real').value.trim() !== '') p.real_weight = parseFloat(q('.wz-real').value) || 0;
+    // 保留原奖品 id：编辑保存不换 id，抽中结果定位与历史流水引用才稳定
+    if (tr._prize && tr._prize.id) p.id = tr._prize.id;
     prizes.push(p);
   }
   return {

@@ -701,6 +701,81 @@ pub fn keepalive_frame(ep_tag: &str, model: &str, first: bool) -> Bytes {
     Bytes::from(format!("data: {}\n\n", py_json(&obj)))
 }
 
+/// 合成 usage 尾帧：choices 必须显式为空数组（ZCode 的 chunk schema 硬要求）。
+fn synth_usage_frame(prompt_tokens: i64, completion_tokens: i64, created: i64) -> Bytes {
+    let u = full_usage(Some(&json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+    })));
+    let frame = json!({
+        "id": "chatcmpl-gw-usage",
+        "object": "chat.completion.chunk",
+        "created": created,
+        "choices": [],
+        "usage": u,
+    });
+    Bytes::from(format!("data: {}\n\n", py_json(&frame)))
+}
+
+/// 直通行缓冲的 usage/[DONE] 处理：扫 usage 帧、拦截行首 [DONE]（在它之前按需补
+/// usage 尾帧）。返回 (要下发的段, 是否见过 usage, 是否已见到 [DONE])。
+/// [DONE] 只认行首或上一行换行之后的（JSON 字符串里的引号必被转义，内容文本
+/// 即使出现 "data: [DONE]" 字样，前一个字节是 " 而非 \n，不会误伤）。
+fn sse_lines_tap(
+    buf: &[u8],
+    want_usage: bool,
+    saw_usage: bool,
+    est_prompt: i64,
+    out_bytes: usize,
+) -> (Vec<Vec<u8>>, bool, bool) {
+    let mut saw = saw_usage;
+    // 裸 "usage" 只可能来自帧结构（JSON 字符串内的引号会被转义为 \"）
+    // 注意 windows(N) 的 N 必须等于特征串长度：长度不等比较恒为 false（编译不报错）
+    const USAGE_KEY: &[u8] = b"\"usage\"";
+    if !saw && buf.windows(USAGE_KEY.len()).any(|w| w == USAGE_KEY) {
+        saw = true;
+    }
+    let pat = b"data: [DONE]";
+    let mut done_at: Option<usize> = None;
+    let mut from = 0usize;
+    while from + pat.len() <= buf.len() {
+        match buf[from..].windows(pat.len()).position(|w| w == pat) {
+            None => break,
+            Some(rel) => {
+                let idx = from + rel;
+                if idx == 0 || buf[idx - 1] == b'\n' {
+                    done_at = Some(idx);
+                    break;
+                }
+                from = idx + 1;
+            }
+        }
+    }
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    match done_at {
+        Some(m) => {
+            if m > 0 {
+                out.push(buf[..m].to_vec());
+            }
+            if want_usage && !saw {
+                out.push(
+                    synth_usage_frame(est_prompt, util::estimate_output_tokens(out_bytes), util::now_i())
+                        .to_vec(),
+                );
+                saw = true;
+            }
+            out.push(buf[m..].to_vec());
+            (out, saw, true)
+        }
+        None => {
+            if !buf.is_empty() {
+                out.push(buf.to_vec());
+            }
+            (out, saw, false)
+        }
+    }
+}
+
 /// 构造拦截回复的响应（按客户端协议；流式输出单块内容 + 终端帧）。
 pub fn custom_reply_response(reply_text: &str, model: &str, stream: bool, protocol: &str, meta: &Value) -> Response {
     let comp_len = (reply_text.chars().count() / 3).max(1) as i64;
@@ -1176,6 +1251,9 @@ pub struct StreamCtx {
     pub capture_train: bool,
     pub user: Option<(String, String)>, // (用户id, Key id) —— 成功后计费
     pub prize_key: Option<String>, // 奖品 Key（专属额度计次）
+    // 客户端原始请求声明了 stream_options.include_usage（与每次尝试的上游体无关：
+    // 400 自愈剥离 stream_options 后仍需为客户端合成 usage 尾帧）
+    pub want_usage: bool,
 }
 
 /// 统一的流式 pump：读上游 chunk →（可选协议转换/模型改名/退化思考清理）→ 下发。
@@ -1213,6 +1291,17 @@ async fn run_pump(
     let mut train: Vec<u8> = Vec::new();
 
     let is_convert = ctx.protocol.is_some();
+    // ZCode 0.16.x / ai-sdk 2.x：请求声明 stream_options.include_usage 时按行缓冲
+    // 直通；上游漏发 usage 帧由网关在 [DONE] 前合成（其 chunk schema 硬要求 usage
+    // 帧带 choices:[]，缺帧会在空回复判定里误杀）。判定在 StreamCtx 上：客户端
+    // 原始声明不随后续尝试剥离 stream_options 而丢失
+    let want_usage = ctx.want_usage;
+    let est_prompt = {
+        let c = ctx.body.chars().count() as i64;
+        c / 3 + ((c % 3) > 0) as i64
+    };
+    let mut saw_usage = false;
+    let mut usage_done = false;
     let mut conv_resp: Option<ResponsesStream> = None;
     let mut conv_anth: Option<AnthropicStream> = None;
     if ctx.protocol.as_deref() == Some("responses") {
@@ -1257,6 +1346,9 @@ async fn run_pump(
         if is_convert {
             let ready = split_incomplete_utf8(&mut utf8_carry, &fc);
             feed_conv!(&String::from_utf8_lossy(&ready));
+        } else if ctx.rewrite || want_usage {
+            // 与主循环同路径：改名/usage 扫描对首帧同样生效（单帧小回复也含 DONE）
+            buf.extend_from_slice(&fc);
         } else {
             emit_bytes!(fc);
         }
@@ -1315,18 +1407,32 @@ async fn run_pump(
             continue;
         }
         let mut b: Vec<u8> = chunk.to_vec();
-        if ctx.rewrite {
+        if ctx.rewrite || want_usage {
             buf.extend_from_slice(&b);
             match buf.iter().rposition(|&c| c == b'\n') {
                 None => continue,
                 Some(cut) => {
                     let out = buf[..cut + 1].to_vec();
                     buf = buf[cut + 1..].to_vec();
-                    let rewritten = model_re
-                        .as_ref()
-                        .map(|re| re.replace_all(&out, model_to.as_bytes()).to_vec())
-                        .unwrap_or(out);
-                    emit_bytes!(Bytes::from(rewritten));
+                    let (segs, saw, done) =
+                        sse_lines_tap(&out, want_usage, saw_usage, est_prompt, out_bytes);
+                    if saw {
+                        saw_usage = true;
+                    }
+                    if done {
+                        usage_done = true;
+                    }
+                    for seg in segs {
+                        let seg = if ctx.rewrite {
+                            model_re
+                                .as_ref()
+                                .map(|re| re.replace_all(&seg, model_to.as_bytes()).to_vec())
+                                .unwrap_or_else(|| seg.clone())
+                        } else {
+                            seg
+                        };
+                        emit_bytes!(Bytes::from(seg));
+                    }
                     continue;
                 }
             }
@@ -1399,12 +1505,38 @@ async fn run_pump(
             emit_bytes!(Bytes::from(pend));
         }
     }
-    if !client_gone && ctx.rewrite && !buf.is_empty() {
-        let rewritten = model_re
-            .as_ref()
-            .map(|re| re.replace_all(&buf, model_to.as_bytes()).to_vec())
-            .unwrap_or_else(|| buf.clone());
-        emit_bytes!(Bytes::from(rewritten));
+    if !client_gone && (ctx.rewrite || want_usage) && !buf.is_empty() {
+        let out = std::mem::take(&mut buf);
+        let (segs, saw, done) = sse_lines_tap(&out, want_usage, saw_usage, est_prompt, out_bytes);
+        if saw {
+            saw_usage = true;
+        }
+        if done {
+            usage_done = true;
+        }
+        for seg in segs {
+            let seg = if ctx.rewrite {
+                model_re
+                    .as_ref()
+                    .map(|re| re.replace_all(&seg, model_to.as_bytes()).to_vec())
+                    .unwrap_or_else(|| seg.clone())
+            } else {
+                seg
+            };
+            emit_bytes!(Bytes::from(seg));
+        }
+    }
+    // 上游没发 [DONE] 或声明了 include_usage 却漏发 usage 帧：正常收尾时补齐，
+    // 否则严格客户端的空回复判定（零文本/零工具/零 usage）会误杀可用回复
+    if !client_gone && want_usage && !usage_done && started && truncated.is_empty() {
+        if !saw_usage {
+            emit_bytes!(synth_usage_frame(
+                est_prompt,
+                util::estimate_output_tokens(out_bytes),
+                util::now_i(),
+            ));
+        }
+        emit_bytes!(Bytes::from_static(b"data: [DONE]\n\n"));
     }
     // 统计与释放（恰好一次）
     let ms = ctx.t0.elapsed().as_millis() as i64;
@@ -1557,6 +1689,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         );
     }
     let body_text = String::from_utf8_lossy(&body_bytes).trim_start_matches('\u{feff}').to_string();
+    // 客户端是否声明 include_usage（从原始客户端请求判定一次；后续尝试剥离
+    // stream_options 时该判定不受影响 —— 合成 usage 尾帧是给客户端的）
+    let client_wants_usage = body_text.contains("\"include_usage\":true")
+        || body_text.contains("\"include_usage\": true");
     if body_text.len() > MAX_BODY {
         return error_resp(413, "请求体过大，上限 20MB", "invalid_request_error", None, false);
     }
@@ -1785,7 +1921,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 fut, key, ctx, body, ep_tag, &model, &up_model, attempt, t0, tok, None, stream,
                 user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                 prize_ctx.as_ref().map(|p| p.key.clone()),
-            ));
+                client_wants_usage,            ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
             // 连接层异常，走统一的失败处理
@@ -1878,6 +2014,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                             && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                         user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                         prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
+                        want_usage: client_wants_usage,
                     },
                 ));
             } else {
@@ -1938,14 +2075,32 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                                 && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                             user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                             prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
-                        },
+                            want_usage: client_wants_usage,
+                    },
                     ));
                 }
             }
         }
         if stream {
-            // 流式响应没能交接给透传（空流 / SSE 错误且降级失败等）：丢弃响应释放连接
-            drop(r);
+            if (200..400).contains(&rstatus) {
+                // 2xx/3xx 流式在上方已交接透传，走到这里是理论死角：丢弃释放
+                drop(r);
+            } else if rbody.is_empty() && rerr != "上游返回空流" {
+                // 上游返回非 2xx（400 参数错误等）：错误体必须读下来——
+                // is_unsupported_param_error / 渠道耗尽等分类全依赖它。
+                // ZCode 等客户端恒走流式，这里漏读会让 400 自愈对流式完全失效。
+                // 空流（预读已判定）除外：读下去会阻塞到整段生成结束
+                match r.text().await {
+                    Ok(t) => rbody = t,
+                    Err(e) => {
+                        rerr = conn_reason(&e);
+                        rstatus = 0;
+                    }
+                }
+            } else {
+                // 首帧预读已捕获错误体（SSE error 事件）或已判空流：丢弃连接即可
+                drop(r);
+            }
         } else {
             match r.text().await {
                 Ok(t) => rbody = t,
@@ -2066,6 +2221,50 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 if up_model != model {
                     j["model"] = Value::from(model.clone());
                 }
+                // ZCode/SDK 兼容：content 分片数组平铺成字符串；tool_calls.arguments
+                // 规范为 JSON 字符串；非标 finish_reason 改写（空回复判定只认白名单，
+                // 上游回 "eos"/"stop_reason" 等会被误判为没完成）
+                if let Some(choices) = j.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                    for ch in choices.iter_mut() {
+                        let Some(co) = ch.as_object_mut() else { continue };
+                        let mut has_tools = false;
+                        if let Some(msg) = co.get_mut("message").and_then(|m| m.as_object_mut()) {
+                            if let Some(c) = msg.get("content") {
+                                if c.is_array() {
+                                    let flat = convert::flatten_content(c);
+                                    msg.insert("content".into(), Value::String(flat));
+                                }
+                            }
+                            if let Some(tcs) = msg.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+                                has_tools = !tcs.is_empty();
+                                for tc in tcs.iter_mut() {
+                                    if let Some(f) = tc.get_mut("function").and_then(|f| f.as_object_mut()) {
+                                        let args = match f.get("arguments") {
+                                            Some(Value::String(_)) => continue,
+                                            Some(a) => serde_json::to_string(a).unwrap_or_default(),
+                                            None => continue,
+                                        };
+                                        f.insert("arguments".into(), Value::String(args));
+                                    }
+                                }
+                            }
+                        }
+                        let fr = co
+                            .get("finish_reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !fr.is_empty()
+                            && !["stop", "length", "tool_calls", "content_filter", "function_call"]
+                                .contains(&fr.as_str())
+                        {
+                            co.insert(
+                                "finish_reason".into(),
+                                Value::from(if has_tools { "tool_calls" } else { "stop" }),
+                            );
+                        }
+                    }
+                }
                 // 退化思考清理:成片重复感叹号(推理栈故障)不透传给下游
                 if let Some(ch0) = j
                     .get_mut("choices")
@@ -2184,6 +2383,7 @@ fn slow_start_response(
     _stream: bool,
     user: Option<(String, String)>,
     prize_key: Option<String>,
+    want_usage: bool,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     let ep2 = ep_tag.to_string();
@@ -2292,6 +2492,7 @@ fn slow_start_response(
             capture_train,
             user,
             prize_key,
+            want_usage,
         };
         run_pump(resp, key, None, sctx, tx).await;
     });
@@ -2666,7 +2867,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 Some(protocol.to_string()), stream,
                 user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                 prize_ctx.as_ref().map(|p| p.key.clone()),
-            ));
+                false,            ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
             let ms = t0.elapsed().as_millis() as i64;
@@ -2749,6 +2950,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                             && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                         user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                         prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
+                            want_usage: false,
                     },
                 ));
             } else {
@@ -2807,7 +3009,8 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                                 && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                             user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                             prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
-                        },
+                                want_usage: false,
+                    },
                     ));
                 }
             }

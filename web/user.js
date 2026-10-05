@@ -495,10 +495,22 @@ const PRIZE_TYPE_NAMES = {
 let WHEELS = [];
 
 function prizeDesc(p) {
-  if (p.type === 'recharge' || p.type === 'grant') return '¥' + (p.amount ?? 0).toFixed(4);
-  if (p.type === 'model_unlimited') return esc(p.model || '') + (p.duration_hours > 0 ? ' · ' + p.duration_hours + 'h' : ' · 长期');
-  if (p.type === 'model_quota') return esc(p.model || '') + ' · ' + (p.quota ?? 0) + ' 次';
-  return '—';
+  const amt = (p.amount ?? 0).toFixed(4);
+  if (p.type === 'recharge') return '充值余额 ¥' + amt;
+  if (p.type === 'grant') return '赠金 ¥' + amt;
+  if (p.type === 'model_unlimited') {
+    const parts = [esc(p.model || '')];
+    parts.push(p.duration_hours > 0 ? p.duration_hours + ' 小时' : '长期有效');
+    parts.push('并发 ' + (p.concurrency ?? 1));
+    return parts.join(' · ');
+  }
+  if (p.type === 'model_quota') {
+    const parts = [esc(p.model || ''), (p.quota ?? 0) + ' 次'];
+    if (p.duration_hours > 0) parts.push(p.duration_hours + ' 小时内有效');
+    else parts.push('长期有效');
+    return parts.join(' · ');
+  }
+  return '未中奖';
 }
 
 async function loadWheels() {
@@ -536,7 +548,6 @@ function openWheelDetail(w) {
   $('#wheel-detail-view').style.display = 'block';
   $('#wd-name').textContent = w.name;
   $('#wd-cost').textContent = w.cost > 0 ? '¥' + w.cost + ' / 次' : '免费';
-  $('#wd-cost-note').textContent = w.cost > 0 ? '消耗优先从赠金扣除' : '';
   // 转盘盘面按展示概率分段
   const disc = $('#wd-disc');
   const colors = (w.prizes || []).map(p => WHEEL_COLORS[p.color] || WHEEL_COLORS.gray);
@@ -550,15 +561,31 @@ function openWheelDetail(w) {
   disc.style.transition = 'none';
   disc.style.transform = 'rotate(0deg)';
   $('#wd-center').textContent = 'GO';
+  // 盘面分段标签：按每格中心角定位（转盘明确写明奖项）
+  disc.querySelectorAll('.wheel-lbl').forEach(n => n.remove());
+  let a0 = 0;
+  for (const p of (w.prizes || [])) {
+    const mid = (a0 + (p.percent ?? 0) / 2) * 3.6;
+    a0 += (p.percent ?? 0);
+    const lbl = document.createElement('span');
+    lbl.className = 'wheel-lbl';
+    lbl.textContent = (p.label || '').slice(0, 6);
+    lbl.style.transform = 'rotate(' + mid + 'deg) translateY(-66px)';
+    disc.appendChild(lbl);
+  }
   // 奖项表：概率 = 展示权重占比（后端已按占比归一化）
   const tb = $('#wd-prizes');
   tb.innerHTML = '';
   for (const p of (w.prizes || [])) {
     const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
+    const pct = p.percent ?? 0;
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td><span class="type-chip ' + c.chip + ' me-2" style="width:12px">&nbsp;</span>' + esc(p.label) + '</td>'
-      + '<td class="small text-muted">' + PRIZE_TYPE_NAMES[p.type] + ' · ' + prizeDesc(p) + '</td>'
-      + '<td class="text-end fw-semibold">' + (p.percent ?? 0) + '%</td>';
+    tr.innerHTML = '<td class="text-nowrap"><span class="type-chip ' + c.chip + ' me-2" style="width:12px">&nbsp;</span>' + esc(p.label) + '</td>'
+      + '<td class="small text-nowrap">' + (PRIZE_TYPE_NAMES[p.type] || p.type) + '</td>'
+      + '<td class="small" style="color:var(--mut)">' + prizeDesc(p) + '</td>'
+      + '<td class="text-end text-nowrap"><div class="d-flex align-items-center justify-content-end gap-2">'
+      + '<div class="prob-bar"><div class="prob-fill" style="width:' + pct + '%"></div></div>'
+      + '<span class="fw-semibold" style="min-width:46px;display:inline-block;text-align:right">' + pct + '%</span></div></td>';
     tb.appendChild(tr);
   }
   const btn = $('#wd-draw');
@@ -576,6 +603,9 @@ function wheelModal(title, bodyHtml, okText, onCancel) {
   $('#wheel-modal-title').textContent = title;
   $('#wheel-modal-body').innerHTML = bodyHtml;
   $('#wheel-modal-ok').textContent = okText;
+  // 每次打开必须重置 OK 处理器：否则残留上一次的 onclick（如 confirmDraw 的
+  // 「关闭并再抽一次」），结果弹窗点「收下」会莫名再抽一次
+  $('#wheel-modal-ok').onclick = () => { $('#wheel-modal').style.display = 'none'; };
   const mask = $('#wheel-modal');
   mask.style.display = 'flex';
   const close = () => { mask.style.display = 'none'; };
@@ -592,7 +622,7 @@ function confirmDraw(w, btn) {
     ? '本次抽奖将消耗 <b>¥' + w.cost + '</b>（优先扣赠金，不足部分扣充值）。'
     : '本次抽奖免费。';
   const body = '<div>' + costHtml + '</div>'
-    + '<div class="mt-2 small text-muted">中奖结果以本次抽奖为准，余额奖品即时到账。</div>';
+    + '<div class="mt-2 small" style="color:#dbe5f5">中奖结果以本次抽奖为准，余额奖品即时到账。</div>';
   const m = wheelModal('确认抽奖 · ' + w.name, body, '开始抽奖');
   m.ok.onclick = () => {
     m.close();
@@ -605,15 +635,26 @@ function doDraw(w, btn) {
   btn.disabled = true;
   const disc = $('#wd-disc');
   const center = $('#wd-center');
-  const turns = 5;
-  disc.style.transition = 'none';
-  disc.style.transform = 'rotate(0deg)';
-  void disc.offsetWidth;
-  disc.style.transition = 'transform 2.8s cubic-bezier(.15,.6,.2,1)';
-  disc.style.transform = 'rotate(' + turns * 360 + 'deg)';
   center.textContent = '…';
   api('wheels/draw', {method: 'POST', json: {id: w.id}}).then(d => {
-    setTimeout(() => showDrawResult(d, btn), 2800);
+    // 落点算法：指针在正上方(0°)，把中奖格中心转到指针下（含格内 ±30% 抖动）
+    const prizes = w.prizes || [];
+    let idx = prizes.findIndex(p => p.id === (d.prize && d.prize.id));
+    if (idx < 0) idx = 0;
+    let acc = 0, start = 0, pct = 0;
+    for (let i = 0; i < prizes.length; i++) {
+      const pp = prizes[i].percent ?? 0;
+      if (i === idx) { start = acc; pct = pp; break; }
+      acc += pp;
+    }
+    const jitter = (Math.random() - 0.5) * 0.6 * pct;
+    const finalDeg = 5 * 360 + (360 - (start + pct / 2 + jitter) * 3.6);
+    disc.style.transition = 'none';
+    disc.style.transform = 'rotate(0deg)';
+    void disc.offsetWidth;
+    disc.style.transition = 'transform 2.8s cubic-bezier(.15,.6,.2,1)';
+    disc.style.transform = 'rotate(' + finalDeg + 'deg)';
+    setTimeout(() => showDrawResult(d, w, btn), 2850);
   }).catch(e => {
     disc.style.transition = '';
     disc.style.transform = '';
@@ -624,28 +665,14 @@ function doDraw(w, btn) {
   });
 }
 
-function showDrawResult(d, btn) {
+function showDrawResult(d, w, btn) {
   const disc = $('#wd-disc');
   disc.style.transition = '';
   disc.style.transform = '';
   $('#wd-center').textContent = 'GO';
   drawing = false;
   btn.disabled = false;
-  const p = d.prize || {};
-  const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
-  let detail = '';
-  if (p.type === 'recharge' || p.type === 'grant') detail = '¥' + (p.amount ?? 0).toFixed(4) + ' 已存入' + (p.type === 'recharge' ? '充值' : '赠金') + '账本';
-  else if (p.type === 'model_unlimited') detail = '模型 ' + esc(p.model) + ' 体验卡已发放，Key 见「奖品中心」';
-  else if (p.type === 'model_quota') detail = '模型 ' + esc(p.model) + ' 专属额度 ' + (p.quota ?? 0) + ' 次，Key 见「奖品中心」';
-  else detail = '感谢参与，再接再厉！';
-  const cost = d.cost || {};
-  const costLine = (cost.grant > 0 || cost.recharge > 0)
-    ? '<div class="small text-muted mt-2">本次消耗：赠金 ¥' + (cost.grant ?? 0).toFixed(4) + ' + 充值 ¥' + (cost.recharge ?? 0).toFixed(4) + '</div>'
-    : '';
-  const body = '<div class="text-center py-2">'
-    + '<div class="type-chip ' + c.chip + ' px-3 py-2 fs-6 fw-semibold mb-2">' + esc(p.label || '谢谢参与') + '</div>'
-    + '<div>' + detail + '</div>' + costLine + '</div>';
-  wheelModal('抽奖结果', body, '收下');
+  showPrizeModal(d, w, btn);
   // 刷新钱包 + 奖品列表
   run(async () => {
     ME = await api('me');
@@ -656,6 +683,104 @@ function showDrawResult(d, btn) {
     $('#ov-recharge-total').textContent = '¥' + (ME.recharge_total ?? 0).toFixed(4);
   });
   loadPrizes();
+}
+
+// 星空票据卡结果弹窗（仿 ZCode Trust Build 风）：星空底 + 飞光 + 白色票卡弹入
+let prizeStarsSeeded = false;
+
+function seedPrizeStars() {
+  if (prizeStarsSeeded) return;
+  prizeStarsSeeded = true;
+  const box = $('#prize-stars');
+  for (let i = 0; i < 70; i++) {
+    const s = document.createElement('i');
+    s.style.left = Math.random() * 100 + '%';
+    s.style.top = Math.random() * 100 + '%';
+    const sz = 1.5 + Math.random() * 2.5;
+    s.style.width = s.style.height = sz + 'px';
+    s.style.animationDelay = (Math.random() * 3).toFixed(2) + 's';
+    s.style.animationDuration = (2.2 + Math.random() * 2.4).toFixed(2) + 's';
+    box.appendChild(s);
+  }
+  for (let i = 0; i < 6; i++) {
+    const st = document.createElement('div');
+    st.className = 'prize-streak';
+    st.style.top = 6 + Math.random() * 55 + '%';
+    st.style.left = '-10%';
+    st.style.animationDelay = (Math.random() * 3).toFixed(2) + 's';
+    st.style.animationDuration = (2.6 + Math.random() * 2.2).toFixed(2) + 's';
+    box.appendChild(st);
+  }
+}
+
+function burstPrizeConfetti() {
+  const colors = ['#f59e0b', '#3b82f6', '#10b981', '#f97316', '#a78bfa', '#ef4444'];
+  const wrap = $('#prize-card');
+  for (let i = 0; i < 16; i++) {
+    const c = document.createElement('span');
+    c.className = 'prize-confetti';
+    c.style.background = colors[i % colors.length];
+    const ang = (Math.random() * 2 - 1) * Math.PI; // 左右半圆向上喷
+    const dist = 110 + Math.random() * 150;
+    c.style.setProperty('--dx', Math.cos(ang) * dist + 'px');
+    c.style.setProperty('--dy', (Math.abs(Math.sin(ang)) * -120 - 30) + 'px');
+    c.style.left = 50 + '%';
+    wrap.appendChild(c);
+    setTimeout(() => c.remove(), 1800);
+  }
+}
+
+function showPrizeModal(d, w, btn) {
+  const p = d.prize || {};
+  const cost = d.cost || {};
+  const won = !!(p.type && p.type !== 'none');
+  seedPrizeStars();
+  const ov = $('#prize-overlay');
+  const card = $('#prize-card');
+  card.classList.toggle('lost', !won);
+  // 重置入场动画
+  card.style.animation = 'none';
+  void card.offsetWidth;
+  card.style.animation = '';
+
+  const amt = $('#prize-amount');
+  const line = $('#prize-line');
+  const valid = $('#prize-valid');
+  amt.style.fontSize = '';
+  if (p.type === 'recharge' || p.type === 'grant') {
+    const n = (p.amount ?? 0).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    amt.innerHTML = '¥' + n;
+    line.innerHTML = '<i class="bi bi-wallet2"></i>已存入' + (p.type === 'recharge' ? '充值' : '赠金') + '账本';
+    valid.textContent = '资金即时到账 · 可在「概览」查看明细';
+  } else if (p.type === 'model_unlimited') {
+    amt.innerHTML = esc(p.model || '-');
+    line.innerHTML = '<i class="bi bi-infinity"></i>体验卡 · 不限次数';
+    valid.textContent = 'Key 已发放至「奖品中心」，复制即可调用';
+  } else if (p.type === 'model_quota') {
+    amt.innerHTML = (p.quota ?? 0) + ' <small>次</small>';
+    line.innerHTML = '<i class="bi bi-box-seam"></i>' + esc(p.model || '-') + ' · 专属额度';
+    valid.textContent = 'Key 已发放至「奖品中心」，复制即可调用';
+  } else {
+    amt.innerHTML = '谢谢参与';
+    amt.style.fontSize = '30px';
+    line.innerHTML = '<i class="bi bi-emoji-smile"></i>好运在下一抽';
+    valid.textContent = '感谢参与，再接再厉！';
+  }
+  $('#prize-title').textContent = won ? '「' + (p.label || '奖品') + '」领取成功' : '谢谢参与';
+  const costTxt = (cost.grant > 0 || cost.recharge > 0)
+    ? '本次消耗：赠金 ¥' + (cost.grant ?? 0).toFixed(4) + ' · 充值 ¥' + (cost.recharge ?? 0).toFixed(4)
+    : '本次抽奖免费';
+  $('#prize-sub').innerHTML = (won ? '<b>' + esc(p.label || '') + '</b> 已可使用。' : '') + esc(costTxt);
+  // 中奖撒花
+  card.querySelectorAll('.prize-confetti').forEach(x => x.remove());
+  if (won) burstPrizeConfetti();
+  // 按钮：收下（关闭）；再来一次（关闭并立即再抽）
+  $('#prize-ok').onclick = () => { ov.style.display = 'none'; };
+  $('#prize-again').onclick = () => {
+    ov.style.display = 'none';
+    if (w && btn) doDraw(w, btn);
+  };
+  ov.style.display = 'flex';
 }
 
 async function loadPrizes() {

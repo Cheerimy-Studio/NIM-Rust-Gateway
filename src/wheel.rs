@@ -60,6 +60,28 @@ pub fn save_wheel(body: &Value) -> (Option<Value>, String) {
             "recharge" | "grant" | "model_unlimited" | "model_quota" | "none" => util_str(p.get("type")),
             _ => return (None, format!("第 {} 个奖品类型未知", i + 1)),
         };
+        if ptype == "recharge" || ptype == "grant" {
+            if crate::util::f64_or(p.get("amount"), 0.0) <= 0.0 {
+                return (None, format!("第 {} 个余额类奖品必须填写金额", i + 1));
+            }
+        }
+        if ptype == "model_unlimited" || ptype == "model_quota" {
+            let model = util_str(p.get("model"));
+            if model.is_empty() {
+                return (None, format!("第 {} 个 Key 类奖品必须填写模型名", i + 1));
+            }
+            // 纯数字模型名 = 旧版回显 bug 写坏的数据（input 显示 amount 0 被原样保存）。
+            // 真实模型名一定含字母/连字符；拦下来强制用户改回真实模型，杜绝再次静默落库
+            if model.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return (
+                    None,
+                    format!("第 {} 个奖品的模型名是纯数字（数据可能被旧版显示问题覆盖），请重新填写模型名", i + 1),
+                );
+            }
+        }
+        if ptype == "model_quota" && crate::util::f64_or(p.get("quota"), 0.0) <= 0.0 {
+            return (None, format!("第 {} 个专属额度奖品必须填写次数", i + 1));
+        }
         let weight = crate::util::f64_or(p.get("weight"), 0.0);
         if weight <= 0.0 {
             return (None, format!("第 {} 个奖品展示权重必须大于 0", i + 1));
@@ -274,7 +296,8 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
     let now = crate::util::now_i();
     let key = new_prize_key();
     let pk_id = format!("pk_{}", crate::util::rand_hex(5));
-    let expires_at = if ptype == "model_unlimited" && hours > 0.0 {
+    // Key 类奖品（体验卡/专属额度）都支持时长：填了小时数即到期失效
+    let expires_at = if matches!(ptype.as_str(), "model_unlimited" | "model_quota") && hours > 0.0 {
         now + (hours * 3600.0) as i64
     } else {
         0
@@ -298,6 +321,26 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
             err = "存储异常".into();
             return;
         };
+        // 0) 临界区内复验转盘状态：预读与扣费之间转盘可能被停用/改价，
+        //    沿用过期快照会按旧价扣费发旧奖。状态有变则本次拒绝（未扣费）。
+        {
+            let w_now = obj
+                .get("wheels")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.iter().find(|x| util_str(x.get("id")) == wheel_id));
+            let Some(w_now) = w_now else {
+                err = "活动不存在".into();
+                return;
+            };
+            if !w_now.get("enabled").map(crate::util::truthy).unwrap_or(false) {
+                err = "活动未开启".into();
+                return;
+            }
+            if crate::util::f64_or(w_now.get("cost"), 0.0) != cost {
+                err = "活动配置已变化，请重试".into();
+                return;
+            }
+        }
         // 1) 找用户并扣费（优先赠金）
         {
             let users = obj.entry("users").or_insert_with(|| Value::Array(vec![]));
@@ -326,6 +369,21 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
                 crate::users::credit(u, &ptype, amount);
                 awarded = true;
             }
+        }
+        // 资金变动流水：抽奖消耗（优先赠金）+ 余额类奖品入账
+        if cost_from_grant > 0.0 || cost_from_recharge > 0.0 {
+            crate::users::fund_log(
+                db,
+                uid,
+                "draw",
+                -cost_from_grant,
+                -cost_from_recharge,
+                &util_str(w.get("name")),
+            );
+        }
+        if matches!(ptype.as_str(), "recharge" | "grant") && amount > 0.0 {
+            let (dg, dr) = if ptype == "grant" { (amount, 0.0) } else { (0.0, amount) };
+            crate::users::fund_log(db, uid, "prize", dg, dr, &util_str(prize.get("label")));
         }
         // 3) 发 Key 类奖品 + 记流水
         let obj = db.as_object_mut().unwrap();
@@ -368,9 +426,12 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
     if !awarded {
         return (false, json!({"error": {"message": "奖品发放失败"}}));
     }
+    // id 用于前端指针落点：转盘必须停在中奖那一格
+    let prize_id = util_str(prize.get("id"));
     let award = match ptype.as_str() {
-        "recharge" | "grant" => json!({"type": ptype, "label": util_str(prize.get("label")), "color": util_str(prize.get("color")), "amount": amount}),
+        "recharge" | "grant" => json!({"id": prize_id, "type": ptype, "label": util_str(prize.get("label")), "color": util_str(prize.get("color")), "amount": amount}),
         "model_unlimited" | "model_quota" => json!({
+            "id": prize_id,
             "type": ptype,
             "label": util_str(prize.get("label")),
             "color": util_str(prize.get("color")),
@@ -380,7 +441,7 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
             "quota": quota,
             "concurrency": concurrency,
         }),
-        _ => json!({"type": "none", "label": util_str(prize.get("label")), "color": util_str(prize.get("color"))}),
+        _ => json!({"id": prize_id, "type": "none", "label": util_str(prize.get("label")), "color": util_str(prize.get("color"))}),
     };
     // 返回最新钱包
     let wallet = store()
