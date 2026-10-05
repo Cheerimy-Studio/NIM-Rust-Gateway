@@ -14,7 +14,7 @@ import uuid
 
 import httpx
 
-from .composegen import CRED_DIR, warp_proxy, zc_base
+from .composegen import CRED_DIR, egress_proxy, zc_base
 from .config import Registry, Settings
 from .dockerctl import DockerCtl
 
@@ -164,7 +164,8 @@ class Pool:
 
     async def probe_egress(self, acc: dict) -> None:
         st = self.st(acc["id"])
-        url = warp_proxy(acc, self.s)
+        kind = acc.get("egress", "warp")
+        url = egress_proxy(acc, self.s)
         if url is None:
             st["egress_ip"] = None
             st["warp_mode"] = "direct"
@@ -177,11 +178,11 @@ class Pool:
             r = await cli.get(TRACE_URL)
             d = parse_trace(r.text)
             st["egress_ip"] = d.get("ip")
-            st["warp_mode"] = d.get("warp", "off")
+            st["warp_mode"] = "socks5" if kind == "socks5" else d.get("warp", "off")
             st["last_error"] = None
         except httpx.ConnectError:
             st["warp_mode"] = "error"
-            st["last_error"] = "egress: 连不上 warp 容器，容器未运行或端口未发布，看容器日志"
+            st["last_error"] = "egress: 连不上出口代理，容器未运行或端口未发布，看容器日志"
         except (httpx.HTTPError, OSError) as e:
             st["warp_mode"] = "error"
             st["last_error"] = f"egress: {type(e).__name__}"

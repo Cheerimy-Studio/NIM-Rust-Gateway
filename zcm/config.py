@@ -23,7 +23,7 @@ from .auth import hash_password, new_session_secret
 
 PROVIDERS = ("zai", "bigmodel")
 PLANS = ("coding-plan", "start-plan")
-EGRESS_MODES = ("warp", "direct")
+EGRESS_MODES = ("warp", "direct", "socks5")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,15}$")
 
 log = logging.getLogger("zcm.config")
@@ -124,7 +124,9 @@ class Settings:
         return self.home / "status.json"
 
 
-def _new_account(acc_id: str, provider: str, plan: str, egress: str, port: int, note: str) -> dict:
+def _new_account(
+    acc_id: str, provider: str, plan: str, egress: str, port: int, note: str, socks5: str = ""
+) -> dict:
     return {
         "id": acc_id,
         "key": f"sk-zc-{secrets.token_hex(16)}",
@@ -132,6 +134,7 @@ def _new_account(acc_id: str, provider: str, plan: str, egress: str, port: int, 
         "plan": plan,
         "enabled": True,
         "egress": egress,
+        "socks5": socks5,
         "credential_secret": secrets.token_urlsafe(24),
         "upstream_key": f"up-{secrets.token_hex(16)}",
         "device_mid": str(uuid.uuid4()),
@@ -281,6 +284,7 @@ class Registry:
         count: int = 1,
         acc_id: str | None = None,
         probe=None,
+        socks5: str = "",
     ) -> list[dict]:
         """probe 返回 False 表示端口被占。"""
         count = max(1, min(int(count or 1), 50))
@@ -294,13 +298,13 @@ class Registry:
                 aid = acc_id
             else:
                 aid = self._alloc_id()
-            acc = _new_account(aid, provider, plan, egress, self._alloc_port(probe), note)
+            acc = _new_account(aid, provider, plan, egress, self._alloc_port(probe), note, socks5)
             self.data["accounts"].append(acc)
             created.append(acc)
         self.save()
         return created
 
-    _UPDATABLE = ("provider", "plan", "egress", "enabled", "note")
+    _UPDATABLE = ("provider", "plan", "egress", "enabled", "note", "socks5")
 
     def update(self, acc_id: str, fields: dict) -> dict:
         acc = self.get(acc_id)
@@ -316,6 +320,10 @@ class Registry:
                 changes.get("plan", acc["plan"]),
                 changes.get("egress", acc["egress"]),
             )
+        if changes.get("egress") == "socks5" and not (
+            changes.get("socks5") or acc.get("socks5")
+        ):
+            raise ConfigError("SOCKS5 出口需要填写代理地址（socks5://host:port）")
         if "enabled" in changes:
             changes["enabled"] = bool(changes["enabled"])
         acc.update(changes)

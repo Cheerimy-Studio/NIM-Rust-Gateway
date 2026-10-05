@@ -275,6 +275,7 @@ def create_app(
             count=payload.get("count") or 1,
             acc_id=payload.get("id"),
             probe=probe,
+            socks5=str(payload.get("socks5") or "").strip(),
         )
         log.info("新增账号 %s，应用 compose", [a["id"] for a in created])
         tail = await apply()

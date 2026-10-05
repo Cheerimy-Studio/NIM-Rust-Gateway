@@ -14,18 +14,39 @@ import urllib.parse
 
 from fastapi import WebSocket
 
-from .composegen import warp_proxy
 
 
-async def socks5_connect(proxy_host: str, proxy_port: int, host: str, port: int):
-    """经 SOCKS5 代理连到 host:port；域名由代理端解析（gost 支持）。"""
+async def socks5_connect(
+    proxy_host: str,
+    proxy_port: int,
+    host: str,
+    port: int,
+    username: str = "",
+    password: str = "",
+):
+    """经 SOCKS5 代理连到 host:port；域名由代理端解析，支持用户名/密码认证。"""
     reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
-    writer.write(b"\x05\x01\x00")
+    if username:
+        writer.write(b"\x05\x02\x00\x02")
+    else:
+        writer.write(b"\x05\x01\x00")
     await writer.drain()
     greeting = await reader.readexactly(2)
-    if greeting[0] != 5 or greeting[1] != 0:
+    if greeting[0] != 5:
         writer.close()
         raise RuntimeError("SOCKS5 握手失败")
+    if greeting[1] == 2:
+        u = username.encode()
+        p = password.encode()
+        writer.write(b"\x01" + bytes([len(u)]) + u + bytes([len(p)]) + p)
+        await writer.drain()
+        auth = await reader.readexactly(2)
+        if auth[1] != 0:
+            writer.close()
+            raise RuntimeError("SOCKS5 认证失败：账号或密码错误")
+    elif greeting[1] != 0:
+        writer.close()
+        raise RuntimeError("SOCKS5 方法协商失败")
     host_b = host.encode()
     writer.write(b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + int(port).to_bytes(2, "big"))
     await writer.drain()
@@ -45,20 +66,30 @@ async def socks5_connect(proxy_host: str, proxy_port: int, host: str, port: int)
 
 
 async def open_upstream(acc: dict, s, host: str, port: int, attempts: int = 3):
-    """按账号出口建立到目标的连接：WARP 账号经其 gost，直连账号走本机。
-
-    WARP 隧道对个别目标偶发瞬时不可达，快速重试可吸收；
-    目标持续不可达时抛出最后一次错误。
-    """
+    """按账号出口建立到目标的连接：WARP 经其 gost，自定义 SOCKS5 直连该代理，
+    直连账号走本机。WARP 偶发抖动时快速重试。"""
+    kind = acc.get("egress", "warp")
     last: Exception | None = None
     for i in range(attempts):
         try:
-            proxy = warp_proxy(acc, s)
-            if proxy:
-                u = urllib.parse.urlparse(proxy)
+            if kind == "socks5":
+                target = urllib.parse.urlparse((acc.get("socks5") or "").strip())
+                if not target.hostname:
+                    raise RuntimeError("SOCKS5 出口未配置地址")
                 return await socks5_connect(
-                    u.hostname or "127.0.0.1", u.port or 1080, host, port
+                    target.hostname,
+                    target.port or 1080,
+                    host,
+                    port,
+                    urllib.parse.unquote(target.username or ""),
+                    urllib.parse.unquote(target.password or ""),
                 )
+            if kind == "warp":
+                if s.mode == "host":
+                    return await socks5_connect(
+                        "127.0.0.1", int(acc["port"]) + 1, host, port
+                    )
+                return await socks5_connect(f"warp-{acc['id']}", 1080, host, port)
             return await asyncio.open_connection(host, port)
         except Exception as e:
             last = e

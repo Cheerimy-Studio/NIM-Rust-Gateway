@@ -245,7 +245,8 @@ pre.logbox{background:#0d1526;color:#dbe5f5;padding:1rem 1.1rem;border-radius:11
             <div class="col-6 col-md-2"><label class="form-label text-muted small mb-1">ID</label><input class="form-control form-control-sm" id="f-id" placeholder="留空自动"></div>
             <div class="col-6 col-md-2"><label class="form-label text-muted small mb-1">上游</label><select class="form-select form-select-sm" id="f-provider"><option value="zai">z.ai</option><option value="bigmodel">bigmodel</option></select></div>
             <div class="col-6 col-md-2"><label class="form-label text-muted small mb-1">套餐</label><select class="form-select form-select-sm" id="f-plan"><option value="coding-plan">coding-plan</option><option value="start-plan">start-plan</option></select></div>
-            <div class="col-6 col-md-2"><label class="form-label text-muted small mb-1">出口</label><select class="form-select form-select-sm" id="f-egress"><option value="warp">WARP</option><option value="direct">直连</option></select></div>
+            <div class="col-6 col-md-2"><label class="form-label text-muted small mb-1">出口</label><select class="form-select form-select-sm" id="f-egress"><option value="warp">WARP</option><option value="direct">直连</option><option value="socks5">SOCKS5</option></select></div>
+      <div class="col-12 col-md-3" id="f-socks5-row" style="display:none"><label class="form-label text-muted small mb-1">SOCKS5 地址</label><input class="form-control form-control-sm" id="f-socks5" placeholder="socks5://user:pass@host:port"></div>
             <div class="col-4 col-md-1"><label class="form-label text-muted small mb-1">数量</label><input type="number" class="form-control form-control-sm" id="f-count" value="1" min="1" max="50"></div>
             <div class="col-8 col-md-2"><label class="form-label text-muted small mb-1">备注</label><input class="form-control form-control-sm" id="f-note"></div>
             <div class="col-12 col-md-1"><button class="btn btn-acc btn-sm w-100" type="submit">添加</button></div>
@@ -575,7 +576,12 @@ function badge(cond,okText,badText,unknownText){
   if(cond===false)return `<span class="pill bad">${badText}</span>`;
   return `<span class="pill warn">${unknownText||"未知"}</span>`;
 }
-function warpBadge(st){
+function warpBadge(st, eg){
+  if(eg==="socks5"){
+    if(st.egress_ip)return `<span class="pill ok">SOCKS5 ${st.egress_ip}</span>`;
+    if(st.warp_mode==="error")return `<span class="pill bad">探测失败</span>`;
+    return `<span class="pill warn">待探测</span>`;
+  }
   const bad=["missing","exited","dead","created","restarting"];
   if(st.warp_container && bad.includes(st.warp_container))
     return `<span class="pill bad">warp 容器 ${st.warp_container}</span>`;
@@ -659,7 +665,7 @@ function renderRows(){
       <td>${badge(cRun,"运行",st.container||"未知",st.container)}</td>
       <td>${badge(st.healthy,"健康","异常")}${st.last_error?`<br><span class="text-muted" style="font-size:11.5px">${esc(st.last_error)}</span>`:""}</td>
       <td>${badge(st.login_ok,"已登录","未登录/失效","未探测")}</td>
-      <td>${warpBadge(st)}</td>
+      <td>${warpBadge(st, a.egress)}</td>
       <td>${quotaBrief(st,a.id)}</td>
       <td>${st.requests||0}<br><span class="text-muted" style="font-size:11px">${st.last_used||""}</span></td>
       <td><a href="javascript:editNote('${a.id}')" class="text-muted" style="font-size:12px" title="点击编辑备注">${esc(a.note)||'<i class="bi bi-pencil"></i> 备注'}</a></td>
@@ -670,6 +676,7 @@ function renderRows(){
         <button class="btn btn-outline-secondary btn-sm" onclick="restart('${a.id}')">重启</button>
         ${a.egress==="warp"?`<button class="btn btn-outline-secondary btn-sm" onclick="reroll('${a.id}')">换IP</button>`:""}
         <button class="btn btn-outline-secondary btn-sm" onclick="logs('${a.id}')">日志</button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="setProxy('${a.id}')">代理</button>
         <button class="btn btn-outline-secondary btn-sm" onclick="toggle('${a.id}',${a.enabled})">${a.enabled?"停用":"启用"}</button>
         <button class="btn btn-outline-danger btn-sm" onclick="del('${a.id}')">删除</button>
       </td></tr>`;}).join("")
@@ -690,7 +697,9 @@ $("#add-form").addEventListener("submit",async e=>{
   try{
     const r=await api("/accounts",{method:"POST",body:{
       id:$("#f-id").value.trim()||undefined,provider:$("#f-provider").value,plan:$("#f-plan").value,
-      egress:$("#f-egress").value,count:+$("#f-count").value||1,note:$("#f-note").value.trim()}});
+      egress:$("#f-egress").value,
+      socks5:$("#f-egress").value==="socks5"?$("#f-socks5").value.trim():undefined,
+      count:+$("#f-count").value||1,note:$("#f-note").value.trim()}});
     toast("已创建: "+r.created.join(", "));refresh();
   }catch(err){toast("创建失败: "+err.message)}
 });
@@ -702,6 +711,16 @@ async function restart(id){if(!await askConfirm("重启容器",`重启 ${id} 的
   try{await api(`/accounts/${id}/restart`,{method:"POST"});toast("已重启")}catch(e){toast(e.message)}refresh()}
 async function reroll(id){if(!await askConfirm("更换出口 IP",`重建 ${id} 的 WARP 注册，随机新 IP？`))return;
   try{const r=await api(`/accounts/${id}/reroll-warp`,{method:"POST"});toast(r.hint||"已重建")}catch(e){toast(e.message)}}
+async function setProxy(id){
+  const a=_accounts.find(x=>x.id===id);if(!a)return;
+  const v=await askText("SOCKS5 代理（socks5://host:port，留空改回直连）",a.socks5||"");
+  if(v===null)return;
+  try{
+    if(v.trim())await api(`/accounts/${id}`,{method:"PATCH",body:{egress:"socks5",socks5:v.trim()}});
+    else await api(`/accounts/${id}`,{method:"PATCH",body:{egress:"direct"}});
+    toast("出口已更新");refresh();
+  }catch(e){toast(e.message)}
+}
 async function toggle(id,en){try{await api(`/accounts/${id}`,{method:"PATCH",body:{enabled:!en}});refresh()}catch(e){toast(e.message)}}
 async function del(id){
   if(!await askConfirm("删除账号",`确认删除账号 ${id}？容器会一并移除。`,"删除",true))return;

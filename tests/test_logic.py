@@ -272,9 +272,9 @@ def test_proxy_end_to_end(tmp: Path):
         settings=s, registry=reg, enable_docker=False, http_transport=transport
     )
     # 出口探测走 CONNECT 隧道，mock 拦不到连接层——预置不带 proxy 的探测客户端
-    from zcm.composegen import warp_proxy
+    from zcm.composegen import egress_proxy
 
-    app.state.pool._egress[warp_proxy(a1, s)] = httpx.AsyncClient(transport=transport)
+    app.state.pool._egress[egress_proxy(a1, s)] = httpx.AsyncClient(transport=transport)
     key = a1["key"]
 
     with TestClient(app) as c:

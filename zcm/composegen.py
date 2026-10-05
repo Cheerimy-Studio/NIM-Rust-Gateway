@@ -14,6 +14,7 @@ import yaml
 from .config import Registry, Settings
 
 ZCODE_PORT = 8080
+GOST_IMAGE = "ginuerzh/gost:latest"
 CONF_MOUNT = "/data/config.yaml"
 CRED_DIR = "/home/bun/.zcode-proxy"
 WARP_DATA = "/var/lib/cloudflare-warp"
@@ -46,10 +47,17 @@ def zc_base(acc: dict, s: Settings) -> str:
     return f"http://zc-{acc['id']}:{ZCODE_PORT}"
 
 
-def warp_proxy(acc: dict, s: Settings) -> str | None:
-    """该账号的 WARP 出口代理，直连账号返回 None。"""
-    if acc.get("egress", "warp") != "warp":
+def egress_proxy(acc: dict, s: Settings) -> str | None:
+    """账号出口的代理地址（探测与隧道路由用），直连账号返回 None。
+
+    warp 出口 → warp 容器 gost（同端口收 HTTP 与 SOCKS5）
+    socks5 出口 → 账号配置的自定义 SOCKS5 代理
+    """
+    kind = acc.get("egress", "warp")
+    if kind == "direct":
         return None
+    if kind == "socks5":
+        return (acc.get("socks5") or "").strip() or None
     if s.mode == "host":
         return f"http://127.0.0.1:{int(acc['port']) + 1}"
     return f"http://warp-{acc['id']}:1080"
@@ -100,6 +108,22 @@ def build_compose(reg: Registry, s: Settings) -> dict:
                 warp["ports"] = [f"127.0.0.1:{int(acc['port']) + 1}:1080"]
             services[f"warp-{i}"] = warp
             volumes[f"warpstate-{i}"] = {}
+        elif acc.get("egress") == "socks5" and acc.get("socks5"):
+            # 自定义 SOCKS5 出口：gost 桥接 HTTP→SOCKS5，容器无需支持 SOCKS
+            proxy = f"http://gw-{i}:1080"
+            env["HTTP_PROXY"] = proxy
+            env["HTTPS_PROXY"] = proxy
+            env["NO_PROXY"] = "localhost,127.0.0.1"
+            zc["depends_on"] = [f"gw-{i}"]
+            gw: dict = {
+                "image": GOST_IMAGE,
+                "restart": "unless-stopped",
+                "networks": [s.mesh],
+                "command": ["-L", "http://:1080", "-F", acc["socks5"]],
+            }
+            if s.mode == "host":
+                gw["ports"] = [f"127.0.0.1:{int(acc['port']) + 2}:1080"]
+            services[f"gw-{i}"] = gw
         services[f"zc-{i}"] = zc
         volumes[f"cred-{i}"] = {}
     return {
