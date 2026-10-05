@@ -172,28 +172,37 @@ pub fn list_prize_keys(wheel_id: &str) -> Vec<Value> {
 // ---------------------------------------------------------------- 用户端
 
 /// 用户端可见转盘：只给展示信息（标签/颜色/展示权重），绝不泄漏 real_weight。
+/// percent = 该奖品展示权重占全部展示权重的比例（旧数据权重和不为 100 时也能正确显示）。
 pub fn user_wheels() -> Vec<Value> {
     all_wheels()
         .into_iter()
         .filter(|w| w.get("enabled").map(crate::util::truthy).unwrap_or(false))
         .map(|w| {
-            let prizes: Vec<Value> = w
-                .get("prizes")
-                .and_then(|p| p.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|p| {
-                            json!({
-                                "id": util_str(p.get("id")),
-                                "label": util_str(p.get("label")),
-                                "type": util_str(p.get("type")),
-                                "color": util_str(p.get("color")),
-                                "weight": crate::util::f64_or(p.get("weight"), 1.0),
-                            })
-                        })
-                        .collect()
+            let raw = w.get("prizes").and_then(|p| p.as_array()).cloned().unwrap_or_default();
+            let total: f64 = raw
+                .iter()
+                .map(|p| crate::util::f64_or(p.get("weight"), 0.0).max(0.0))
+                .sum();
+            let prizes: Vec<Value> = raw
+                .iter()
+                .map(|p| {
+                    let weight = crate::util::f64_or(p.get("weight"), 0.0).max(0.0);
+                    let percent = if total > 0.0 { (weight / total * 100.0 * 100.0).round() / 100.0 } else { 0.0 };
+                    json!({
+                        "id": util_str(p.get("id")),
+                        "label": util_str(p.get("label")),
+                        "type": util_str(p.get("type")),
+                        "color": util_str(p.get("color")),
+                        "weight": weight,
+                        "percent": percent,
+                        "amount": crate::util::round6(crate::util::f64_or(p.get("amount"), 0.0)),
+                        "model": util_str(p.get("model")),
+                        "duration_hours": crate::util::f64_or(p.get("duration_hours"), 0.0),
+                        "quota": crate::util::round6(crate::util::f64_or(p.get("quota"), 0.0)),
+                        "concurrency": crate::util::int_or(p.get("concurrency"), 1),
+                    })
                 })
-                .unwrap_or_default();
+                .collect();
             json!({
                 "id": util_str(w.get("id")),
                 "name": util_str(w.get("name")),
@@ -237,126 +246,41 @@ fn charge_cost(user: &mut Value, cost: f64) -> Result<(f64, f64), String> {
 }
 
 /// 用户抽奖主流程。返回 (http_ok, body)。
+/// 单次 store().update 完成「校验 → 扣费 → 发奖 → 记流水」，避免扣了费却没发奖的中间态。
 pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
     let Some(w) = get_wheel(wheel_id) else {
-        return (false, json!({"error": {"message": "转盘不存在"}}));
+        return (false, json!({"error": {"message": "活动不存在"}}));
     };
     if !w.get("enabled").map(crate::util::truthy).unwrap_or(false) {
-        return (false, json!({"error": {"message": "转盘未开启"}}));
+        return (false, json!({"error": {"message": "活动未开启"}}));
     }
     let cost = crate::util::f64_or(w.get("cost"), 0.0);
     let Some(prize) = pick_prize(&w) else {
-        return (false, json!({"error": {"message": "转盘奖品配置无效"}}));
+        return (false, json!({"error": {"message": "活动奖品配置无效"}}));
     };
     let ptype = util_str(prize.get("type"));
-    let mut cost_from_grant = 0.0;
-    let mut cost_from_recharge = 0.0;
-    let mut award: Value = json!({});
-
-    // 先扣费（抽奖不给退），再发奖
-    let mut charge_err = String::new();
-    store().update(|db| {
-        let obj = match db.as_object_mut() {
-            Some(o) => o,
-            None => {
-                charge_err = "存储异常".into();
-                return;
-            }
-        };
-        let users = obj.entry("users").or_insert_with(|| Value::Array(vec![]));
-        let Some(a) = users.as_array_mut() else { return };
-        let Some(u) = a
-            .iter_mut()
-            .find(|u| util_str(u.get("id")) == uid && u.get("enabled").map(crate::util::truthy).unwrap_or(false))
-        else {
-            charge_err = "用户不存在或已停用".into();
-            return;
-        };
-        match charge_cost(u, cost) {
-            Ok((g, r)) => {
-                cost_from_grant = g;
-                cost_from_recharge = r;
-            }
-            Err(e) => charge_err = e,
-        }
-    });
-    if !charge_err.is_empty() {
-        return (false, json!({"error": {"message": charge_err}}));
+    let amount = crate::util::round6(crate::util::f64_or(prize.get("amount"), 0.0));
+    let model = util_str(prize.get("model"));
+    let hours = crate::util::f64_or(prize.get("duration_hours"), 0.0);
+    let quota = crate::util::round6(crate::util::f64_or(prize.get("quota"), 0.0));
+    let concurrency = crate::util::int_or(prize.get("concurrency"), 1).clamp(1, 64);
+    // 奖品配置预校验：余额类必须为正金额，Key 类必须有模型（避免扣费后发不出奖）
+    if matches!(ptype.as_str(), "recharge" | "grant") && amount <= 0.0 {
+        return (false, json!({"error": {"message": "奖品未配置有效金额"}}));
     }
-
-    // 发奖
-    match ptype.as_str() {
-        "recharge" | "grant" => {
-            let amount = crate::util::round6(crate::util::f64_or(prize.get("amount"), 0.0));
-            if amount <= 0.0 {
-                award = json!({"type": ptype, "label": util_str(prize.get("label")), "amount": 0.0});
-            } else {
-                store().update(|db| {
-                    if let Some(a) = db.get_mut("users").and_then(|u| u.as_array_mut()) {
-                        if let Some(u) = a.iter_mut().find(|u| util_str(u.get("id")) == uid) {
-                            crate::users::credit(u, &ptype, amount);
-                        }
-                    }
-                });
-                award = json!({"type": ptype, "label": util_str(prize.get("label")), "amount": amount});
-            }
-        }
-        "model_unlimited" | "model_quota" => {
-            let model = util_str(prize.get("model"));
-            if model.is_empty() {
-                return (false, json!({"error": {"message": "奖品未配置模型"}}));
-            }
-            let key = new_prize_key();
-            let hours = crate::util::f64_or(prize.get("duration_hours"), 0.0);
-            let quota = crate::util::round6(crate::util::f64_or(prize.get("quota"), 0.0));
-            let concurrency = crate::util::int_or(prize.get("concurrency"), 1).clamp(1, 64);
-            let now = crate::util::now_i();
-            let expires_at = if ptype == "model_unlimited" && hours > 0.0 {
-                now + (hours * 3600.0) as i64
-            } else {
-                0
-            };
-            let row = json!({
-                "id": format!("pk_{}", crate::util::rand_hex(5)),
-                "user_id": uid,
-                "wheel_id": util_str(w.get("id")),
-                "prize_id": util_str(prize.get("id")),
-                "key": key,
-                "type": ptype,
-                "model": model,
-                "concurrency": concurrency,
-                "quota": quota,
-                "used": 0.0,
-                "created_at": now,
-                "expires_at": expires_at,
-                "enabled": true,
-            });
-            let row2 = row.clone();
-            store().update(|db| {
-                let obj = db.as_object_mut().unwrap();
-                let arr = obj.entry("prize_keys").or_insert_with(|| Value::Array(vec![]));
-                if let Some(a) = arr.as_array_mut() {
-                    a.push(row2);
-                }
-            });
-            award = json!({
-                "type": ptype,
-                "label": util_str(prize.get("label")),
-                "model": model,
-                "key": key,
-                "expires_at": expires_at,
-                "quota": quota,
-                "concurrency": concurrency,
-            });
-        }
-        _ => {
-            award = json!({"type": "none", "label": util_str(prize.get("label"))});
-        }
+    if matches!(ptype.as_str(), "model_unlimited" | "model_quota") && model.is_empty() {
+        return (false, json!({"error": {"message": "奖品未配置模型"}}));
     }
-
-    // 抽奖记录
+    let now = crate::util::now_i();
+    let key = new_prize_key();
+    let pk_id = format!("pk_{}", crate::util::rand_hex(5));
+    let expires_at = if ptype == "model_unlimited" && hours > 0.0 {
+        now + (hours * 3600.0) as i64
+    } else {
+        0
+    };
     let log = json!({
-        "t": crate::util::now_i(),
+        "t": now,
         "user_id": uid,
         "wheel_id": util_str(w.get("id")),
         "wheel_name": util_str(w.get("name")),
@@ -364,35 +288,120 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
         "label": util_str(prize.get("label")),
         "type": ptype,
         "cost": crate::util::round6(cost),
-        "cost_grant": crate::util::round6(cost_from_grant),
-        "cost_recharge": crate::util::round6(cost_from_recharge),
     });
-    let log2 = log.clone();
+    let mut err = String::new();
+    let mut cost_from_grant = 0.0f64;
+    let mut cost_from_recharge = 0.0f64;
+    let mut awarded = false;
     store().update(|db| {
+        let Some(obj) = db.as_object_mut() else {
+            err = "存储异常".into();
+            return;
+        };
+        // 1) 找用户并扣费（优先赠金）
+        {
+            let users = obj.entry("users").or_insert_with(|| Value::Array(vec![]));
+            let Some(a) = users.as_array_mut() else {
+                err = "存储异常".into();
+                return;
+            };
+            let Some(u) = a.iter_mut().find(|u| {
+                util_str(u.get("id")) == uid && u.get("enabled").map(crate::util::truthy).unwrap_or(false)
+            }) else {
+                err = "用户不存在或已停用".into();
+                return;
+            };
+            match charge_cost(u, cost) {
+                Ok((g, r)) => {
+                    cost_from_grant = g;
+                    cost_from_recharge = r;
+                }
+                Err(e) => {
+                    err = e;
+                    return;
+                }
+            }
+            // 2) 发余额类奖品（同一个闭包内，与扣费原子）
+            if matches!(ptype.as_str(), "recharge" | "grant") {
+                crate::users::credit(u, &ptype, amount);
+                awarded = true;
+            }
+        }
+        // 3) 发 Key 类奖品 + 记流水
         let obj = db.as_object_mut().unwrap();
-        let arr = obj.entry("draw_logs").or_insert_with(|| Value::Array(vec![]));
-        if let Some(a) = arr.as_array_mut() {
-            a.insert(0, log2);
+        if matches!(ptype.as_str(), "model_unlimited" | "model_quota") {
+            if let Some(a) = obj.entry("prize_keys").or_insert_with(|| Value::Array(vec![])).as_array_mut() {
+                a.push(json!({
+                    "id": pk_id,
+                    "user_id": uid,
+                    "wheel_id": util_str(w.get("id")),
+                    "prize_id": util_str(prize.get("id")),
+                    "key": key,
+                    "type": ptype,
+                    "model": model,
+                    "concurrency": concurrency,
+                    "quota": quota,
+                    "used": 0.0,
+                    "created_at": now,
+                    "expires_at": expires_at,
+                    "enabled": true,
+                }));
+            }
+            awarded = true;
+        }
+        if ptype == "none" {
+            awarded = true;
+        }
+        if let Some(a) = obj.entry("draw_logs").or_insert_with(|| Value::Array(vec![])).as_array_mut() {
+            let mut entry = log.clone();
+            if let Some(o) = entry.as_object_mut() {
+                o.insert("cost_grant".into(), json!(crate::util::round6(cost_from_grant)));
+                o.insert("cost_recharge".into(), json!(crate::util::round6(cost_from_recharge)));
+            }
+            a.insert(0, entry);
             a.truncate(2000);
         }
     });
-
+    if !err.is_empty() {
+        return (false, json!({"error": {"message": err}}));
+    }
+    if !awarded {
+        return (false, json!({"error": {"message": "奖品发放失败"}}));
+    }
+    let award = match ptype.as_str() {
+        "recharge" | "grant" => json!({"type": ptype, "label": util_str(prize.get("label")), "color": util_str(prize.get("color")), "amount": amount}),
+        "model_unlimited" | "model_quota" => json!({
+            "type": ptype,
+            "label": util_str(prize.get("label")),
+            "color": util_str(prize.get("color")),
+            "model": model,
+            "key": key,
+            "expires_at": expires_at,
+            "quota": quota,
+            "concurrency": concurrency,
+        }),
+        _ => json!({"type": "none", "label": util_str(prize.get("label")), "color": util_str(prize.get("color"))}),
+    };
     // 返回最新钱包
-    let wallet = crate::store::store()
+    let wallet = store()
         .load()
         .get("users")
         .and_then(|u| u.as_array())
         .and_then(|a| a.iter().find(|u| util_str(u.get("id")) == uid))
         .map(crate::users::wallet_row)
         .unwrap_or(json!({}));
-    let mut body = json!({"ok": true, "prize": award, "wallet": wallet});
-    if let Some(o) = body.as_object_mut() {
-        o.insert(
-            "cost".into(),
-            json!({"grant": crate::util::round6(cost_from_grant), "recharge": crate::util::round6(cost_from_recharge)}),
-        );
-    }
-    (true, body)
+    (
+        true,
+        json!({
+            "ok": true,
+            "prize": award,
+            "wallet": wallet,
+            "cost": {
+                "grant": crate::util::round6(cost_from_grant),
+                "recharge": crate::util::round6(cost_from_recharge),
+            },
+        }),
+    )
 }
 
 /// 用户的奖品 Key 列表。

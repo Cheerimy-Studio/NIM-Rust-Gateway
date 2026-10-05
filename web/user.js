@@ -537,13 +537,12 @@ function openWheelDetail(w) {
   $('#wd-name').textContent = w.name;
   $('#wd-cost').textContent = w.cost > 0 ? '¥' + w.cost + ' / 次' : '免费';
   $('#wd-cost-note').textContent = w.cost > 0 ? '消耗优先从赠金扣除' : '';
-  // 转盘盘面按展示权重(=概率%)分色
+  // 转盘盘面按展示概率分段
   const disc = $('#wd-disc');
   const colors = (w.prizes || []).map(p => WHEEL_COLORS[p.color] || WHEEL_COLORS.gray);
-  const n = (w.prizes || []).length || 1;
   let acc = 0;
   const segs = (w.prizes || []).map((p, i) => {
-    const from = acc, to = acc + (p.weight ?? 0);
+    const from = acc, to = acc + (p.percent ?? 0);
     acc = to;
     return `${colors[i].ring} ${from}% ${to}%`;
   });
@@ -551,7 +550,7 @@ function openWheelDetail(w) {
   disc.style.transition = 'none';
   disc.style.transform = 'rotate(0deg)';
   $('#wd-center').textContent = 'GO';
-  // 奖项表：概率 = 展示权重（总和恒为 100）
+  // 奖项表：概率 = 展示权重占比（后端已按占比归一化）
   const tb = $('#wd-prizes');
   tb.innerHTML = '';
   for (const p of (w.prizes || [])) {
@@ -559,7 +558,7 @@ function openWheelDetail(w) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td><span class="type-chip ' + c.chip + ' me-2" style="width:12px">&nbsp;</span>' + esc(p.label) + '</td>'
       + '<td class="small text-muted">' + PRIZE_TYPE_NAMES[p.type] + ' · ' + prizeDesc(p) + '</td>'
-      + '<td class="text-end fw-semibold">' + (p.weight ?? 0) + '%</td>';
+      + '<td class="text-end fw-semibold">' + (p.percent ?? 0) + '%</td>';
     tb.appendChild(tr);
   }
   const btn = $('#wd-draw');
