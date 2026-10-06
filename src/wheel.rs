@@ -481,7 +481,7 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
             "key": key,
             "expires_at": expires_at,
             "quota": quota,
-            "concurrency": concurrency,
+            "duration_hours": hours,
         }),
         _ => json!({"id": prize_id, "type": "none", "label": util_str(prize.get("label")), "color": util_str(prize.get("color"))}),
     };

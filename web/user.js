@@ -501,7 +501,6 @@ function prizeDesc(p) {
   if (p.type === 'model_unlimited') {
     const parts = [esc(p.model || '')];
     parts.push(p.duration_hours > 0 ? p.duration_hours + ' 小时' : '长期有效');
-    parts.push('并发 ' + (p.concurrency ?? 1));
     return parts.join(' · ');
   }
   if (p.type === 'model_quota') {
@@ -619,7 +618,7 @@ let drawing = false;
 function confirmDraw(w, btn) {
   if (drawing) return;
   const costHtml = w.cost > 0
-    ? '本次抽奖将消耗 <b>¥' + w.cost + '</b>（优先扣赠金，不足部分扣充值）。'
+    ? '本次抽奖将消耗 <b>¥' + w.cost + '</b>。'
     : '本次抽奖免费。';
   const body = '<div>' + costHtml + '</div>'
     + '<div class="mt-2 small" style="color:#dbe5f5">中奖结果以本次抽奖为准，余额奖品即时到账。</div>';
@@ -755,11 +754,15 @@ function showPrizeModal(d, w, btn) {
   } else if (p.type === 'model_unlimited') {
     amt.innerHTML = esc(p.model || '-');
     line.innerHTML = '<i class="bi bi-infinity"></i>体验卡 · 不限次数';
-    valid.textContent = 'Key 已发放至「奖品中心」，复制即可调用';
+    valid.textContent = p.duration_hours > 0
+      ? '不限次数体验机会 · 限时 ' + p.duration_hours + ' 小时'
+      : '不限次数体验机会 · 长期有效';
   } else if (p.type === 'model_quota') {
     amt.innerHTML = (p.quota ?? 0) + ' <small>次</small>';
     line.innerHTML = '<i class="bi bi-box-seam"></i>' + esc(p.model || '-') + ' · 专属额度';
-    valid.textContent = 'Key 已发放至「奖品中心」，复制即可调用';
+    valid.textContent = p.duration_hours > 0
+      ? '共计 ' + (p.quota ?? 0) + ' 次体验机会，限时 ' + p.duration_hours + ' 小时'
+      : '共计 ' + (p.quota ?? 0) + ' 次体验机会，长期有效';
   } else {
     amt.innerHTML = '谢谢参与';
     amt.style.fontSize = '30px';
@@ -770,7 +773,10 @@ function showPrizeModal(d, w, btn) {
   const costTxt = (cost.grant > 0 || cost.recharge > 0)
     ? '本次消耗：赠金 ¥' + (cost.grant ?? 0).toFixed(4) + ' · 充值 ¥' + (cost.recharge ?? 0).toFixed(4)
     : '本次抽奖免费';
-  $('#prize-sub').innerHTML = (won ? '<b>' + esc(p.label || '') + '</b> 已可使用。' : '') + esc(costTxt);
+  const subTail = (p.type === 'model_unlimited' || p.type === 'model_quota')
+    ? 'Key 已发放至「奖品中心」。'
+    : (won ? '已可使用。' : '');
+  $('#prize-sub').innerHTML = (won ? '<b>' + esc(p.label || '') + '</b> ' + subTail : '') + esc(costTxt);
   // 中奖撒花
   card.querySelectorAll('.prize-confetti').forEach(x => x.remove());
   if (won) burstPrizeConfetti();

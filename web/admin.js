@@ -2030,7 +2030,7 @@ function prizeRowHtml(p = {}) {
     + '<td><input type="number" step="0.01" min="0" class="form-control form-control-sm wz-real" value="' + (p.real_weight ?? '') + '" placeholder="同展示"></td>'
     + '<td><input class="form-control form-control-sm wz-amount-model" value="' + esc(amVal) + '" placeholder="' + (isAmt ? '金额' : '模型名') + '"></td>'
     + '<td class="text-nowrap"><input type="number" step="0.1" min="0" class="form-control form-control-sm wz-hours d-inline-block" style="width:74px" value="' + (p.duration_hours ?? '') + '" placeholder="小时"> '
-    + '<input type="number" min="1" max="64" class="form-control form-control-sm wz-conc d-inline-block" style="width:66px" value="' + (p.concurrency ?? '') + '" placeholder="并发"> '
+    + '<input type="number" min="1" max="64" class="form-control form-control-sm wz-conc d-inline-block" style="width:66px" value="' + (p.concurrency ?? '') + '" placeholder=" "> '
     + '<input type="number" step="1" min="0" class="form-control form-control-sm wz-quota d-inline-block" style="width:70px" value="' + (p.quota ?? '') + '" placeholder="次数"></td>'
     + '<td><button class="btn btn-sm btn-outline-danger wz-del">删</button></td>';
   tr._prize = p;
@@ -2150,7 +2150,7 @@ async function loadPrizeKeys() {
   const tb = $('#pk-rows');
   tb.innerHTML = '';
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="text-muted small text-center py-4">暂无奖品 Key</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="text-muted small text-center py-4">暂无奖品 Key</td></tr>';
     return;
   }
   const now = Math.floor(Date.now() / 1000);
@@ -2165,7 +2165,6 @@ async function loadPrizeKeys() {
     tr.innerHTML = '<td class="key-mono small">' + esc(k.key.slice(0, 14)) + '…</td>'
       + '<td class="small">' + (k.type === 'model_unlimited' ? '体验卡' : '专属额度') + '</td>'
       + '<td class="small mono">' + esc(k.model || '-') + '</td>'
-      + '<td class="small">' + (k.concurrency ?? 1) + '</td>'
       + '<td class="small">' + (k.quota > 0 ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
       + '<td class="small text-muted">' + (k.expires_at > 0 ? new Date(k.expires_at * 1000).toLocaleString() : '不限') + '</td>'
       + '<td>' + st + '</td>'
