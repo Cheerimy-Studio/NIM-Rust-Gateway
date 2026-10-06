@@ -73,6 +73,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("queue", &["queue"]),
     ("users", &["users", "user_tokens", "user_logs", "user_logs_paid", "user_logs_free", "user_rpm", "fund_logs"]),
     ("wheels", &["wheels", "prize_keys", "draw_logs"]),
+    ("promo", &["invite_events", "invite_members", "invite_hits"]),
     (
         "metrics",
         &[
@@ -599,6 +600,9 @@ pub fn migrate(db: &mut Value) {
         ("users", "arr"),
         ("user_tokens", "arr"),
         ("user_logs", "arr"),
+        ("invite_events", "arr"),
+        ("invite_members", "arr"),
+        ("invite_hits", "arr"),
         ("user_logs_paid", "arr"),
         ("user_logs_free", "arr"),
         ("user_rpm", "obj"),

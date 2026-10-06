@@ -269,7 +269,7 @@ fn charge_cost(user: &mut Value, cost: f64) -> Result<(f64, f64), String> {
 
 /// 用户抽奖主流程。返回 (http_ok, body)。
 /// 单次 store().update 完成「校验 → 扣费 → 发奖 → 记流水」，避免扣了费却没发奖的中间态。
-pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
+pub fn draw(uid: &str, wheel_id: &str, use_credit: bool) -> (bool, Value) {
     let Some(w) = get_wheel(wheel_id) else {
         return (false, json!({"error": {"message": "活动不存在"}}));
     };
@@ -316,6 +316,8 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
     let mut cost_from_grant = 0.0f64;
     let mut cost_from_recharge = 0.0f64;
     let mut awarded = false;
+    let mut used_credit = false;
+    let mut doubled = false;
     store().update(|db| {
         let Some(obj) = db.as_object_mut() else {
             err = "存储异常".into();
@@ -383,6 +385,13 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
                 "cost": crate::util::round6(cost),
             });
         }
+        // 0.5) 拉人活动：优先用邀请抽奖次数抵扣本次消耗（原子：同一临界区内检查并扣减；
+        //      必须在 users 借用块之前 —— obj 此处未被借用）
+        let mut eff_cost = cost;
+        if use_credit && cost > 0.0 && crate::promo::consume_draw_credit_obj(obj, uid) {
+            eff_cost = 0.0;
+            used_credit = true;
+        }
         // 1) 找用户并扣费（优先赠金）
         {
             let users = obj.entry("users").or_insert_with(|| Value::Array(vec![]));
@@ -396,7 +405,7 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
                 err = "用户不存在或已停用".into();
                 return;
             };
-            match charge_cost(u, cost) {
+            match charge_cost(u, eff_cost) {
                 Ok((g, r)) => {
                     cost_from_grant = g;
                     cost_from_recharge = r;
@@ -410,6 +419,22 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
             if matches!(ptype.as_str(), "recharge" | "grant") {
                 crate::users::credit(u, &ptype, amount);
                 awarded = true;
+            }
+        }
+        // 2.5) 翻倍卡：users 借用结束后补记一次等额入账（余额奖品翻倍）
+        if awarded && matches!(ptype.as_str(), "recharge" | "grant") && amount > 0.0 {
+            if crate::promo::consume_doubler_obj(obj, uid) {
+                let (dg, dr) = if ptype == "grant" { (amount, 0.0) } else { (0.0, amount) };
+                crate::users::fund_log(db, uid, "prize", dg, dr, "翻倍卡×2");
+                if let Some(arr) = db.get_mut("users").and_then(|u| u.as_array_mut()) {
+                    for u in arr.iter_mut() {
+                        if util_str(u.get("id")) == uid {
+                            crate::users::credit(u, &ptype, amount);
+                            break;
+                        }
+                    }
+                }
+                doubled = true;
             }
         }
         // 资金变动流水：抽奖消耗（优先赠金）+ 余额类奖品入账
@@ -471,7 +496,7 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
     // id 用于前端指针落点：转盘必须停在中奖那一格
     let prize_id = util_str(prize.get("id"));
     let award = match ptype.as_str() {
-        "recharge" | "grant" => json!({"id": prize_id, "type": ptype, "label": util_str(prize.get("label")), "color": util_str(prize.get("color")), "amount": amount}),
+        "recharge" | "grant" => json!({"id": prize_id, "type": ptype, "label": util_str(prize.get("label")), "color": util_str(prize.get("color")), "amount": amount, "doubled": doubled}),
         "model_unlimited" | "model_quota" => json!({
             "id": prize_id,
             "type": ptype,

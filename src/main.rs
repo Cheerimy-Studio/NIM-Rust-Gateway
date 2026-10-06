@@ -4,6 +4,8 @@ mod admin;
 mod convert;
 mod user_api;
 mod pool;
+mod mailer;
+mod promo;
 mod proxy;
 mod queue;
 mod store;
@@ -562,6 +564,42 @@ async fn h_user_keys_op(headers: HeaderMap, body: Bytes) -> Response {
 
 async fn h_user_logs(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
     user_api::logs(&headers, raw_query.0).await
+}
+
+async fn h_user_register(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::register(addr.ip().to_string(), &headers, body).await
+}
+
+async fn h_user_forgot(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::forgot(&headers, body).await
+}
+
+async fn h_user_reset_pw(body: Bytes) -> Response {
+    user_api::reset_pw(body).await
+}
+
+async fn h_user_promo(headers: HeaderMap) -> Response {
+    user_api::promo_overview(&headers).await
+}
+
+async fn h_user_promo_join(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::promo_join(&headers, body).await
+}
+
+async fn h_user_promo_claim(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::promo_claim(&headers, body).await
+}
+
+async fn h_promo_list(headers: HeaderMap) -> Response {
+    admin::promo_list(&headers).await
+}
+
+async fn h_promo_save(headers: HeaderMap, body: Bytes) -> Response {
+    admin::promo_save(&headers, body).await
+}
+
+async fn h_promo_op(headers: HeaderMap, body: Bytes) -> Response {
+    admin::promo_op(&headers, body).await
 }
 
 async fn h_user_models(headers: HeaderMap) -> Response {
@@ -1253,6 +1291,15 @@ fn build_router() -> Router {
     .route("/api/user/wallet", get(h_user_wallet))
     .route("/api/user/wheels", get(h_user_wheels))
     .route("/api/user/wheels/draw", post(h_user_wheels_draw))
+    .route("/api/user/register", post(h_user_register))
+    .route("/api/user/forgot", post(h_user_forgot))
+    .route("/api/user/reset", post(h_user_reset_pw))
+    .route("/api/user/promo", get(h_user_promo))
+    .route("/api/user/promo/join", post(h_user_promo_join))
+    .route("/api/user/promo/claim", post(h_user_promo_claim))
+    .route("/api/promo", get(h_promo_list))
+    .route("/api/promo/save", post(h_promo_save))
+    .route("/api/promo/op", post(h_promo_op))
     .route("/api/user/prize-keys", get(h_user_prize_keys))
     .route("/api/user/draw-logs", get(h_user_draw_logs))
     .route("/api/wheels", get(h_wheels_admin).post(h_wheels_save))

@@ -148,9 +148,72 @@ const LOADERS = {
   settings: () => loadSettings(),
   docs: () => fillDocs(),
   users: loadUsers,
+  promo: loadPromoAdmin,
   prices: loadPrices,
   wheels: loadWheels
 };
+async function loadPromoAdmin() {
+  const d = await run(() => api('promo'));
+  const tb = $('#promo-rows');
+  if (!tb) return;
+  tb.innerHTML = '';
+  const rows = d.rows || [];
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="8" class="text-muted small text-center py-4">还没有活动，先创建一个</td></tr>';
+    return;
+  }
+  for (const e of rows) {
+    const tr = document.createElement('tr');
+    if (!e.enabled) tr.classList.add('table-light');
+    const mode = e.trial ? '<span class="badge bg-warning text-dark">试玩</span>' : '<span class="badge bg-primary-subtle text-primary">正式</span>';
+    const st = e.expired ? '<span class="badge bg-secondary">已过期</span>'
+      : e.enabled ? '<span class="badge bg-success">进行中</span>' : '<span class="badge bg-secondary">已停用</span>';
+    tr.innerHTML = '<td class="fw-semibold">' + esc(e.name || e.id) + '</td>'
+      + '<td class="fw-semibold">¥' + (e.amount ?? 0) + '</td>'
+      + '<td>' + (e.target ?? 0) + ' 人</td>'
+      + '<td class="small">' + (e.members ?? 0) + ' / ' + (e.invites ?? 0) + '</td>'
+      + '<td>' + mode + '</td>'
+      + '<td class="small">' + (e.expired ? '—' : e.left_days + ' 天') + '</td>'
+      + '<td>' + st + '</td>'
+      + '<td class="text-end text-nowrap"></td>';
+    const td = tr.lastElementChild;
+    const mk = (label, op, cls) => {
+      const b = document.createElement('button');
+      b.className = 'btn btn-sm ' + cls + ' me-1';
+      b.textContent = label;
+      b.onclick = () => run(async () => {
+        await api('promo/op', {method: 'POST', json: {id: e.id, op: op}});
+        toast('已' + label);
+        loadPromoAdmin();
+      });
+      return b;
+    };
+    if (!e.expired) td.appendChild(mk(e.enabled ? '停用' : '启用', e.enabled ? 'disable' : 'enable',
+      e.enabled ? 'btn-outline-secondary' : 'btn-outline-success'));
+    const del = document.createElement('button');
+    del.className = 'btn btn-sm btn-outline-danger';
+    del.textContent = '删';
+    del.onclick = () => uiConfirm('删除活动「' + esc(e.name || e.id) + '」？参与进度将一并删除。', {danger: true, okText: '删除'})
+      .then(ok => { if (ok) run(async () => { await api('promo/op', {method: 'POST', json: {id: e.id, op: 'delete'}}); toast('已删除'); loadPromoAdmin(); }); });
+    td.appendChild(del);
+    tb.appendChild(tr);
+  }
+}
+
+$('#promo-add').onclick = guard(async () => {
+  const name = $('#promo-name').value.trim();
+  if (!name) { toast('请填写活动名称', 'danger'); return; }
+  await api('promo/save', {method: 'POST', json: {
+    name: name,
+    amount: parseFloat($('#promo-amount').value) || 0,
+    target: parseInt($('#promo-target').value) || 0,
+    trial: $('#promo-trial').checked,
+    enabled: $('#promo-enabled').checked,
+  }});
+  toast('活动已创建');
+  loadPromoAdmin();
+});
+
 function activate(name) {
   $$('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.pane === name));
   $$('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
@@ -1153,6 +1216,14 @@ async function loadSettings() {
   $('#set-mhide').checked = !!c.hide_mapped_names;
   $('#set-watchdog').checked = !!c.watchdog_enabled;
   $('#set-signen').checked = !!c.sign_enabled;
+  $('#set-smtp-host').value = c.smtp_host || '';
+  $('#set-smtp-port').value = c.smtp_port != null ? c.smtp_port : 465;
+  $('#set-smtp-user').value = c.smtp_user || '';
+  $('#set-smtp-pass').value = c.smtp_pass || '';
+  $('#set-smtp-from').value = c.smtp_from || '';
+  $('#set-smtp-tls').checked = c.smtp_tls != null ? !!c.smtp_tls : true;
+  $('#set-reg-email-enabled').checked = !!c.reg_email_enabled;
+  $('#set-reg-email-regex').value = c.reg_email_regex || '';
 }
 
 function bindSettings() {
@@ -1168,6 +1239,14 @@ function bindSettings() {
     config.hide_mapped_names = $('#set-mhide').checked;
     config.watchdog_enabled = $('#set-watchdog').checked;
     config.sign_enabled = $('#set-signen').checked;
+  config.smtp_host = $('#set-smtp-host').value;
+  config.smtp_port = parseInt($('#set-smtp-port').value) || 465;
+  config.smtp_user = $('#set-smtp-user').value;
+  config.smtp_pass = $('#set-smtp-pass').value;
+  config.smtp_from = $('#set-smtp-from').value;
+  config.smtp_tls = $('#set-smtp-tls').checked;
+  config.reg_email_enabled = $('#set-reg-email-enabled').checked;
+  config.reg_email_regex = $('#set-reg-email-regex').value;
     await api('settings', {method: 'POST', json: {config}});
     toast('已保存'); loadSettings(); fillDocs();
   });

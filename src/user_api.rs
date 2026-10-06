@@ -242,6 +242,188 @@ pub async fn sign(headers: &HeaderMap) -> Response {
 }
 
 /// 赠金/充值账本：当前与累计。
+// ---------------- 邮箱注册 / 找回密码（公开） ----------------
+
+/// 邮箱注册。body: {email, password, inv?}
+pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
+    // 简单速率限制：复用登录失败限流（同一 IP）
+    if !crate::admin::login_rate_ok(&ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试"}})),
+        )
+            .into_response();
+    }
+    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let email = util::str_or(body_v.get("email"), "");
+    let password = util::str_or(body_v.get("password"), "");
+    let inv = util::str_or(body_v.get("inv"), "");
+    let (row, err) = users::email_register(&email, &password, &inv);
+    if let Some(u) = row {
+        // 注册即登录：种会话
+        let cfg = store().load();
+        let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
+        let secret = util::str_or(cfgc.get("session_secret"), "");
+        let uid = util::str_or(u.get("id"), "");
+        let session = users::user_session_value(&secret, &uid);
+        let csrf = users::user_csrf_token(&secret, &uid);
+        let secure = headers
+            .get("x-forwarded-proto")
+            .and_then(|x| x.to_str().ok())
+            .map(|p| p.split(',').next().unwrap_or("").trim().eq_ignore_ascii_case("https"))
+            .unwrap_or(false);
+        let mut resp = axum::Json(json!({"ok": true, "csrf": csrf, "username": util::str_or(u.get("username"), "")}))
+            .into_response();
+        resp.headers_mut().append(
+            axum::http::header::SET_COOKIE,
+            axum::http::HeaderValue::from_str(&set_cookie_header("ngw_user", &session, true, false, secure)).unwrap(),
+        );
+        resp.headers_mut().append(
+            axum::http::header::SET_COOKIE,
+            axum::http::HeaderValue::from_str(&set_cookie_header("ngw_ucsrfs", &csrf, true, false, secure)).unwrap(),
+        );
+        return resp;
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(json!({"error": {"message": err}})),
+    )
+        .into_response()
+}
+
+/// 忘记密码：发重置邮件。body: {email}
+pub async fn forgot(headers: &HeaderMap, body: Bytes) -> Response {
+    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let email = util::str_or(body_v.get("email"), "").trim().to_string();
+    if email.is_empty() || !email.contains('@') {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请输入注册邮箱"}})),
+        )
+            .into_response();
+    }
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|x| x.to_str().ok())
+        .map(|p| p.split(',').next().unwrap_or("http").trim().to_string())
+        .unwrap_or_else(|| "http".into());
+    let host = headers
+        .get("host")
+        .and_then(|x| x.to_str().ok())
+        .unwrap_or("127.0.0.1")
+        .to_string();
+    match users::reset_token_create(&email) {
+        Some((token, _uid)) => {
+            let link = format!("{}://{}/user?reset={}", proto, host, token);
+            let body_mail = format!(
+                "您（或他人）请求重置言灵中转的登录密码。
+
+点击链接设置新密码（15 分钟内有效）：
+{}
+
+若非本人操作请忽略本邮件。",
+                link
+            );
+            if let Err(e) = crate::mailer::send_mail(&email, "言灵中转 · 密码重置", &body_mail).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({"error": {"message": e}})),
+                )
+                    .into_response();
+            }
+            json_resp(json!({"ok": true, "message": "重置邮件已发送，请在 15 分钟内完成操作"}))
+        }
+        None => json_resp(json!({"ok": true, "message": "若该邮箱已注册，重置邮件已发送"})),
+    }
+}
+
+/// 重置密码。body: {token, password}
+pub async fn reset_pw(body: Bytes) -> Response {
+    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let token = util::str_or(body_v.get("token"), "");
+    let password = util::str_or(body_v.get("password"), "");
+    match users::reset_with_token(&token, &password) {
+        Ok(()) => json_resp(json!({"ok": true, "message": "密码已重置，请使用新密码登录"})),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": e}})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------- 拉人活动（会话内） ----------------
+
+/// 我的拉人活动总览：所有进行中活动 + 我的进度 + 邀请链接
+pub async fn promo_overview(headers: &HeaderMap) -> Response {
+    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
+    let cfg = store().load();
+    let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|x| x.to_str().ok())
+        .map(|p| p.split(',').next().unwrap_or("http").trim().to_string())
+        .unwrap_or_else(|| "http".into());
+    let host = headers.get("host").and_then(|x| x.to_str().ok()).unwrap_or("").to_string();
+    let base = format!("{}://{}/user", proto, host);
+    let events = crate::promo::admin_list()
+        .into_iter()
+        .filter(|e| e.get("enabled").map(util::truthy).unwrap_or(false))
+        .map(|e| {
+            let id = util::str_or(e.get("id"), "");
+            // 用户侧返回 my_status 进度 + 展示字段；绝不透出管理端聚合数据
+            let mut mine = crate::promo::my_status(&id, &uid);
+            let link_rel = util::str_or(mine.get("link"), "");
+            if let Some(o) = mine.as_object_mut() {
+                o.insert("id".into(), json!(id));
+                o.insert("link_full".into(), json!(format!("{}{}", base, link_rel)));
+                o.insert("name".into(), e.get("name").cloned().unwrap_or(json!("拉人活动")));
+                o.insert("amount".into(), e.get("amount").cloned().unwrap_or(json!(0)));
+                o.insert("target".into(), e.get("target").cloned().unwrap_or(json!(1)));
+                o.insert("enabled".into(), e.get("enabled").cloned().unwrap_or(json!(false)));
+                o.insert("expires_at".into(), e.get("expires_at").cloned().unwrap_or(json!(0)));
+            }
+            mine
+        })
+        .collect::<Vec<_>>();
+    json_resp(json!({
+        "events": events,
+        "reg_enabled": cfgc.get("reg_email_enabled").map(util::truthy).unwrap_or(false),
+        "doubler": crate::promo::doubler_count(&uid),
+    }))
+}
+
+/// 加入活动
+pub async fn promo_join(headers: &HeaderMap, body: Bytes) -> Response {
+    let Ok(uid) = user_require(headers, true) else { return user_require_err() };
+    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let id = util::str_or(body_v.get("id"), "");
+    match crate::promo::join(&id, &uid) {
+        Ok(st) => json_resp(json!({"ok": true, "status": st})),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": e}})),
+        )
+            .into_response(),
+    }
+}
+
+/// 领取阶段奖励/提现。body: {id, step}
+pub async fn promo_claim(headers: &HeaderMap, body: Bytes) -> Response {
+    let Ok(uid) = user_require(headers, true) else { return user_require_err() };
+    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let id = util::str_or(body_v.get("id"), "");
+    let step = util::int_or(body_v.get("step"), 1);
+    match crate::promo::claim(&id, &uid, step) {
+        Ok(st) => json_resp(json!({"ok": true, "status": st})),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": e}})),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn wallet(headers: &HeaderMap) -> Response {
     let Ok(uid) = user_require(headers, false) else { return user_require_err() };
     let Some(u) = users::auth_user(&uid) else { return user_require_err() };
@@ -265,7 +447,8 @@ pub async fn wheels_draw(headers: &HeaderMap, body: Bytes) -> Response {
             .into_response();
     };
     let id = util::str_or(body.get("id"), "");
-    let (ok, body) = crate::wheel::draw(&uid, &id);
+    let use_credit = body.get("use_credit").map(util::truthy).unwrap_or(false);
+    let (ok, body) = crate::wheel::draw(&uid, &id, use_credit);
     if ok {
         json_resp(body)
     } else {

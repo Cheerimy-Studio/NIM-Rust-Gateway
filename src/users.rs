@@ -761,6 +761,137 @@ pub fn sign_today(uid: &str) -> (bool, String, f64) {
     (true, "签到成功".into(), amount)
 }
 
+// ---------------------------------------------------------------- 邮箱注册与找回
+
+/// 邮箱注册。inv = 可选拉人归因（"<event_id>.<inviter_uid>"）。
+/// 返回 (用户行, 错误)。
+pub fn email_register(email: &str, password: &str, inv: &str) -> (Option<Value>, String) {
+    let email = email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return (None, "请输入正确的邮箱地址".into());
+    }
+    if password.chars().count() < 6 {
+        return (None, "密码至少 6 位".into());
+    }
+    // 邮箱正则限制（后台可配；未配置则基础格式校验）
+    let cfg = store().load();
+    let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
+    let re_pat = util::str_or(cfgc.get("reg_email_regex"), "");
+    if !re_pat.is_empty() {
+        match regex::Regex::new(&re_pat) {
+            Ok(re) => {
+                if !re.is_match(&email) {
+                    return (None, "该邮箱不在允许注册的范围内".into());
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    if !cfgc.get("reg_email_enabled").map(util::truthy).unwrap_or(false) {
+        return (None, "邮箱注册未开放".into());
+    }
+    // 用户名占用检查（邮箱即用户名）
+    if store().load().get("users").and_then(|u| u.as_array()).map(|a| {
+        a.iter().any(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email))
+    }).unwrap_or(false) {
+        return (None, "该邮箱已注册，请直接登录或找回密码".into());
+    }
+    let row = json!({
+        "id": format!("u8_{}", util::rand_hex(6)),
+        "username": email,
+        "email": email,
+        "password_hash": crate::store::hash_password(password),
+        "balance": 0.0, "grant": 0.0,
+        "free_rpm": util::int_or(cfgc.get("reg_free_rpm"), 10),
+        "paid_rpm": 0,
+        "enabled": true,
+        "created_at": util::now_i(), "updated_at": util::now_i(),
+    });
+    let mut out = None;
+    store().update(|db| {
+        users_mut(db, |arr| {
+            if arr.iter().any(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email)) {
+                return;
+            }
+            arr.push(row.clone());
+            out = Some(row.clone());
+        });
+    });
+    match out {
+        Some(u) => {
+            let uid = util::str_or(u.get("id"), "");
+            if !inv.is_empty() {
+                crate::promo::attribute(inv, &uid);
+            }
+            (Some(u), String::new())
+        }
+        None => (None, "该邮箱已注册".into()),
+    }
+}
+
+/// 生成找回密码令牌（15 分钟有效），返回 (token, uid)。
+pub fn reset_token_create(email: &str) -> Option<(String, String)> {
+    let email = email.trim().to_lowercase();
+    let u = store().load().get("users").and_then(|a| a.as_array()).and_then(|a| {
+        a.iter().find(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email)).cloned()
+    })?;
+    let uid = util::str_or(u.get("id"), "");
+    let token = util::rand_hex(24);
+    let now = util::now_i();
+    store().update(|db| {
+        let obj = db.as_object_mut().unwrap();
+        let arr = obj.entry("pw_resets").or_insert_with(|| Value::Array(vec![]));
+        if let Some(a) = arr.as_array_mut() {
+            a.retain(|r| util::int_or(r.get("exp"), 0) > now);
+            a.insert(0, json!({"token": token, "uid": uid, "exp": now + 900}));
+            a.truncate(200);
+        }
+    });
+    Some((token, uid))
+}
+
+/// 用令牌重置密码（一次性）。成功后旧会话全部失效（纪元 +1）。
+pub fn reset_with_token(token: &str, password: &str) -> Result<(), String> {
+    if password.chars().count() < 6 {
+        return Err("密码至少 6 位".into());
+    }
+    let now = util::now_i();
+    let mut uid = String::new();
+    store().update(|db| {
+        let obj = db.as_object_mut().unwrap();
+        let arr = obj.entry("pw_resets").or_insert_with(|| Value::Array(vec![]));
+        if let Some(a) = arr.as_array_mut() {
+            if let Some(pos) = a.iter().position(|r| {
+                util::str_or(r.get("token"), "") == token && util::int_or(r.get("exp"), 0) > now
+            }) {
+                uid = util::str_or(a[pos].get("uid"), "");
+                a.remove(pos);
+            }
+        }
+    });
+    if uid.is_empty() {
+        return Err("重置链接无效或已过期".into());
+    }
+    let mut done = false;
+    store().update(|db| {
+        users_mut(db, |arr| {
+            if let Some(u) = find_user_mut(arr, &uid) {
+                let next_epoch = util::int_or(u.get("pw_epoch"), 0) + 1;
+                if let Some(o) = u.as_object_mut() {
+                    o.insert("password_hash".into(), Value::from(crate::store::hash_password(password)));
+                    o.insert("pw_epoch".into(), json!(next_epoch));
+                }
+                done = true;
+            }
+        });
+    });
+    if done {
+        Ok(())
+    } else {
+        Err("用户不存在".into())
+    }
+}
+
 // ---------------------------------------------------------------- 计费与限速
 
 /// 渠道上某模型的单次价格（元/次）。未设置 = 免费模型。

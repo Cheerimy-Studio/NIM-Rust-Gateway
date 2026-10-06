@@ -252,6 +252,7 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-pane="import"><i class="bi bi-upload"></i>导入</a>
     <a href="javascript:void(0)" data-pane="tokens"><i class="bi bi-shield-lock"></i>访问令牌</a>
     <a href="javascript:void(0)" data-pane="users"><i class="bi bi-people"></i>用户</a>
+    <a href="javascript:void(0)" data-pane="promo"><i class="bi bi-megaphone"></i>拉人活动</a>
     <a href="javascript:void(0)" data-pane="prices"><i class="bi bi-tags"></i>模型定价</a>
     <a href="javascript:void(0)" data-pane="wheels"><i class="bi bi-database"></i>大转盘</a>
     <a href="javascript:void(0)" data-pane="intercept"><i class="bi bi-slash-circle"></i>拦截</a>
@@ -564,6 +565,45 @@ details.upgrp[open]{background:#fff}
   </div>
 </section>
 
+
+<section class="pane" id="pane-promo">
+  <h2 class="pane-title">拉人活动</h2>
+  <div class="card mb-3">
+    <div class="card-header">新建活动（有效期固定 7 天，过期不可重开）</div>
+    <div class="card-body">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3"><label class="form-label" for="promo-name">活动名称</label>
+          <input class="form-control form-control-sm" id="promo-name" placeholder="如：新人 Register 送豪礼"></div>
+        <div class="col-md-2"><label class="form-label" for="promo-amount">提现金额（元）</label>
+          <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="promo-amount" value="20"></div>
+        <div class="col-md-2"><label class="form-label" for="promo-target">拉人次数</label>
+          <input type="number" step="1" min="1" class="form-control form-control-sm" id="promo-target" value="100"></div>
+        <div class="col-md-2">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="promo-trial">
+            <label class="form-check-label small" for="promo-trial">试玩模式（免拉人）</label>
+          </div>
+        </div>
+        <div class="col-md-2">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="promo-enabled" checked>
+            <label class="form-check-label small" for="promo-enabled">立即开启</label>
+          </div>
+        </div>
+        <div class="col-md-1"><button id="promo-add" class="btn btn-sm btn-primary w-100">创建</button></div>
+      </div>
+      <div class="form-text small mt-2 mb-0">阶梯自动生成：拉满 N/5 人集 20 钻石兑 ¥0.01 → 再 N 人集 20 金币兑 ¥0.01 → 拉满目标人数提现。每拉 1 人 +1 次抽奖；每 5 人 +1 翻倍卡。</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead><tr><th>活动</th><th>提现金额</th><th>拉人目标</th><th>参与 / 拉新</th><th>模式</th><th>剩余</th><th>状态</th><th class="text-end">操作</th></tr></thead>
+        <tbody id="promo-rows"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
 
 <section class="pane" id="pane-prices">
   <h2 class="pane-title">模型定价</h2>
@@ -878,6 +918,7 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-sec="sec-privacy">隐私</a>
     <a href="javascript:void(0)" data-sec="sec-misc">排队日志</a>
     <a href="javascript:void(0)" data-sec="sec-sign">签到</a>
+    <a href="javascript:void(0)" data-sec="sec-mail">邮箱</a>
     <a href="javascript:void(0)" data-sec="sec-sync">同步</a>
     <a href="javascript:void(0)" data-sec="sec-passwd">密码</a>
     <a href="javascript:void(0)" data-sec="sec-danger" class="text-danger">危险</a>
@@ -1030,6 +1071,37 @@ details.upgrp[open]{background:#fff}
               <input type="number" step="0.001" min="0.000001" class="form-control form-control-sm" id="set-signmin"></div>
             <div class="col-md-3"><label class="form-label" for="set-signmax">金额上限 · 元</label>
               <input type="number" step="0.001" min="0.000001" class="form-control form-control-sm" id="set-signmax"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card mb-3" id="sec-mail">
+        <div class="card-header"><i class="bi bi-envelope me-2 text-muted"></i>邮箱服务（SMTP）</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-5"><label class="form-label" for="set-smtp-host">SMTP 服务器</label>
+              <input type="text" class="form-control form-control-sm" id="set-smtp-host" placeholder="smtp.example.com"></div>
+            <div class="col-md-3"><label class="form-label" for="set-smtp-port">端口</label>
+              <input type="number" class="form-control form-control-sm" id="set-smtp-port" value="465"></div>
+            <div class="col-md-4 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-smtp-tls" checked>
+                <label class="form-check-label small" for="set-smtp-tls">TLS 加密</label>
+              </div>
+            </div>
+            <div class="col-md-6"><label class="form-label" for="set-smtp-user">账号</label>
+              <input type="text" class="form-control form-control-sm" id="set-smtp-user"></div>
+            <div class="col-md-6"><label class="form-label" for="set-smtp-pass">密码/授权码</label>
+              <input type="password" class="form-control form-control-sm" id="set-smtp-pass"></div>
+            <div class="col-md-6"><label class="form-label" for="set-smtp-from">发件人地址（留空=同账号）</label>
+              <input type="text" class="form-control form-control-sm" id="set-smtp-from"></div>
+            <div class="col-md-6 d-flex align-items-end pb-1">
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="set-reg-email-enabled">
+                <label class="form-check-label small" for="set-reg-email-enabled">开放邮箱注册</label>
+              </div>
+            </div>
+            <div class="col-12"><label class="form-label" for="set-reg-email-regex">邮箱注册正则（留空=不限，如 ^[\w.+-]+@(qq|163|gmail)\.com$）</label>
+              <input type="text" class="form-control form-control-sm font-monospace" id="set-reg-email-regex"></div>
           </div>
         </div>
       </div>

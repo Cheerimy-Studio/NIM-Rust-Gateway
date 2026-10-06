@@ -836,6 +836,7 @@ const INT_SETTINGS: &[&str] = &[
     "pool_rpm_cap",
     "pool_daily_cap",
     "warmup_seconds",
+    "smtp_port",
 ];
 const STR_SETTINGS: &[&str] = &[
     "upstream_base",
@@ -844,6 +845,11 @@ const STR_SETTINGS: &[&str] = &[
     "model_blacklist",
     "param_overrides",
     "update_token",
+    "smtp_host",
+    "smtp_user",
+    "smtp_pass",
+    "smtp_from",
+    "reg_email_regex",
 ];
 const BOOL_SETTINGS: &[&str] = &[
     "log_enabled",
@@ -855,6 +861,8 @@ const BOOL_SETTINGS: &[&str] = &[
     "breaker_enabled",
     "watchdog_enabled",
     "sign_enabled",
+    "smtp_tls",
+    "reg_email_enabled",
 ];
 /// 浮点设置（金额类）：round6 量化，负值忽略。
 const FLOAT_SETTINGS: &[&str] = &["sign_min", "sign_max"];
@@ -1807,6 +1815,163 @@ pub async fn user_logs_admin(headers: &HeaderMap, raw_query: Option<String>) -> 
     json_resp(json!({"rows": rows, "total": total, "kind": kind, "per": per.clamp(1, 300)}))
 }
 
+
+// ============================================================ 拉人活动
+
+/// 活动列表
+pub async fn promo_list(headers: &HeaderMap) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    json_resp(json!({"rows": crate::promo::admin_list()}))
+}
+
+/// 保存（新建/编辑）活动。body: {id?, name, amount, target, trial, enabled}
+pub async fn promo_save(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let name = util::str_or(body.get("name"), "").trim().to_string();
+    let amount = util::f64_or(body.get("amount"), 0.0);
+    let target = util::int_or(body.get("target"), 0);
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "活动名称不能为空"}})),
+        )
+            .into_response();
+    }
+    if !(amount > 0.0) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "提现金额必须大于 0"}})),
+        )
+            .into_response();
+    }
+    if target < 1 {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "拉人次数至少 1"}})),
+        )
+            .into_response();
+    }
+    let id_in = util::str_or(body.get("id"), "");
+    let enabled = body.get("enabled").map(util::truthy).unwrap_or(false);
+    let trial = body.get("trial").map(util::truthy).unwrap_or(false);
+    let now = util::now_i();
+    let mut err = String::new();
+    let mut out_id = String::new();
+    store().update(|db| {
+        let arr = crate::promo::events_arr(db);
+        if !id_in.is_empty() {
+            let Some(row) = arr.iter_mut().find(|e| util::str_or(e.get("id"), "") == id_in) else {
+                err = "活动不存在".into();
+                return;
+            };
+            // 7 天期活动过期后不可重开（新开活动请新建）
+            if enabled {
+                let exp = util::int_or(row.get("expires_at"), 0);
+                if exp > 0 && now >= exp {
+                    err = "活动已过 7 天有效期，无法重新开启（请新建活动）".into();
+                    return;
+                }
+            }
+            if let Some(o) = row.as_object_mut() {
+                o.insert("name".into(), json!(util::str_cut(&name, 40)));
+                o.insert("amount".into(), json!(util::round6(amount)));
+                o.insert("target".into(), json!(target));
+                o.insert("trial".into(), json!(trial));
+                o.insert("enabled".into(), json!(enabled));
+            }
+            out_id = id_in;
+        } else {
+            let id = format!("pe_{}", util::rand_hex(6));
+            arr.push(json!({
+                "id": id,
+                "name": util::str_cut(&name, 40),
+                "amount": util::round6(amount),
+                "target": target,
+                "trial": trial,
+                "enabled": enabled,
+                "created_at": now,
+                "expires_at": now + crate::promo::EVENT_TTL_SECS,
+            }));
+            out_id = id;
+        }
+    });
+    if !err.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": err}})),
+        )
+            .into_response();
+    }
+    store().flush();
+    json_resp(json!({"ok": true, "id": out_id}))
+}
+
+/// 活动操作：启用/停用/删除
+pub async fn promo_op(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
+        )
+            .into_response();
+    };
+    let id = util::str_or(body.get("id"), "");
+    let op = util::str_or(body.get("op"), "");
+    let op = op.as_str();
+    let now = util::now_i();
+    let mut err = String::new();
+    store().update(|db| {
+        let arr = crate::promo::events_arr(db);
+        let Some(row) = arr.iter_mut().find(|e| util::str_or(e.get("id"), "") == id) else {
+            err = "活动不存在".into();
+            return;
+        };
+        match op {
+            "enable" => {
+                let exp = util::int_or(row.get("expires_at"), 0);
+                if exp > 0 && now >= exp {
+                    err = "活动已过 7 天有效期，无法重新开启（请新建活动）".into();
+                    return;
+                }
+                if let Some(o) = row.as_object_mut() {
+                    o.insert("enabled".into(), json!(true));
+                }
+            }
+            "disable" => {
+                if let Some(o) = row.as_object_mut() {
+                    o.insert("enabled".into(), json!(false));
+                }
+            }
+            "delete" => {
+                arr.retain(|e| util::str_or(e.get("id"), "") != id);
+            }
+            _ => err = "未知操作".into(),
+        }
+    });
+    if !err.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": err}})),
+        )
+            .into_response();
+    }
+    store().flush();
+    json_resp(json!({"ok": true}))
+}
 
 // ============================================================ 模型定价
 

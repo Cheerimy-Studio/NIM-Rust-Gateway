@@ -124,11 +124,16 @@ a{text-decoration:none}
   text-shadow:0 1px 4px rgba(0,0,0,.85),0 0 10px rgba(0,0,0,.4);
   pointer-events:none;transform-origin:0 0;
   display:flex;align-items:center;justify-content:center}
-.wheel-pointer{position:absolute;top:-12px;left:50%;transform:translateX(-50%);z-index:3;width:0;height:0;
-  border-left:10px solid transparent;border-right:10px solid transparent;border-top:20px solid #f59e0b;
-  filter:drop-shadow(0 2px 4px rgba(0,0,0,.65))}
-.wheel-pointer::after{content:"";position:absolute;top:-20px;left:-7px;width:14px;height:14px;
-  border-radius:50%;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.55)}
+.wheel-pointer{position:absolute;top:-14px;left:50%;transform:translateX(-50%);z-index:3;
+  width:26px;height:34px;
+  background:linear-gradient(180deg,#fff 0%,#ffe9c2 55%,#f59e0b 100%);
+  border-radius:50% 50% 46% 46%/62% 62% 38% 38%;
+  box-shadow:0 0 18px rgba(255,183,77,.85),0 4px 10px rgba(0,0,0,.5),inset 0 -4px 8px rgba(245,158,11,.55);
+  animation:ppulse 1.6s ease-in-out infinite}
+.wheel-pointer::after{content:"";position:absolute;top:5px;left:50%;transform:translateX(-50%);
+  width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,.95);
+  box-shadow:0 0 8px rgba(255,255,255,.9)}
+@keyframes ppulse{0%,100%{transform:translateX(-50%) scale(1)}50%{transform:translateX(-50%) scale(1.1)}}
 .wheel-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:3;
   width:62px;height:62px;border-radius:50%;background:linear-gradient(135deg,#0f1b33,#0b1224);color:#fff;
   display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;cursor:default;
@@ -198,6 +203,35 @@ a{text-decoration:none}
 .pbtn.primary{background:#fff;color:#111827;border-color:#fff}
 .pbtn.primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(255,255,255,.22)}
 .prize-card.lost .prize-tag{color:#98a3b8}
+/* 拉人活动（PDD 红金风） */
+.promo-hero{border-radius:16px;padding:22px 22px 18px;color:#fff;
+  background:radial-gradient(600px 300px at 80% -20%,#ffb75e 0%,transparent 55%),
+             linear-gradient(150deg,#e0452c 0%,#c81e1e 60%,#a31212 100%);
+  box-shadow:0 16px 44px rgba(163,18,18,.35)}
+.promo-amount{font-size:38px;font-weight:900;letter-spacing:-1px;text-shadow:0 2px 8px rgba(0,0,0,.25)}
+.promo-amount small{font-size:15px;font-weight:700}
+.promo-bar{height:16px;border-radius:999px;background:rgba(0,0,0,.3);overflow:hidden;
+  box-shadow:inset 0 2px 4px rgba(0,0,0,.35)}
+.promo-bar>div{height:100%;border-radius:999px;background:linear-gradient(90deg,#ffd76e,#ffb43a);
+  transition:width .8s cubic-bezier(.2,.8,.2,1);box-shadow:0 0 12px rgba(255,215,110,.6)}
+.promo-gap{font-size:13px;margin-top:8px;color:#ffe9c9}
+.promo-gap b{color:#ffd76e;font-size:15px}
+.promo-stage{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:#fff;
+  border:1px solid #ffd7a8;margin-bottom:8px;box-shadow:0 2px 8px rgba(200,80,20,.08)}
+.promo-stage.done{background:#fff7ec}
+.promo-stage .ic{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;font-size:16px;font-weight:800;background:#ffe3c2;color:#c05621}
+.promo-stage.done .ic{background:#16a34a;color:#fff}
+.promo-stage .tx{flex:1;font-size:13px;color:#5b4a3a}
+.promo-stage .tx b{color:#2c1d10}
+.promo-link{display:flex;gap:8px}
+.promo-link input{flex:1;font-size:12px;background:#fff5e8;border-color:#ffd7a8;color:#8a5a2a}
+.promo-chip{display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid #ffd7a8;
+  border-radius:999px;padding:4px 12px;font-size:12.5px;font-weight:700;color:#c05621}
+.lg-tab{display:flex;justify-content:center;gap:14px;margin-bottom:14px;font-size:13px}
+.lg-tab a{color:#98a3b8;text-decoration:none;padding:2px 2px}
+.lg-tab a.on{color:#10b981;font-weight:700;border-bottom:2px solid #10b981}
+.lg-err{display:none;color:#dc2626;font-size:13px;margin-bottom:10px}
 .prize-card.lost .prize-line .bi{color:#98a3b8}
 .prize-confetti{position:absolute;top:34%;left:50%;width:8px;height:13px;border-radius:2px;opacity:0;
   animation:pconf 1.25s ease-out .4s both;pointer-events:none}
@@ -213,12 +247,40 @@ a{text-decoration:none}
     <div class="login-title">言灵中转</div>
     <div class="login-sub">用户中心 · USER PORTAL</div>
     <div class="login-err" id="login-err"></div>
-    <div class="mb-3"><label class="form-label small fw-semibold">用户名</label>
-      <input class="form-control" id="login-user" autocomplete="username"></div>
-    <div class="mb-3"><label class="form-label small fw-semibold">密码</label>
-      <input class="form-control" id="login-pass" type="password" autocomplete="current-password"></div>
-    <button class="btn btn-primary" id="login-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
-      background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35)">登录</button>
+    <div id="login-tab-main">
+      <div class="mb-3"><label class="form-label small fw-semibold">账号 / 邮箱</label>
+        <input class="form-control" id="login-user" autocomplete="username"></div>
+      <div class="mb-3"><label class="form-label small fw-semibold">密码</label>
+        <input class="form-control" id="login-pass" type="password" autocomplete="current-password"></div>
+      <button class="btn btn-primary" id="login-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35)">登录</button>
+      <div class="d-flex justify-content-between mt-3">
+        <a href="javascript:void(0)" class="small" id="go-register" style="color:#10b981">注册账号</a>
+        <a href="javascript:void(0)" class="small text-muted" id="go-forgot">忘记密码</a>
+      </div>
+    </div>
+    <div id="login-tab-register" style="display:none">
+      <div class="mb-3"><label class="form-label small fw-semibold">邮箱</label>
+        <input class="form-control" id="reg-email" autocomplete="email" placeholder="用于登录与找回密码"></div>
+      <div class="mb-3"><label class="form-label small fw-semibold">密码（至少 6 位）</label>
+        <input class="form-control" id="reg-pass" type="password"></div>
+      <button class="btn btn-primary" id="reg-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35)">注册并登录</button>
+      <div class="text-center mt-3"><a href="javascript:void(0)" class="small text-muted" id="back-login-1">返回登录</a></div>
+    </div>
+    <div id="login-tab-forgot" style="display:none">
+      <div class="mb-3"><label class="form-label small fw-semibold">注册邮箱</label>
+        <input class="form-control" id="forgot-email" autocomplete="email"></div>
+      <button class="btn btn-primary" id="forgot-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669)">发送重置邮件</button>
+      <div class="text-center mt-3"><a href="javascript:void(0)" class="small text-muted" id="back-login-2">返回登录</a></div>
+    </div>
+    <div id="login-tab-reset" style="display:none">
+      <div class="mb-3"><label class="form-label small fw-semibold">设置新密码（至少 6 位）</label>
+        <input class="form-control" id="reset-pass" type="password"></div>
+      <button class="btn btn-primary" id="reset-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669)">重置密码</button>
+    </div>
   </div>
 </div>
 
@@ -230,6 +292,7 @@ a{text-decoration:none}
     <div class="nav-label">账户</div>
     <a href="javascript:void(0)" data-p="overview" class="active"><i class="bi bi-speedometer2"></i>概览</a>
     <a href="javascript:void(0)" data-p="wheel"><i class="bi bi-database"></i>大转盘</a>
+    <a href="javascript:void(0)" data-p="promo"><i class="bi bi-fire"></i>拉人活动</a>
     <div class="nav-label">开发</div>
     <a href="javascript:void(0)" data-p="keys"><i class="bi bi-key"></i>API Key</a>
     <a href="javascript:void(0)" data-p="prizes"><i class="bi bi-gift"></i>奖品中心</a>
@@ -428,6 +491,11 @@ a{text-decoration:none}
       placeholder="输入消息后按 Enter 发送"></textarea>
     <button id="t-send" class="btn btn-primary px-4">发送</button>
   </div>
+</div>
+
+<div class="pane" id="pane-promo" style="display:none">
+  <h2 class="pane-title">拉人活动</h2>
+  <div id="promo-body"></div>
 </div>
 
 </div>
