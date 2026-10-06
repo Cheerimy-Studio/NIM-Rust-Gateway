@@ -602,6 +602,7 @@ pub fn migrate(db: &mut Value) {
         ("user_tokens", "arr"),
         ("user_logs", "arr"),
         ("email_codes", "obj"),
+        ("pw_resets", "arr"),
         ("invite_events", "arr"),
         ("invite_members", "arr"),
         ("invite_hits", "arr"),

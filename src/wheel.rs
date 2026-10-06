@@ -604,11 +604,6 @@ pub fn lookup_prize_key(key: &str) -> Result<Value, &'static str> {
     Ok(row.clone())
 }
 
-/// prize Key 的模型限制：锁定名与请求名经别名互通即放行（口径与入口校验一致）。
-pub fn prize_key_allows_model(row: &Value, model: &str) -> bool {
-    crate::upstreams::models_alias_linked(&util_str(row.get("model")), model)
-}
-
 /// prize Key 并发占用登记：INFLIGHT 风格内存计数（并发限制=体验卡独有语义）。
 fn prize_inflight_key(key: &str) -> String {
     format!("prz:{}", key)

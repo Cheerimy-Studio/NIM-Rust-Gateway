@@ -615,8 +615,11 @@ function promoCard(ev, d) {
     '再邀请 ' + st.t1 + ' 位好友，集齐 20 枚金币再兑 ¥0.01（金币 ' + st.golds + '/20）', 'p-claim2'));
   stages.push(stageRow(st.p3, st.p2 && st.eff_invited >= st.total,
     '继续邀请满 ' + st.total + ' 位好友，提现审核加速中', null));
-  stages.push(stageRow(paid, paid,
-    paid ? '¥' + ev.amount + ' 已到账充值余额！' : '拉满 ' + st.total + ' 人，' + ev.amount + ' 元立即到账', null));
+  stages.push(stageRow(paid, st.p1 && st.p2 && st.p3,
+    paid ? '¥' + ev.amount + ' 已到账充值余额！'
+         : (st.trial ? '试玩模式：直接提现 ¥' + ev.amount + ' 到余额'
+                     : '拉满 ' + st.total + ' 人，' + ev.amount + ' 元立即到账'),
+    'p-claim4'));
   const doublerChip = st.doubler > 0 ? '<span class="promo-chip"><i class="bi bi-stack"></i>翻倍卡 × ' + st.doubler + '</span>' : '';
   const creditChip = st.draw_credits > 0 ? '<span class="promo-chip"><i class="bi bi-ticket-perforated"></i>抽奖次数 × ' + st.draw_credits + '</span>' : '';
   const friends = (st.friends || []).slice(0, 8).map(f =>
@@ -651,6 +654,7 @@ function promoCard(ev, d) {
   };
   bindClaim('#p-claim1', 1);
   bindClaim('#p-claim2', 2);
+  bindClaim('#p-claim4', 4);
   return card;
 }
 

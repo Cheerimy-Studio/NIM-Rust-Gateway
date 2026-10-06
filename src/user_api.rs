@@ -443,7 +443,10 @@ pub async fn promo_overview(headers: &HeaderMap) -> Response {
     let base = format!("{}://{}/user", proto, host);
     let events = crate::promo::admin_list()
         .into_iter()
-        .filter(|e| e.get("enabled").map(util::truthy).unwrap_or(false))
+        .filter(|e| {
+            e.get("enabled").map(util::truthy).unwrap_or(false)
+                && !e.get("expired").map(util::truthy).unwrap_or(false)
+        })
         .map(|e| {
             let id = util::str_or(e.get("id"), "");
             // 用户侧返回 my_status 进度 + 展示字段；绝不透出管理端聚合数据

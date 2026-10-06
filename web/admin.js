@@ -1219,7 +1219,8 @@ async function loadSettings() {
   $('#set-smtp-host').value = c.smtp_host || '';
   $('#set-smtp-port').value = c.smtp_port != null ? c.smtp_port : 465;
   $('#set-smtp-user').value = c.smtp_user || '';
-  $('#set-smtp-pass').value = c.smtp_pass || '';
+  // smtp_pass 不回显（GET 已脱敏）；留空保存=保持不变
+  $('#set-smtp-pass').value = '';
   $('#set-smtp-from').value = c.smtp_from || '';
   $('#set-smtp-tls').checked = c.smtp_tls != null ? !!c.smtp_tls : true;
   $('#set-reg-email-enabled').checked = !!c.reg_email_enabled;
@@ -1242,7 +1243,8 @@ function bindSettings() {
   config.smtp_host = $('#set-smtp-host').value;
   config.smtp_port = parseInt($('#set-smtp-port').value) || 465;
   config.smtp_user = $('#set-smtp-user').value;
-  config.smtp_pass = $('#set-smtp-pass').value;
+  const _smtpPass = $('#set-smtp-pass').value;
+  if (_smtpPass) config.smtp_pass = _smtpPass;
   config.smtp_from = $('#set-smtp-from').value;
   config.smtp_tls = $('#set-smtp-tls').checked;
   config.reg_email_enabled = $('#set-reg-email-enabled').checked;

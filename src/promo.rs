@@ -217,14 +217,12 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             }
         }
         if step == 4 {
-            // 提现：A 元入充值账本（真正的发放点）
+            // 提现：A 元入充值账本（真正的发放点）——走 credit() 保证
+            // balance/recharge_total/账本三者一致，与转盘余额奖品同口径
             if let Some(arr) = db.get_mut("users").and_then(|u| u.as_array_mut()) {
                 for u in arr.iter_mut() {
                     if util_str(u.get("id")) == uid {
-                        if let Some(o) = u.as_object_mut() {
-                            let cur = util::f64_or(o.get("balance"), 0.0);
-                            o.insert("balance".into(), json!(util::round6(cur + amount)));
-                        }
+                        crate::users::credit(u, "recharge", amount);
                         break;
                     }
                 }

@@ -872,6 +872,8 @@ fn cfg_without_secrets(cfg: &Value) -> Value {
     if let Some(o) = c.as_object_mut() {
         o.remove("admin_password_hash");
         o.remove("session_secret");
+        // SMTP 授权码同样不下发：前端留空=保持不变
+        o.remove("smtp_pass");
     }
     c
 }
@@ -898,6 +900,17 @@ fn apply_settings(db: &mut Value, incoming: &Value, applied: &mut i64) {
         }
     }
     for k in STR_SETTINGS {
+        // SMTP 授权码特殊：空值=保持不变（前端回显时不带密码，防止泄露与误存占位符）
+        if k.starts_with("smtp_pass") {
+            if let Some(Value::String(s)) = incoming.get(*k) {
+                let t = s.trim();
+                if !t.is_empty() {
+                    cfg.insert(k.to_string(), Value::from(t));
+                    *applied += 1;
+                }
+            }
+            continue;
+        }
         if let Some(Value::String(s)) = incoming.get(*k) {
             cfg.insert(k.to_string(), Value::from(s.trim()));
             *applied += 1;
