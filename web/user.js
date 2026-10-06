@@ -568,8 +568,11 @@ function openWheelDetail(w) {
     a0 += (p.percent ?? 0);
     const lbl = document.createElement('span');
     lbl.className = 'wheel-lbl';
-    lbl.textContent = (p.label || '').slice(0, 6);
-    lbl.style.transform = 'rotate(' + mid + 'deg) translateY(-66px)';
+    lbl.textContent = (p.label || '').slice(0, 8);
+    // 下半圈的标签旋转 180° 后再正向放置：文字永远保持可读方向
+    lbl.style.transform = (mid > 90 && mid < 270)
+      ? 'rotate(' + (mid + 180) + 'deg) translateY(99px) translateX(-50%)'
+      : 'rotate(' + mid + 'deg) translateY(-99px) translateX(-50%)';
     disc.appendChild(lbl);
   }
   // 奖项表：概率 = 展示权重占比（后端已按占比归一化）
@@ -753,13 +756,13 @@ function showPrizeModal(d, w, btn) {
     valid.textContent = '资金即时到账 · 可在「概览」查看明细';
   } else if (p.type === 'model_unlimited') {
     amt.innerHTML = esc(p.model || '-');
-    line.innerHTML = '<i class="bi bi-infinity"></i>体验卡 · 不限次数';
+    line.innerHTML = '<i class="bi bi-crosshair"></i>限定模型：' + esc(p.model || '-');
     valid.textContent = p.duration_hours > 0
-      ? '不限次数体验机会 · 限时 ' + p.duration_hours + ' 小时'
-      : '不限次数体验机会 · 长期有效';
+      ? '体验卡 · 不限次数，限时 ' + p.duration_hours + ' 小时'
+      : '体验卡 · 不限次数，长期有效';
   } else if (p.type === 'model_quota') {
     amt.innerHTML = (p.quota ?? 0) + ' <small>次</small>';
-    line.innerHTML = '<i class="bi bi-box-seam"></i>' + esc(p.model || '-') + ' · 专属额度';
+    line.innerHTML = '<i class="bi bi-crosshair"></i>限定模型：' + esc(p.model || '-');
     valid.textContent = p.duration_hours > 0
       ? '共计 ' + (p.quota ?? 0) + ' 次体验机会，限时 ' + p.duration_hours + ' 小时'
       : '共计 ' + (p.quota ?? 0) + ' 次体验机会，长期有效';
@@ -770,13 +773,10 @@ function showPrizeModal(d, w, btn) {
     valid.textContent = '感谢参与，再接再厉！';
   }
   $('#prize-title').textContent = won ? '「' + (p.label || '奖品') + '」领取成功' : '谢谢参与';
-  const costTxt = (cost.grant > 0 || cost.recharge > 0)
-    ? '本次消耗：赠金 ¥' + (cost.grant ?? 0).toFixed(4) + ' · 充值 ¥' + (cost.recharge ?? 0).toFixed(4)
-    : '本次抽奖免费';
   const subTail = (p.type === 'model_unlimited' || p.type === 'model_quota')
     ? 'Key 已发放至「奖品中心」。'
     : (won ? '已可使用。' : '');
-  $('#prize-sub').innerHTML = (won ? '<b>' + esc(p.label || '') + '</b> ' + subTail : '') + esc(costTxt);
+  $('#prize-sub').innerHTML = (won ? '<b>' + esc(p.label || '') + '</b> ' + subTail : '');
   // 中奖撒花
   card.querySelectorAll('.prize-confetti').forEach(x => x.remove());
   if (won) burstPrizeConfetti();
