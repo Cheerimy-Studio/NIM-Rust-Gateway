@@ -1225,6 +1225,7 @@ async function loadSettings() {
   $('#set-smtp-tls').checked = c.smtp_tls != null ? !!c.smtp_tls : true;
   $('#set-reg-email-enabled').checked = !!c.reg_email_enabled;
   $('#set-reg-email-regex').value = c.reg_email_regex || '';
+  $('#set-reg-email-error-msg').value = c.reg_email_error_msg || '';
 }
 
 function bindSettings() {
@@ -1249,6 +1250,7 @@ function bindSettings() {
   config.smtp_tls = $('#set-smtp-tls').checked;
   config.reg_email_enabled = $('#set-reg-email-enabled').checked;
   config.reg_email_regex = $('#set-reg-email-regex').value;
+  config.reg_email_error_msg = $('#set-reg-email-error-msg').value;
     await api('settings', {method: 'POST', json: {config}});
     toast('已保存'); loadSettings(); fillDocs();
   });

@@ -270,9 +270,12 @@ pub async fn register_send_code(ip: String, headers: &HeaderMap, body: Bytes) ->
     if !re_pat.is_empty() {
         if let Ok(re) = regex::Regex::new(&re_pat) {
             if !re.is_match(&email) {
+                let msg = util::str_or(cfgc.get("reg_email_error_msg"), "")
+                    .trim().to_string();
+                let msg = if msg.is_empty() { "该邮箱不在允许注册的范围内".to_string() } else { msg };
                 return (
                     StatusCode::BAD_REQUEST,
-                    axum::Json(json!({"error": {"message": "该邮箱不在允许注册的范围内"}})),
+                    axum::Json(json!({"error": {"message": msg}})),
                 )
                     .into_response();
             }
@@ -388,6 +391,17 @@ pub async fn forgot(headers: &HeaderMap, body: Bytes) -> Response {
         .and_then(|x| x.to_str().ok())
         .unwrap_or("127.0.0.1")
         .to_string();
+    // 先核验邮箱是否已注册：未注册直接明确报错（本产品为内部网关，不做防枚举）
+    let registered = store().load().get("users").and_then(|u| u.as_array()).map(|a| {
+        a.iter().any(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email))
+    }).unwrap_or(false);
+    if !registered {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "该邮箱未注册"}})),
+        )
+            .into_response();
+    }
     match users::reset_token_create(&email) {
         Some((token, _uid)) => {
             let link = format!("{}://{}/user?reset={}", proto, host, token);

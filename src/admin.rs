@@ -871,6 +871,7 @@ const STR_SETTINGS: &[&str] = &[
     "smtp_pass",
     "smtp_from",
     "reg_email_regex",
+    "reg_email_error_msg",
 ];
 const BOOL_SETTINGS: &[&str] = &[
     "log_enabled",
@@ -1004,6 +1005,19 @@ pub async fn settings_save(headers: &HeaderMap, body: Bytes) -> Response {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "请求体格式错误"}}))).into_response();
     };
     let incoming = body.get("config").cloned().unwrap_or(json!({}));
+    // 邮箱注册正则：保存前校验可编译，避免线上写出永远匹配失败的规则
+    if let Some(re_pat) = incoming.get("reg_email_regex").and_then(|v| v.as_str()) {
+        let t = re_pat.trim();
+        if !t.is_empty() {
+            if let Err(e) = regex::Regex::new(t) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": {"message": format!("邮箱正则无效: {e}")}})),
+                )
+                    .into_response();
+            }
+        }
+    }
     store().update(|db| {
         let mut applied = 0;
         apply_settings(db, &incoming, &mut applied);

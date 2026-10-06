@@ -543,9 +543,8 @@ function bindLoginTabs() {
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email})});
       const d = await res.json();
       if (!res.ok) { lgErr((d.error && d.error.message) || '发送失败'); return; }
-      showLoginTab('main');
       lgErr('');
-      toast(d.message || '重置邮件已发送');
+      toast(d.message || '重置邮件已发送，请查收邮箱');
     } catch (e) { lgErr('发送失败'); }
   };
   $('#reset-go').onclick = async () => {
