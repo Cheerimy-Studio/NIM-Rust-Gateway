@@ -135,13 +135,13 @@ pub async fn check_newer_tag() -> Result<Option<String>, String> {
     Ok(Some(tag))
 }
 
-/// 获取更新内容。Ok(None) = 已是最新版本。
-async fn fetch_payload() -> Result<Option<(Vec<u8>, String)>, String> {
+/// 获取更新内容。Ok(None) = 已是最新版本。第三项是来源 tag（显式更新源没有 tag，给空串）。
+async fn fetch_payload() -> Result<Option<(Vec<u8>, String, String)>, String> {
     // 1. 显式更新源：始终安装指向的内容
     if let Ok(u) = std::env::var("NGW_UPDATE_URL") {
         if !u.trim().is_empty() {
             let data = http_get_bytes(u.trim()).await?;
-            return Ok(Some((data, "更新完成".into())));
+            return Ok(Some((data, "更新完成".into(), String::new())));
         }
     }
     // 2. GitHub Releases 最新正式版
@@ -200,7 +200,7 @@ async fn fetch_payload() -> Result<Option<(Vec<u8>, String)>, String> {
         return Err(format!("Release {} 缺少 {} 平台的更新包", tag, want));
     };
     let data = http_get_bytes(&asset_url).await?;
-    Ok(Some((data, format!("已更新到 {}", tag))))
+    Ok(Some((data, format!("已更新到 {}", tag), tag)))
 }
 
 /// 在解包目录里找当前平台的二进制候选。
@@ -294,6 +294,32 @@ fn base_dir() -> PathBuf {
         })
 }
 
+/// 自动更新「已经装过的 tag」标记。
+///
+/// 版本比较拿的是 tag（如 v1.7.25）和 Cargo.toml 的 version：发版时忘了同步
+/// version，装完的二进制报告的仍是旧号，下一轮检查又判定「有新版本」→ 再下载、
+/// 再覆盖、再重启，无限循环。装成功就把 tag 记在盘上，下轮见到同一个 tag 就停手。
+fn applied_marker() -> PathBuf {
+    crate::store::data_dir().join("update_applied_tag")
+}
+
+/// 上一次成功安装的 tag；从未装过返回空串。
+pub fn applied_tag() -> String {
+    std::fs::read_to_string(applied_marker())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn mark_applied(tag: &str) {
+    let p = applied_marker();
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&p, tag) {
+        eprintln!("[update] 写入更新标记失败({}: {})，下轮可能重复检查同一版本", p.display(), e);
+    }
+}
+
 /// 拉取更新源 → 解包 → 校验平台二进制 → 备份 → 覆盖。任何一步失败都不动现有文件。
 pub async fn remote_update() -> (bool, String) {
     if UPDATE_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -305,7 +331,7 @@ pub async fn remote_update() -> (bool, String) {
 }
 
 async fn remote_update_inner() -> (bool, String) {
-    let (data, label) = match fetch_payload().await {
+    let (data, label, tag) = match fetch_payload().await {
         Err(msg) => return (false, msg),
         Ok(None) => {
             return (true, format!("已是最新版本 v{}", env!("CARGO_PKG_VERSION")));
@@ -382,6 +408,10 @@ async fn remote_update_inner() -> (bool, String) {
         let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
     }
     let _ = std::fs::remove_dir_all(&tmp);
+    // 装成功先落标记（重启有 2 秒延迟，这里同步写，赶在重启前）
+    if !tag.is_empty() {
+        mark_applied(&tag);
+    }
     // 先返回结果、随后自重启（与 Python 版的 2 秒延迟语义一致：由调用方先回响应）
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

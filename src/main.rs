@@ -574,8 +574,8 @@ async fn h_user_register_code(ConnectInfo(addr): ConnectInfo<SocketAddr>, header
     user_api::register_send_code(addr.ip().to_string(), &headers, body).await
 }
 
-async fn h_user_forgot(headers: HeaderMap, body: Bytes) -> Response {
-    user_api::forgot(&headers, body).await
+async fn h_user_forgot(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::forgot(addr.ip().to_string(), &headers, body).await
 }
 
 async fn h_user_reset_pw(body: Bytes) -> Response {
@@ -878,6 +878,16 @@ async fn update_auto_loop() {
         }
         match update::check_newer_tag().await {
             Ok(Some(tag)) => {
+                // 防循环重启：这个 tag 已经装过一次，装完二进制报告的版本号仍比它小
+                // （发版时忘了同步 Cargo.toml 的 version），再装一遍只会下载→覆盖→重启
+                // 无限循环，必须停手并把原因留到 stderr
+                if update::applied_tag() == tag {
+                    eprintln!(
+                        "[update] {} 已安装过但版本号仍落后于 tag（Cargo.toml 的 version 没随 tag 提升），跳过自动升级以免反复重启",
+                        tag
+                    );
+                    continue;
+                }
                 eprintln!("[update] 发现 {}，开始升级", tag);
                 let row = json!([
                     util::now_i(), "watch", "updater", "-", 200, 0,

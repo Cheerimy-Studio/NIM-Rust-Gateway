@@ -2049,7 +2049,7 @@ function showUserFinance(u, fd, dd) {
     const dg = r.dg ?? 0, dr = r.dr ?? 0;
     const cls = v => v > 0 ? 'text-success fw-semibold' : v < 0 ? 'text-danger fw-semibold' : 'text-muted';
     tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
-      + '<td class="small">' + (FUND_KINDS[r.kind] || r.kind) + '</td>'
+      + '<td class="small">' + esc(FUND_KINDS[r.kind] || r.kind) + '</td>'
       + '<td class="small ' + cls(dg) + '">' + (dg > 0 ? '+' : '') + dg.toFixed(4) + '</td>'
       + '<td class="small ' + cls(dr) + '">' + (dr > 0 ? '+' : '') + dr.toFixed(4) + '</td>'
       + '<td class="small text-muted">' + esc(r.note || '-') + '</td>';

@@ -75,6 +75,7 @@ function showLoginTab(tab) {
 
 function lgErr(msg) {
   const e = document.querySelector('#login-err');
+  if (!msg) { e.style.display = 'none'; return; }
   e.textContent = msg;
   e.style.display = 'block';
 }
@@ -612,8 +613,8 @@ function promoCard(ev, d) {
     '邀请 ' + st.t1 + ' 位好友，集齐 20 颗钻石兑换 ¥0.01（钻石 ' + st.diamonds + '/20）', 'p-claim1'));
   stages.push(stageRow(st.p2, st.p1 && st.eff_invited >= st.t1 * 2,
     '再邀请 ' + st.t1 + ' 位好友，集齐 20 枚金币再兑 ¥0.01（金币 ' + st.golds + '/20）', 'p-claim2'));
-  stages.push(stageRow(st.p3, st.p2 && st.eff_invited >= st.total,
-    '继续邀请满 ' + st.total + ' 位好友，提现审核加速中', null));
+  stages.push(stageRow(st.p3, st.p2 && st.p1 && st.eff_invited >= st.total,
+    '继续邀请满 ' + st.total + ' 位好友，提现审核加速中', 'p-claim3'));
   stages.push(stageRow(paid, st.p1 && st.p2 && st.p3,
     paid ? '¥' + ev.amount + ' 已到账充值余额！'
          : (st.trial ? '试玩模式：直接提现 ¥' + ev.amount + ' 到余额'
@@ -634,7 +635,7 @@ function promoCard(ev, d) {
     + '<div class="d-flex gap-2 my-3">' + creditChip + doublerChip + '</div>'
     + stages.join('')
     + '<div class="mt-3 mb-2 small" style="opacity:.9">你的专属邀请链接（好友注册即算你拉新）：</div>'
-    + '<div class="promo-link"><input readonly id="promo-link-input" value="' + esc(location.origin + '/user?' + st.link) + '">'
+    + '<div class="promo-link"><input readonly id="promo-link-input" value="' + esc(st.link_full || (location.origin + '/user' + st.link)) + '">'
     + '<button class="btn btn-light btn-sm fw-bold" id="promo-copy">复制</button></div>'
     + (friends ? '<div class="mt-3"><div class="small fw-bold mb-1">已拉好友</div>' + friends + '</div>' : '')
     + '<div class="mt-2"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘用次数抽奖 →</a></div>';
@@ -653,6 +654,7 @@ function promoCard(ev, d) {
   };
   bindClaim('#p-claim1', 1);
   bindClaim('#p-claim2', 2);
+  bindClaim('#p-claim3', 3);
   bindClaim('#p-claim4', 4);
   return card;
 }
@@ -783,7 +785,7 @@ function openWheelDetail(w) {
     const pct = p.percent ?? 0;
     const tr = document.createElement('tr');
     tr.innerHTML = '<td class="text-nowrap"><span class="type-chip ' + c.chip + ' me-2" style="width:12px">&nbsp;</span>' + esc(p.label) + '</td>'
-      + '<td class="small text-nowrap">' + (PRIZE_TYPE_NAMES[p.type] || p.type) + '</td>'
+      + '<td class="small text-nowrap">' + esc(PRIZE_TYPE_NAMES[p.type] || p.type) + '</td>'
       + '<td class="small" style="color:var(--mut)">' + prizeDesc(p) + '</td>'
       + '<td class="text-end text-nowrap"><div class="d-flex align-items-center justify-content-end gap-2">'
       + '<div class="prob-bar"><div class="prob-fill" style="width:' + pct + '%"></div></div>'
@@ -832,12 +834,14 @@ function confirmDraw(w, btn) {
   };
 }
 
-function doDraw(w, btn) {
+async function doDraw(w, btn) {
   drawing = true;
   btn.disabled = true;
   const disc = $('#wd-disc');
   const center = $('#wd-center');
   center.textContent = '…';
+  // 抽奖前刷新拉人活动状态：邀请次数以服务端为准，避免页面快照过期
+  PROMO = await api('promo').catch(() => PROMO);
   const useCredit = !!(PROMO && (PROMO.events || []).some(e => e.joined && e.draw_credits > 0));
   api('wheels/draw', {method: 'POST', json: {id: w.id, use_credit: useCredit}}).then(d => {
     // 落点算法：指针在正上方(0°)，把中奖格中心转到指针下（含格内 ±30% 抖动）

@@ -371,7 +371,16 @@ pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response 
 }
 
 /// 忘记密码：发重置邮件。body: {email}
-pub async fn forgot(headers: &HeaderMap, body: Bytes) -> Response {
+pub async fn forgot(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
+    // 与注册验证码共用每 IP 每分钟 1 次的发信配额：这条路径以前没有任何限流，
+    // 可以无限触发外发邮件，把 SMTP 配额打爆
+    if !crate::admin::code_rate_ok(&ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(json!({"error": {"message": "发送过于频繁，每分钟仅可发送一次"}})),
+        )
+            .into_response();
+    }
     let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let email = util::str_or(body_v.get("email"), "").trim().to_string();
     if email.is_empty() || !email.contains('@') {

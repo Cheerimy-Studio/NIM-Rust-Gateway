@@ -171,8 +171,14 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     let (t1, _t2, _per, gem_need, gold_need, total) = ladder(target);
     let mut out = my_status(event_id, uid);
     let mut ledger: Option<(f64, f64, String)> = None;
+    // 不满足条件时原来直接 return，前端拿到的 my_status 和成功时一模一样，
+    // 用户点了没反应、以为按钮坏了；这里把原因带出去
+    let mut deny: Option<String> = None;
     store().update(|db| {
-        let Some(m) = member_mut(db, event_id, uid) else { return; };
+        let Some(m) = member_mut(db, event_id, uid) else {
+            deny = Some("你还没有参加这个活动".into());
+            return;
+        };
         let invited = util::int_or(m.get("invited"), 0).min(target);
         let eff_invited = if trial { target } else { invited };
         let (p1, p2, p3, paid) = (
@@ -194,6 +200,25 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             _ => false,
         };
         if !can {
+            deny = Some(match step {
+                1 => format!(
+                    "还需邀请 {} 位好友才能领取（已邀请 {}）",
+                    (t1 - eff_invited).max(0),
+                    eff_invited
+                ),
+                2 => format!(
+                    "还需邀请 {} 位好友才能领取（已邀请 {}）",
+                    (t1 * 2 - eff_invited).max(0),
+                    eff_invited
+                ),
+                3 => format!(
+                    "还需邀请 {} 位好友才能领取（已邀请 {}）",
+                    (total - eff_invited).max(0),
+                    eff_invited
+                ),
+                4 => "请先领取前面阶段的奖励".into(),
+                _ => "阶段参数不正确".into(),
+            });
             return;
         }
         let Some(m) = member_mut(db, event_id, uid) else { return; };
@@ -233,6 +258,9 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             crate::users::fund_log(db, uid, "prize", dg, dr, &note);
         }
     });
+    if let Some(msg) = deny {
+        return Err(msg);
+    }
     out = my_status(event_id, uid);
     Ok(out)
 }
