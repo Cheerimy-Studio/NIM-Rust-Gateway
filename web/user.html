@@ -228,6 +228,59 @@ a{text-decoration:none}
 .promo-link input{flex:1;font-size:12px;background:#fff5e8;border-color:#ffd7a8;color:#8a5a2a}
 .promo-chip{display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid #ffd7a8;
   border-radius:999px;padding:4px 12px;font-size:12.5px;font-weight:700;color:#c05621}
+/* 分阶段解锁：已完成行 / 当前任务大卡 / 未解锁的「神秘奖励」 */
+.promo-in{animation:pgrow .45s cubic-bezier(.2,.8,.2,1) both}
+.promo-stage.done{background:#f0fdf4;border-color:#bbf7d0;box-shadow:none}
+.promo-stage.done .ic{background:#16a34a;color:#fff}
+.promo-stage.done .tx{color:#15803d;font-weight:700}
+.promo-tag{font-size:11px;font-weight:900;color:#16a34a;background:#dcfce7;border-radius:999px;padding:3px 9px;flex-shrink:0}
+.promo-task{position:relative;border-radius:16px;background:#fff;border:2px solid #ffb43a;overflow:hidden;
+  padding:16px 16px 14px;box-shadow:0 12px 30px rgba(200,80,20,.18);margin-bottom:10px}
+.promo-task::after{content:'';position:absolute;top:0;left:-60%;width:45%;height:100%;pointer-events:none;
+  background:linear-gradient(100deg,transparent,rgba(255,215,110,.5),transparent);
+  transform:skewX(-18deg);animation:psheen 3.6s ease-in-out 1.1s infinite}
+.promo-task.revealed{animation:ppop .75s cubic-bezier(.2,.9,.25,1.35) both}
+.promo-task-top{display:flex;align-items:center;gap:8px;margin-bottom:9px;position:relative;z-index:2}
+.promo-badge{font-size:11px;font-weight:900;letter-spacing:.5px;color:#fff;
+  background:linear-gradient(90deg,#ff8a3c,#e0452c);border-radius:999px;padding:3px 11px;
+  box-shadow:0 3px 9px rgba(224,69,44,.38)}
+.promo-task-name{font-size:12px;font-weight:800;color:#c05621}
+.promo-task-title{font-size:19px;font-weight:900;color:#2c1d10;line-height:1.32;position:relative;z-index:2}
+.promo-task-sub{font-size:12.5px;color:#8a6f57;margin-top:5px;position:relative;z-index:2}
+.promo-taskbar{height:10px;border-radius:999px;background:#f6eadb;overflow:hidden;margin:13px 0 9px;
+  box-shadow:inset 0 1px 3px rgba(0,0,0,.08);position:relative;z-index:2}
+.promo-taskbar>div{height:100%;border-radius:999px;background:linear-gradient(90deg,#ffd76e,#ff8a3c);
+  transition:width .8s cubic-bezier(.2,.8,.2,1);box-shadow:0 0 10px rgba(255,166,60,.55)}
+.promo-task-foot{display:flex;justify-content:space-between;gap:8px;font-size:12px;font-weight:700;
+  color:#9a7f66;position:relative;z-index:2}
+.promo-task-foot b{color:#c05621}
+.promo-task-btn{margin-top:13px;position:relative;z-index:2}
+.promo-claim{width:100%;padding:.62rem;border-radius:999px;font-weight:900;font-size:15px;
+  letter-spacing:.5px;animation:pglow 2s ease-in-out infinite}
+.promo-claim.is-wait{animation:none;background:#f3e7da;border-color:#f3e7da;color:#a79078;opacity:1}
+.promo-lock{display:flex;align-items:center;gap:12px;padding:13px 14px;border-radius:14px;
+  border:1.5px dashed #e9cfae;background:rgba(255,255,255,.62);margin-bottom:8px}
+.promo-lock-ic{width:34px;height:34px;border-radius:50%;background:#f7ecdf;color:#c0a184;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center}
+.promo-lock-tx{flex:1;min-width:0}
+.promo-lock-tx b{display:block;font-size:13.5px;color:#a58a72}
+.promo-lock-tx span{font-size:11.5px;color:#bda58f}
+.promo-lock-q{font-weight:900;font-size:17px;letter-spacing:3px;color:#dcc4a8;filter:blur(.5px)}
+.promo-success{display:flex;align-items:center;gap:13px;padding:16px;border-radius:16px;margin-bottom:10px;
+  background:linear-gradient(135deg,#dcfce7,#bbf7d0);border:2px solid #34d399;color:#14532d}
+.promo-success-ic{font-size:30px;line-height:1}
+.promo-success b{font-size:17px}
+.promo-success div{font-size:13px;opacity:.85}
+.promo-confetti{position:absolute;width:8px;height:13px;border-radius:2px;opacity:0;z-index:6;
+  animation:pconf 1.35s ease-out .05s both;pointer-events:none}
+@keyframes pgrow{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
+@keyframes ppop{0%{opacity:0;transform:scale(.78) translateY(26px)}
+  55%{opacity:1;transform:scale(1.05) translateY(0)}100%{transform:scale(1)}}
+@keyframes psheen{0%{left:-60%}55%,100%{left:135%}}
+@keyframes pglow{0%,100%{box-shadow:0 0 0 0 rgba(255,138,60,.55)}70%{box-shadow:0 0 0 13px rgba(255,138,60,0)}}
+/* 卡面要作为彩带爆开的定位容器 */
+.promo-hero{position:relative}
+.promo-success.revealed{animation:ppop .75s cubic-bezier(.2,.9,.25,1.35) both}
 .lg-tab{display:flex;justify-content:center;gap:14px;margin-bottom:14px;font-size:13px}
 .lg-tab a{color:#98a3b8;text-decoration:none;padding:2px 2px}
 .lg-tab a.on{color:#10b981;font-weight:700;border-bottom:2px solid #10b981}
@@ -499,7 +552,7 @@ a{text-decoration:none}
   </div>
 </div>
 
-<div class="pane" id="pane-promo" style="display:none">
+<div class="pane" id="pane-promo">
   <h2 class="pane-title">拉人活动</h2>
   <div id="promo-body"></div>
 </div>

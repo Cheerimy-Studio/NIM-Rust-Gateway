@@ -483,7 +483,11 @@ pub async fn promo_overview(headers: &HeaderMap) -> Response {
                 o.insert("amount".into(), e.get("amount").cloned().unwrap_or(json!(0)));
                 o.insert("target".into(), e.get("target").cloned().unwrap_or(json!(1)));
                 o.insert("enabled".into(), e.get("enabled").cloned().unwrap_or(json!(false)));
-                o.insert("expires_at".into(), e.get("expires_at").cloned().unwrap_or(json!(0)));
+                // 到期时间取两侧较大者：管理端给 0 时不能把 my_status 里的真实值
+                // 覆盖成 0，否则前端剩余天数永远算成 0
+                let exp = util::int_or(e.get("expires_at"), 0)
+                    .max(util::int_or(o.get("expires_at"), 0));
+                o.insert("expires_at".into(), json!(exp));
             }
             mine
         })

@@ -1,12 +1,16 @@
 //! 拉人活动（拼多多式）：管理员只设「提现金额 + 拉人次数」，阶梯自动计算。
 //! 活动固定 7 天有效期（到点即止，不可重开）；允许多活动并行。
-//! 阶梯（自动方案，target=T, amount=A）：
-//!   阶段0  注册进活动：进度条直接显示已集 A-0.01（离目标仅差 0.01）
-//!   阶段1  还差 0.01 元 → 需 20 钻石：每拉 t1 人得 4 钻，集 20 钻兑换 +0.01
-//!   阶段2  又差 0.01 元 → 需 20 金币：每拉 t1 人得 4 金币，集 20 金币兑换 +0.01
-//!   阶段3  审核加速中：拉满剩余人数（至 T）→ 提现 A 元入充值账本
-//!   其中 t1 = ceil(T/5)；翻倍卡：每拉 5 人额外 +1 张（抽奖余额奖品翻倍一次）
+//! 进度按「已完成阶段数 / 4」算：collected = A * done / 4，刚加入时就是 0/A，
+//! 不再造 A-0.01 之类的假进度（那会让用户以为只差 1 分钱就能提现）。
+//! 阶梯（自动方案，target=T, amount=A），t1 = ceil(T/5)：
+//!   阶段1  邀请满 t1 人 → 领取（进度到 A/4）
+//!   阶段2  邀请满 min(2*t1, T) 人 → 领取（进度到 A/2）；min 是 T=1 时的
+//!          兜底，否则 2*t1=2 > T=1，永远凑不齐
+//!   阶段3  邀请满 T 人 → 领取，解锁提现
+//!   阶段4  提现 A 元入充值账本
+//!   翻倍卡：每拉 5 人额外 +1 张（抽奖余额奖品翻倍一次）
 //!   每拉 1 人 +1 次抽奖（抽奖时可抵扣单次消耗）
+//! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」。
 //! 试玩模式：加入即视为拉满，全流程免拉人走通（管理员体验用）。
 
 use crate::store::store;
@@ -192,9 +196,12 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             util::int_or(m.get("golds"), 0),
         );
         // 判定阶段（基于拷贝的字段，避免借用冲突）
+        // 阶段2 的门槛夹在 total 内：invited 被 target 截断，target=1 时
+        // t1*2=2 永远达不到，用户会卡死在阶段 2 提不了现
+        let step2_need = (t1 * 2).min(total);
         let can = match step {
             1 => !p1 && eff_invited >= t1,
-            2 => !p2 && p1 && eff_invited >= t1 * 2,
+            2 => !p2 && p1 && eff_invited >= step2_need,
             3 => !p3 && p2 && p1 && eff_invited >= total,
             4 => !paid && p1 && p2 && p3,
             _ => false,
@@ -208,7 +215,7 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
                 ),
                 2 => format!(
                     "还需邀请 {} 位好友才能领取（已邀请 {}）",
-                    (t1 * 2 - eff_invited).max(0),
+                    (step2_need - eff_invited).max(0),
                     eff_invited
                 ),
                 3 => format!(
@@ -379,8 +386,12 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
         m.get("p3").map(util::truthy).unwrap_or(false),
         m.get("paid").map(util::truthy).unwrap_or(false),
     );
-    let collected = (amount - 0.03 + if paid { 0.03 } else { 0.01 * (p1 as i64 + p2 as i64 + p3 as i64) as f64 })
-        .clamp(0.0, amount);
+    // 进度按「已完成阶段数」推：旧公式 amount-0.03+0.01*阶段 会让刚加入的用户
+    // 直接显示 1.47/1.50、还差 0.03，看着像马上就能提现，实际一步没走
+    let done_steps = (p1 as i64) + (p2 as i64) + (p3 as i64) + (paid as i64);
+    let collected = (amount * done_steps as f64 / 4.0).clamp(0.0, amount);
+    // 阶段2 的门槛不能超过总拉人数，否则 target=1 时永远凑不齐（invited 被 target 截断）
+    let step2_need = (t1 * 2).min(total);
     // 邀请链接
     let link = format!("?inv={}.{}", event_id, uid);
     json!({
@@ -392,6 +403,7 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
         "eff_invited": eff,
         "trial": trial,
         "t1": t1,
+        "step2_need": step2_need,
         "collected": util::round6(collected),
         "remain": util::round6((amount - collected).max(0.0)),
         "diamonds": util::int_or(m.get("diamonds"), 0),
@@ -440,6 +452,8 @@ pub fn admin_list() -> Vec<Value> {
                 .map(|a| a.iter().filter(|h| util_str(h.get("event_id")) == id).count())
                 .unwrap_or(0);
             let exp = util::int_or(e.get("expires_at"), 0);
+            // 剩余天数向上取整：向下取整会让「还剩 20 小时」显示成 0 天
+            let left_secs = (exp - now).max(0);
             json!({
                 "id": id,
                 "name": util_str(e.get("name")),
@@ -448,7 +462,10 @@ pub fn admin_list() -> Vec<Value> {
                 "trial": e.get("trial").map(util::truthy).unwrap_or(false),
                 "enabled": e.get("enabled").map(util::truthy).unwrap_or(false),
                 "expired": expired(e),
-                "left_days": ((exp - now).max(0) / 86400),
+                // promo_overview 拿这里的 expires_at 拼用户侧倒计时，
+                // 漏掉这个字段会让前端拿到兜底的 0 → 永远显示「剩余 0 天」
+                "expires_at": exp,
+                "left_days": (left_secs + 86399) / 86400,
                 "members": members,
                 "invites": invites,
                 "created_at": util::int_or(e.get("created_at"), 0),

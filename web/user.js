@@ -579,20 +579,63 @@ async function loadPromo() {
   for (const ev of evs) {
     box.appendChild(promoCard(ev, d));
   }
+  // 领取成功后的「揭晓」动画：新解锁的那一步弹出 + 从卡面撒彩带
+  const rev = window.__promoReveal;
+  window.__promoReveal = null;
+  if (rev && rev.id) {
+    const hero = box.querySelector('.promo-hero[data-evh="' + rev.id + '"]');
+    if (hero) {
+      const el = hero.querySelector('.promo-task') || hero.querySelector('.promo-success');
+      if (el) el.classList.add('revealed');
+      burstInto(hero, 26);
+    }
+  }
 }
+
+// 剩余时间文案：永远不出现光秃秃的「0 天」
+function promoLeftText(exp) {
+  exp = exp || 0;
+  if (exp <= 0) return '长期有效';
+  const left = exp - Date.now() / 1000;
+  if (left <= 0) return '活动已结束';
+  if (left < 86400) return '今天结束';
+  return '剩余 ' + Math.ceil(left / 86400) + ' 天';
+}
+
+// 通用彩带爆开：复用 .promo-confetti 的 pconf 位移动画
+function burstInto(el, n) {
+  const colors = ['#f59e0b', '#3b82f6', '#10b981', '#f97316', '#a78bfa', '#ef4444', '#fbbf24', '#f472b6'];
+  for (let i = 0; i < n; i++) {
+    const c = document.createElement('span');
+    c.className = 'promo-confetti';
+    c.style.background = colors[i % colors.length];
+    const ang = (Math.random() * 2 - 1) * Math.PI;
+    const dist = 70 + Math.random() * 150;
+    c.style.setProperty('--dx', Math.cos(ang) * dist + 'px');
+    c.style.setProperty('--dy', (Math.abs(Math.sin(ang)) * -140 - 30) + 'px');
+    c.style.left = (20 + Math.random() * 60) + '%';
+    c.style.top = (35 + Math.random() * 45) + '%';
+    el.appendChild(c);
+    setTimeout(() => c.remove(), 2200);
+  }
+}
+
+// 四个阶段按钮的固定 id（promo_funnel.py 断言依赖这些字面量）
+const PROMO_CLAIM_IDS = ['p-claim1', 'p-claim2', 'p-claim3', 'p-claim4'];
 
 function promoCard(ev, d) {
   const card = document.createElement('div');
   card.className = 'promo-hero mb-4';
+  card.setAttribute('data-evh', ev.id || '');
   const st = ev.joined ? ev : null;
-  const leftDays = Math.max(0, Math.ceil((ev.expires_at - Date.now() / 1000) / 86400));
+  const leftTxt = promoLeftText(st ? st.expires_at : ev.expires_at);
   if (!st || !st.joined) {
     card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-2">'
       + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
       + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
       + '</div>'
       + '<div class="mb-2">邀请好友注册，赢 <b>¥' + ev.amount + '</b> 余额！</div>'
-      + '<div class="small mb-3" style="opacity:.85">活动目标：邀请 ' + ev.target + ' 位好友 · 剩余 ' + leftDays + ' 天</div>'
+      + '<div class="small mb-3" style="opacity:.85">活动目标：邀请 ' + ev.target + ' 位好友 · ' + leftTxt + '</div>'
       + '<button class="pbtn primary" id="promo-join">立即参与</button>';
     card.querySelector('#promo-join').onclick = () => run(async () => {
       await api('promo/join', {method: 'POST', json: {id: ev.id}});
@@ -601,61 +644,132 @@ function promoCard(ev, d) {
     });
     return card;
   }
+
   const pct = ev.amount > 0 ? Math.min(100, Math.round(st.collected / ev.amount * 100)) : 0;
-  const paid = st.paid;
-  const stages = [];
-  const stageRow = (done, ok, label, btnId) =>
-    '<div class="promo-stage' + (done ? ' done' : '') + '"><div class="ic">' + (done ? '✓' : (ok ? '→' : '·')) + '</div>'
-    + '<div class="tx">' + label + '</div>'
-    + (btnId && ok && !done ? '<button class="btn btn-sm btn-warning fw-bold" id="' + btnId + '">领取</button>' : '')
-    + '</div>';
-  stages.push(stageRow(st.p1, st.eff_invited >= st.t1,
-    '邀请 ' + st.t1 + ' 位好友，集齐 20 颗钻石兑换 ¥0.01（钻石 ' + st.diamonds + '/20）', 'p-claim1'));
-  stages.push(stageRow(st.p2, st.p1 && st.eff_invited >= st.t1 * 2,
-    '再邀请 ' + st.t1 + ' 位好友，集齐 20 枚金币再兑 ¥0.01（金币 ' + st.golds + '/20）', 'p-claim2'));
-  stages.push(stageRow(st.p3, st.p2 && st.p1 && st.eff_invited >= st.total,
-    '继续邀请满 ' + st.total + ' 位好友，提现审核加速中', 'p-claim3'));
-  stages.push(stageRow(paid, st.p1 && st.p2 && st.p3,
-    paid ? '¥' + ev.amount + ' 已到账充值余额！'
-         : (st.trial ? '试玩模式：直接提现 ¥' + ev.amount + ' 到余额'
-                     : '拉满 ' + st.total + ' 人，' + ev.amount + ' 元立即到账'),
-    'p-claim4'));
-  const doublerChip = st.doubler > 0 ? '<span class="promo-chip"><i class="bi bi-stack"></i>翻倍卡 × ' + st.doubler + '</span>' : '';
-  const creditChip = st.draw_credits > 0 ? '<span class="promo-chip"><i class="bi bi-ticket-perforated"></i>抽奖次数 × ' + st.draw_credits + '</span>' : '';
+  const paid = !!st.paid;
+  const eff = st.eff_invited || 0;
+  const money = ev.amount || 0;
+  const t1 = Math.max(1, st.t1 || 1);
+  const total = Math.max(1, st.total || ev.target || 1);
+  const step2 = Math.max(t1, Math.min(st.step2_need || t1 * 2, total));
+  // 各阶段的人数门槛：第 4 步（提现）不看人数，只看前三步是否领过
+  const needs = [t1, step2, total, total];
+  const flags = [!!st.p1, !!st.p2, !!st.p3, paid];
+  const can = [
+    eff >= needs[0],
+    flags[0] && eff >= needs[1],
+    flags[0] && flags[1] && eff >= needs[2],
+    flags[0] && flags[1] && flags[2],
+  ];
+  // 拼多多式分阶段解锁：只展示「当前这一步」，后面的一律打码
+  const cur = flags.indexOf(false);
+  const at = i => (money * (i + 1) / 4).toFixed(2);
+  // target=1 时 t1=step2_need=total=1，四阶段人数门槛全相等，
+  // 直接算差值会得到「再邀 0 位好友」——门槛没涨就改用累计说法
+  const d12 = needs[1] - needs[0];
+  const TASKS = [
+    {badge: '第 1 步', name: '初见礼', title: '邀请 ' + needs[0] + ' 位好友',
+     sub: '好友注册即计入 · 完成后进度到 ¥' + at(0)},
+    {badge: '第 2 步', name: '进阶礼',
+     title: d12 > 0 ? '再邀 ' + d12 + ' 位好友' : '累计邀满 ' + needs[1] + ' 位好友',
+     sub: '好友注册即计入 · 完成后进度到 ¥' + at(1)},
+    {badge: '第 3 步', name: '冲刺礼', title: '累计邀满 ' + needs[2] + ' 位好友',
+     sub: '完成最后冲刺 · 解锁提现资格'},
+    {badge: '最后一步', name: '提现', title: '提现 ¥' + money.toFixed(2),
+     sub: st.trial ? '试玩模式 · 余额立刻可用' : '一步到账 · 充值余额立刻可用'},
+  ];
+  const stepProg = i => {
+    if (i === 3) return money > 0 ? Math.max(0, Math.min(1, st.collected / money)) : 0;
+    const prev = i === 0 ? 0 : needs[i - 1];
+    const span = needs[i] - prev;
+    if (span <= 0) return eff >= needs[i] ? 1 : 0;
+    return Math.max(0, Math.min(1, (eff - prev) / span));
+  };
+
+  let html = '';
+  const doneN = paid ? 4 : cur;
+  for (let i = 0; i < doneN; i++) {
+    html += '<div class="promo-stage done"><div class="ic">✓</div>'
+      + '<div class="tx">' + TASKS[i].badge + ' · ' + TASKS[i].title + '</div>'
+      + '<span class="promo-tag">已完成</span></div>';
+  }
+  if (paid) {
+    html += '<div class="promo-success" data-ev="' + esc(ev.id) + '">'
+      + '<div class="promo-success-ic">🎉</div>'
+      + '<div><b>¥' + money.toFixed(2) + ' 已到账！</b>'
+      + '<div>充值余额已入账，可在「概览 · 我的钱包」查看</div></div></div>';
+  } else if (cur >= 0) {
+    const p = Math.round(stepProg(cur) * 100);
+    const waitTxt = cur < 3
+      ? '还差 ' + Math.max(0, needs[cur] - eff) + ' 位好友'
+      : '请先领取前面的奖励';
+    const foot = cur < 3
+      ? '<span>已邀请 <b>' + eff + '</b> / ' + needs[cur] + ' 人</span>'
+      : '<span>前三阶段全部完成</span>';
+    html += '<div class="promo-task promo-in" data-ev="' + esc(ev.id) + '">'
+      + '<div class="promo-task-top"><span class="promo-badge">' + TASKS[cur].badge + '</span>'
+      + '<span class="promo-task-name">' + TASKS[cur].name + '</span></div>'
+      + '<div class="promo-task-title">' + TASKS[cur].title + '</div>'
+      + '<div class="promo-task-sub">' + TASKS[cur].sub + '</div>'
+      + '<div class="promo-taskbar"><div style="width:' + p + '%"></div></div>'
+      + '<div class="promo-task-foot">' + foot + '<b>' + p + '%</b></div>'
+      + '<div class="promo-task-btn">'
+      + (can[cur]
+        ? '<button class="btn btn-warning promo-claim" id="' + PROMO_CLAIM_IDS[cur] + '">🎉 立即领取</button>'
+        : '<button class="btn promo-claim is-wait" disabled>' + waitTxt + '</button>')
+      + '</div></div>';
+  }
+
+  html += '<div class="small mb-1 mt-3" style="opacity:.85">你的专属邀请链接（好友注册即算你拉新）：</div>'
+    + '<div class="promo-link"><input readonly id="promo-link-input" value="'
+    + esc(st.link_full || (location.origin + '/user' + st.link)) + '">'
+    + '<button class="btn btn-light btn-sm fw-bold" id="promo-copy">复制</button></div>';
+
+  if (cur >= 0) {
+    for (let i = cur + 1; i < 4; i++) {
+      html += '<div class="promo-lock promo-in" style="animation-delay:' + (0.08 * (i - cur)) + 's">'
+        + '<div class="promo-lock-ic"><i class="bi bi-lock-fill"></i></div>'
+        + '<div class="promo-lock-tx"><b>神秘奖励</b><span>完成当前任务后自动解锁</span></div>'
+        + '<div class="promo-lock-q">???</div></div>';
+    }
+  }
+
+  const chips = [];
+  if (st.draw_credits > 0) chips.push('<span class="promo-chip"><i class="bi bi-ticket-perforated"></i>抽奖次数 × ' + st.draw_credits + '</span>');
+  if (st.doubler > 0) chips.push('<span class="promo-chip"><i class="bi bi-stack"></i>翻倍卡 × ' + st.doubler + '</span>');
+  if (st.diamonds > 0) chips.push('<span class="promo-chip"><i class="bi bi-gem"></i>钻石 ' + st.diamonds + '/' + (st.gem_need || 20) + '</span>');
+  if (st.golds > 0) chips.push('<span class="promo-chip"><i class="bi bi-coin"></i>金币 ' + st.golds + '/' + (st.gold_need || 20) + '</span>');
+  if (chips.length) html += '<div class="d-flex gap-2 flex-wrap my-3">' + chips.join('') + '</div>';
+
   const friends = (st.friends || []).slice(0, 8).map(f =>
-    '<div class="small text-muted">' + esc(f.invitee) + '</div>').join('');
+    '<div class="small" style="opacity:.8">' + esc(f.invitee) + '</div>').join('');
+  if (friends) html += '<div class="mt-3"><div class="small fw-bold mb-1">已拉好友</div>' + friends + '</div>';
+  html += '<div class="mt-2"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘用次数抽奖 →</a></div>';
+
   card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-1">'
     + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
     + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
     + '</div>'
-    + '<div class="small mb-2" style="opacity:.9">剩余 ' + leftDays + ' 天 · 已邀请 <b>' + st.invited + '</b> / ' + ev.target + ' 人</div>'
-    + '<div class="promo-amount">¥' + st.collected.toFixed(2) + '<small> / ' + ev.amount.toFixed(2) + '</small></div>'
+    + '<div class="small mb-2" style="opacity:.9">' + leftTxt + ' · 已邀请 <b>' + st.invited + '</b> / ' + ev.target + ' 人</div>'
+    + '<div class="promo-amount">¥' + st.collected.toFixed(2) + '<small> / ' + money.toFixed(2) + '</small></div>'
     + '<div class="promo-bar my-2"><div style="width:' + pct + '%"></div></div>'
     + '<div class="promo-gap">' + (paid ? '已成功提现，余额已到账！' : '还差 <b>¥' + st.remain.toFixed(2) + '</b> 即可提现') + '</div>'
-    + '<div class="d-flex gap-2 my-3">' + creditChip + doublerChip + '</div>'
-    + stages.join('')
-    + '<div class="mt-3 mb-2 small" style="opacity:.9">你的专属邀请链接（好友注册即算你拉新）：</div>'
-    + '<div class="promo-link"><input readonly id="promo-link-input" value="' + esc(st.link_full || (location.origin + '/user' + st.link)) + '">'
-    + '<button class="btn btn-light btn-sm fw-bold" id="promo-copy">复制</button></div>'
-    + (friends ? '<div class="mt-3"><div class="small fw-bold mb-1">已拉好友</div>' + friends + '</div>' : '')
-    + '<div class="mt-2"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘用次数抽奖 →</a></div>';
-  card.querySelector('#promo-copy').onclick = () => copyText(card.querySelector('#promo-link-input').value)
+    + html;
+
+  const cp = card.querySelector('#promo-copy');
+  if (cp) cp.onclick = () => copyText(card.querySelector('#promo-link-input').value)
     .then(ok => toast(ok ? '邀请链接已复制' : '复制失败'));
-  card.querySelector('#promo-goto-wheel').onclick = () => {
-    document.querySelector('a[data-p="wheel"]').click();
-  };
-  const bindClaim = (id, step) => {
-    const b = card.querySelector(id);
+  const gw = card.querySelector('#promo-goto-wheel');
+  if (gw) gw.onclick = () => document.querySelector('a[data-p="wheel"]').click();
+  if (cur >= 0) {
+    const b = card.querySelector('#' + PROMO_CLAIM_IDS[cur]);
     if (b) b.onclick = () => run(async () => {
-      await api('promo/claim', {method: 'POST', json: {id: ev.id, step: step}});
-      toast('领取成功');
+      await api('promo/claim', {method: 'POST', json: {id: ev.id, step: cur + 1}});
+      window.__promoReveal = {step: cur + 1, id: ev.id};
+      toast('领取成功！');
       loadPromo();
     });
-  };
-  bindClaim('#p-claim1', 1);
-  bindClaim('#p-claim2', 2);
-  bindClaim('#p-claim3', 3);
-  bindClaim('#p-claim4', 4);
+  }
   return card;
 }
 
