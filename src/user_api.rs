@@ -328,6 +328,13 @@ pub async fn keys_add(headers: &HeaderMap, body: Bytes) -> Response {
     let name = util::str_or(body.get("name"), "");
     let kind = util::str_or(body.get("kind"), "all");
     let row = users::add_key_kind(&uid, &name, &kind);
+    if row.get("error").is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": util::str_or(row.get("error"), "创建失败")}})),
+        )
+            .into_response();
+    }
     json_resp(json!({"ok": true, "key": row}))
 }
 

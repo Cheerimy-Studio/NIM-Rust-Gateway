@@ -539,19 +539,28 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                     "content": if joined.is_empty() { Value::Null } else { Value::from(joined) },
                     "tool_calls": tool_calls,
                 }));
+            }
+            // OpenAI 契约：tool 消息必须紧跟其 assistant(tool_calls) 消息。
+            // Anthropic 客户端常把 tool_result 和后续文本放在同一条 user 消息里，
+            // 这里必须先压 tool 再压文本，否则严格上游（OpenAI/vLLM）直接 400
+            if !tool_results.is_empty() {
+                for tr in &tool_results {
+                    messages.push(
+                        json!({
+                            "role": "tool",
+                            "tool_call_id": tr.get("tool_call_id"),
+                            "content": tr.get("content"),
+                        }),
+                    );
+                }
+                // 同一条 user 消息里的尾部文本仍有意义：作为独立的 user 转发
+                if !text_parts.is_empty() && tool_calls.is_empty() {
+                    messages.push(json!({"role": role, "content": text_parts.concat()}));
+                }
             } else if let Some(ref multi) = multi {
                 messages.push(json!({"role": role, "content": multi}));
             } else if !text_parts.is_empty() {
                 messages.push(json!({"role": role, "content": text_parts.concat()}));
-            }
-            for tr in &tool_results {
-                messages.push(
-                    json!({
-                        "role": "tool",
-                        "tool_call_id": tr.get("tool_call_id"),
-                        "content": tr.get("content"),
-                    }),
-                );
             }
             if text_parts.is_empty() && multi.is_none() && tool_calls.is_empty() && tool_results.is_empty() {
                 messages.push(json!({"role": role, "content": ""}));

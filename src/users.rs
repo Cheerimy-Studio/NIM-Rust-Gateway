@@ -260,11 +260,10 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                 _ => err = "未知操作".into(),
             }
         });
-        // 删用户时同步清掉资金流水/抽奖记录/奖品 Key，避免孤儿数据堆积
+        // 删用户时清掉抽奖记录/奖品 Key（活跃凭据），但【保留资金流水】：
+        // 欠款与充值记录是财务凭据，删除用户不应抹掉审计轨迹
+        // （fund_logs 每用户上限 500 条，孤儿数据无害）
         if ok && op == "delete" {
-            if let Some(a) = db.get_mut("fund_logs").and_then(|l| l.as_array_mut()) {
-                a.retain(|r| util::str_or(r.get("user_id"), "") != user_id);
-            }
             if let Some(a) = db.get_mut("draw_logs").and_then(|l| l.as_array_mut()) {
                 a.retain(|r| util::str_or(r.get("user_id"), "") != user_id);
             }
@@ -394,6 +393,17 @@ pub fn add_key_kind(user_id: &str, name: &str, kind: &str) -> Value {
         "free" | "paid" => kind,
         _ => "all",
     };
+    // 数量上限：防止脚本化滥建 Key 撑大 users 组（含停用的合计）
+    const MAX_KEYS_PER_USER: usize = 20;
+    let count = store()
+        .load()
+        .get("user_tokens")
+        .and_then(|t| t.as_array())
+        .map(|a| a.iter().filter(|t| util::str_or(t.get("user_id"), "") == user_id).count())
+        .unwrap_or(0);
+    if count >= MAX_KEYS_PER_USER {
+        return json!({"error": "每个用户最多 20 个 Key，请先删除不用的"});
+    }
     let key = format!("{}{}", user_key_prefix(), util::rand_hex(20));
     let row = json!({
         "id": format!("ut_{}", util::rand_hex(5)),
@@ -574,6 +584,9 @@ pub fn fund_log(db: &mut Value, user_id: &str, kind: &str, dg: f64, dr: f64, not
         None => return,
     };
     let arr = obj.entry("fund_logs").or_insert_with(|| Value::Array(vec![]));
+    // +0.0 归一化负零：round6(0.0) 在扣减路径可能产生 -0.0，序列化后前端显示 "-0.0000"
+    let dg = util::round6(dg) + 0.0;
+    let dr = util::round6(dr) + 0.0;
     if let Some(a) = arr.as_array_mut() {
         a.insert(
             0,
@@ -581,8 +594,8 @@ pub fn fund_log(db: &mut Value, user_id: &str, kind: &str, dg: f64, dr: f64, not
                 "t": util::now_i(),
                 "user_id": user_id,
                 "kind": kind,
-                "dg": util::round6(dg),
-                "dr": util::round6(dr),
+                "dg": dg,
+                "dr": dr,
                 "note": util::str_cut(note, 60),
             }),
         );
@@ -666,9 +679,11 @@ fn ensure_money_fields(u: &mut Value) {
 
 /// 签到记录存储：data/db/signs/ 下每天一个文件 sign_YYYY-MM-DD.json（按天分片，
 /// 只存当天记录；过期文件可整删）。注意：仅允许在 store().update() 闭包内调用。
-pub fn sign_store_set(day: &str, user_id: &str, amount: f64) {
+pub fn sign_store_set(day: &str, user_id: &str, amount: f64) -> bool {
     let dir = crate::store::signs_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
     let f = dir.join(format!("sign_{}.json", day));
     let mut doc: Value = std::fs::read_to_string(&f)
         .ok()
@@ -677,9 +692,12 @@ pub fn sign_store_set(day: &str, user_id: &str, amount: f64) {
     if let Some(o) = doc.as_object_mut() {
         o.insert(user_id.to_string(), json!(util::round6(amount)));
     }
+    // 写盘失败（磁盘满/权限）必须让调用方放弃入账：否则签到记录缺失，
+    // 用户可以反复签到重复领奖
     let tmp = f.with_extension("json.tmp");
-    if std::fs::write(&tmp, serde_json::to_string(&doc).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(&tmp, &f);
+    match std::fs::write(&tmp, serde_json::to_string(&doc).unwrap_or_default()) {
+        Ok(()) => std::fs::rename(&tmp, &f).is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -729,10 +747,10 @@ pub fn sign_today(uid: &str) -> (bool, String, f64) {
                 ok = true;
             }
         });
-        // 只有真的入了账才记流水与签到记录（用户行消失时不留孤儿数据）
-        if ok {
+        // 先落签到记录（写盘失败 → 不入账不放流水，用户可重试；
+        // 记录成功而 credit 只在 memo 的情况：崩溃丢失一次签到额，可接受）
+        if ok && sign_store_set(&day, uid, amount) {
             fund_log(db, uid, "sign", amount, 0.0, "每日签到");
-            sign_store_set(&day, uid, amount);
             credited = true;
         }
     });

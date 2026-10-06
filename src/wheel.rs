@@ -277,15 +277,15 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
         return (false, json!({"error": {"message": "活动未开启"}}));
     }
     let cost = crate::util::f64_or(w.get("cost"), 0.0);
-    let Some(prize) = pick_prize(&w) else {
+    let Some(mut prize) = pick_prize(&w) else {
         return (false, json!({"error": {"message": "活动奖品配置无效"}}));
     };
-    let ptype = util_str(prize.get("type"));
-    let amount = crate::util::round6(crate::util::f64_or(prize.get("amount"), 0.0));
-    let model = util_str(prize.get("model"));
-    let hours = crate::util::f64_or(prize.get("duration_hours"), 0.0);
-    let quota = crate::util::round6(crate::util::f64_or(prize.get("quota"), 0.0));
-    let concurrency = crate::util::int_or(prize.get("concurrency"), 1).clamp(1, 64);
+    let mut ptype = util_str(prize.get("type"));
+    let mut amount = crate::util::round6(crate::util::f64_or(prize.get("amount"), 0.0));
+    let mut model = util_str(prize.get("model"));
+    let mut hours = crate::util::f64_or(prize.get("duration_hours"), 0.0);
+    let mut quota = crate::util::round6(crate::util::f64_or(prize.get("quota"), 0.0));
+    let mut concurrency = crate::util::int_or(prize.get("concurrency"), 1).clamp(1, 64);
     // 奖品配置预校验：余额类必须为正金额，Key 类必须有模型（避免扣费后发不出奖）
     if matches!(ptype.as_str(), "recharge" | "grant") && amount <= 0.0 {
         return (false, json!({"error": {"message": "奖品未配置有效金额"}}));
@@ -297,12 +297,12 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
     let key = new_prize_key();
     let pk_id = format!("pk_{}", crate::util::rand_hex(5));
     // Key 类奖品（体验卡/专属额度）都支持时长：填了小时数即到期失效
-    let expires_at = if matches!(ptype.as_str(), "model_unlimited" | "model_quota") && hours > 0.0 {
+    let mut expires_at = if matches!(ptype.as_str(), "model_unlimited" | "model_quota") && hours > 0.0 {
         now + (hours * 3600.0) as i64
     } else {
         0
     };
-    let log = json!({
+    let mut log = json!({
         "t": now,
         "user_id": uid,
         "wheel_id": util_str(w.get("id")),
@@ -323,6 +323,7 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
         };
         // 0) 临界区内复验转盘状态：预读与扣费之间转盘可能被停用/改价，
         //    沿用过期快照会按旧价扣费发旧奖。状态有变则本次拒绝（未扣费）。
+        let mut w_now_val = Value::Null;
         {
             let w_now = obj
                 .get("wheels")
@@ -340,6 +341,47 @@ pub fn draw(uid: &str, wheel_id: &str) -> (bool, Value) {
                 err = "活动配置已变化，请重试".into();
                 return;
             }
+            w_now_val = w_now.clone();
+            // 以最新配置重选奖品（管理员可能刚改过奖品金额/类型），并回写外部
+            // 变量：扣费、发奖、日志、响应全部以临界区内选中的为准
+            let Some(pz) = pick_prize(&w_now_val) else {
+                err = "活动奖品配置无效".into();
+                return;
+            };
+            let pt = util_str(pz.get("type"));
+            let am = crate::util::round6(crate::util::f64_or(pz.get("amount"), 0.0));
+            let md = util_str(pz.get("model"));
+            if matches!(pt.as_str(), "recharge" | "grant") && am <= 0.0 {
+                err = "奖品未配置有效金额".into();
+                return;
+            }
+            if matches!(pt.as_str(), "model_unlimited" | "model_quota") && md.is_empty() {
+                err = "奖品未配置模型".into();
+                return;
+            }
+            prize = pz.clone();
+            ptype = pt;
+            amount = am;
+            model = md;
+            hours = crate::util::f64_or(pz.get("duration_hours"), 0.0);
+            quota = crate::util::round6(crate::util::f64_or(pz.get("quota"), 0.0));
+            concurrency = crate::util::int_or(pz.get("concurrency"), 1).clamp(1, 64);
+            expires_at = if matches!(ptype.as_str(), "model_unlimited" | "model_quota") && hours > 0.0 {
+                now + (hours * 3600.0) as i64
+            } else {
+                0
+            };
+            // 日志重建（prize_id/label 以最新选中为准）
+            log = json!({
+                "t": now,
+                "user_id": uid,
+                "wheel_id": util_str(w_now_val.get("id")),
+                "wheel_name": util_str(w_now_val.get("name")),
+                "prize_id": util_str(prize.get("id")),
+                "label": util_str(prize.get("label")),
+                "type": ptype,
+                "cost": crate::util::round6(cost),
+            });
         }
         // 1) 找用户并扣费（优先赠金）
         {

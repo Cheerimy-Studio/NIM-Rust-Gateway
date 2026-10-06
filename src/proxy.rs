@@ -1179,10 +1179,20 @@ impl Drop for HoldGuard {
 /// 奖品 Key 并发位守卫：Drop 时释放（断连/panic 也安全）。
 struct PrizeGuard {
     key: String,
+    released: bool,
+}
+impl PrizeGuard {
+    /// 释放责任移交通知（流式 pump 接管后调用）：奖品 Key 并发占位必须
+    /// 覆盖整个流式生成期，而不是处理函数返回（首帧交接）时就释放
+    fn handoff(&mut self) {
+        self.released = true;
+    }
 }
 impl Drop for PrizeGuard {
     fn drop(&mut self) {
-        crate::wheel::prize_key_release(&self.key);
+        if !self.released {
+            crate::wheel::prize_key_release(&self.key);
+        }
     }
 }
 
@@ -1211,7 +1221,9 @@ fn split_incomplete_utf8(carry: &mut Vec<u8>, chunk: &[u8]) -> Vec<u8> {
 }
 
 fn money_of(u: &Value) -> f64 {
-    util::f64_or(u.get("balance"), 0.0)
+    // 统一走可用总额（赠金 + 充值）：福利体系下赠金同样可用于付费模型预检，
+    // 与 debit_bill 的扣减顺序（先赠金后充值）保持一致
+    crate::users::balance_of(u)
 }
 
 /// 多用户计费上下文：Some((用户id, Key id)) 表示本次调用来自用户 Key。
@@ -1251,6 +1263,7 @@ pub struct StreamCtx {
     pub capture_train: bool,
     pub user: Option<(String, String)>, // (用户id, Key id) —— 成功后计费
     pub prize_key: Option<String>, // 奖品 Key（专属额度计次）
+    pub prize_metered: bool, // 该奖品 Key 是否计次（quota>0）；不限次卡不计 used
     // 客户端原始请求声明了 stream_options.include_usage（与每次尝试的上游体无关：
     // 400 自愈剥离 stream_options 后仍需为客户端合成 usage 尾帧）
     pub want_usage: bool,
@@ -1264,6 +1277,7 @@ async fn run_pump(
     first_chunk: Option<Bytes>,
     ctx: StreamCtx,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    prize_guard: Option<PrizeGuard>,
 ) {
     let idle_to = util::cfg_int(&cfg_all(), "sse_idle_timeout", 0) as f64;
     let byte_limit = if ctx.ttfb_deadline > 0.0 {
@@ -1302,6 +1316,9 @@ async fn run_pump(
     };
     let mut saw_usage = false;
     let mut usage_done = false;
+    // 心跳帧只能落在 SSE 行界上：否则会拼进上游未完成的 JSON 行，客户端解析必炸。
+    // 转换模式由状态机产出完整事件，恒视为行界
+    let mut at_line = is_convert;
     let mut conv_resp: Option<ResponsesStream> = None;
     let mut conv_anth: Option<AnthropicStream> = None;
     if ctx.protocol.as_deref() == Some("responses") {
@@ -1349,7 +1366,9 @@ async fn run_pump(
         } else if ctx.rewrite || want_usage {
             // 与主循环同路径：改名/usage 扫描对首帧同样生效（单帧小回复也含 DONE）
             buf.extend_from_slice(&fc);
+            at_line = buf.is_empty();
         } else {
+            at_line = fc.last() == Some(&b'\n');
             emit_bytes!(fc);
         }
     }
@@ -1374,11 +1393,14 @@ async fn run_pump(
                     }
                     break;
                 }
-                let frame = match &ctx.protocol {
-                    Some(p) => protocol_keepalive(p),
-                    None => keepalive_frame(&ctx.ep_tag, &ctx.model, false),
-                };
-                emit_bytes!(frame);
+                // 仅在行界注入；buf 残留半行时跳过本次保活（下个上游块到达后自然续上）
+                if at_line || is_convert {
+                    let frame = match &ctx.protocol {
+                        Some(p) => protocol_keepalive(p),
+                        None => keepalive_frame(&ctx.ep_tag, &ctx.model, false),
+                    };
+                    emit_bytes!(frame);
+                }
                 continue;
             }
             Ok(Err(e)) => {
@@ -1431,6 +1453,7 @@ async fn run_pump(
                         } else {
                             seg
                         };
+                        at_line = seg.last() == Some(&b'\n');
                         emit_bytes!(Bytes::from(seg));
                     }
                     continue;
@@ -1468,6 +1491,7 @@ async fn run_pump(
         } else {
             0
         };
+        at_line = b.last() == Some(&b'\n');
         emit_bytes!(Bytes::from(b));
     }
     // 收尾：先把残留在 carry 里的最后几字节（跨块截断的字符）喂给状态机，再做终端事件
@@ -1488,7 +1512,10 @@ async fn run_pump(
             if !pend.is_empty() {
                 emit_bytes!(Bytes::from(pend));
             }
-        } else if started {
+        } else {
+            // 无论是否已出首帧：200 已发出 + 心跳已下发的情况下，客户端手里只有
+            // 一条空流（无错误事件、无 [DONE]）会被严格客户端判成"空回复"而非
+            // "上游故障"——显式报错才是可诊断的收口
             emit_bytes!(sse_error_event(&truncated));
         }
     } else if !client_gone && is_convert {
@@ -1552,6 +1579,9 @@ async fn run_pump(
         "completion_tokens": util::estimate_output_tokens(out_bytes),
     });
     let st = if client_gone { 499 } else { ctx.status };
+    // 账号成败口径：上游故障（首字节/空闲超时、流中断）必须记失败——否则假死上游
+    // 永远"成功"被立即重排，冷却/封禁/熔断全部失灵；客户端断开不算上游的错
+    let success = client_gone || truncated.is_empty();
     let note = if client_gone {
         "客户端已断开".to_string()
     } else if !truncated.is_empty() {
@@ -1563,7 +1593,7 @@ async fn run_pump(
     };
     pool::arelease(
         util::str_or(key.get("id"), ""),
-        true,
+        success,
         st,
         note.clone(),
         Some(usage.clone()),
@@ -1592,7 +1622,9 @@ async fn run_pump(
             );
         }
         if let Some(pk) = &ctx.prize_key {
-            crate::wheel::prize_key_consume(pk);
+            if ctx.prize_metered {
+                crate::wheel::prize_key_consume(pk);
+            }
         }
     }
     // 训练资料：正常结束的流式对话全文（截断/断连的半截语料污染训练集，不要）
@@ -1617,9 +1649,15 @@ async fn run_pump(
 }
 
 /// 包装为 axum 响应：pump 在后台任务中运行。
-fn spawn_pump(resp: reqwest::Response, key: Value, first_chunk: Option<Bytes>, ctx: StreamCtx) -> Response {
+fn spawn_pump(
+    resp: reqwest::Response,
+    key: Value,
+    first_chunk: Option<Bytes>,
+    ctx: StreamCtx,
+    prize_guard: Option<PrizeGuard>,
+) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
-    tokio::spawn(run_pump(resp, key, first_chunk, ctx, tx));
+    tokio::spawn(run_pump(resp, key, first_chunk, ctx, tx, prize_guard));
     sse_body_response(rx)
 }
 
@@ -1690,9 +1728,15 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     }
     let body_text = String::from_utf8_lossy(&body_bytes).trim_start_matches('\u{feff}').to_string();
     // 客户端是否声明 include_usage（从原始客户端请求判定一次；后续尝试剥离
-    // stream_options 时该判定不受影响 —— 合成 usage 尾帧是给客户端的）
-    let client_wants_usage = body_text.contains("\"include_usage\":true")
-        || body_text.contains("\"include_usage\": true");
+    // stream_options 时该判定不受影响 —— 合成 usage 尾帧是给客户端的）。
+    // 用 JSON 解析判定，不靠子串匹配（手写客户端的空格/换行序列化会漏判）
+    let client_wants_usage = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/stream_options/include_usage")
+                .map(crate::util::truthy)
+        })
+        .unwrap_or(false);
     if body_text.len() > MAX_BODY {
         return error_resp(413, "请求体过大，上限 20MB", "invalid_request_error", None, false);
     }
@@ -1734,7 +1778,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 false,
             );
         }
-        prize_guard = Some(PrizeGuard { key: pc.key.clone() });
+        prize_guard = Some(PrizeGuard { key: pc.key.clone(), released: false });
     }
     // 多用户链路：Key 类型限制（免费/付费专用 Key）+ 余额预检 + 用户级每分钟限速
     if let Some(uc) = &user_ctx {
@@ -1921,7 +1965,9 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 fut, key, ctx, body, ep_tag, &model, &up_model, attempt, t0, tok, None, stream,
                 user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                 prize_ctx.as_ref().map(|p| p.key.clone()),
-                client_wants_usage,            ));
+                client_wants_usage,
+                prize_guard.take(),
+                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),            ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
             // 连接层异常，走统一的失败处理
@@ -2014,8 +2060,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                             && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                         user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                         prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
+                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                         want_usage: client_wants_usage,
                     },
+                    prize_guard.take(),
                 ));
             } else {
                 let text = first_chunk
@@ -2028,7 +2076,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     || (head.contains("\"error\"")
                         && ["thinking", "unsupported", "duplicate"].iter().any(|k| text.to_lowercase().contains(k)));
                 let is_empty = text.trim().is_empty();
-                if is_sse_error && !downgraded {
+                if is_sse_error && !downgraded && attempt < max_attempts {
                     downgraded = true;
                     rstatus = 400;
                     if convert::is_duplicate_field_error(&text, 400)
@@ -2075,8 +2123,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                                 && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                             user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                             prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
+                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                             want_usage: client_wants_usage,
                     },
+                        prize_guard.take(),
                     ));
                 }
             }
@@ -2090,10 +2140,15 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 // is_unsupported_param_error / 渠道耗尽等分类全依赖它。
                 // ZCode 等客户端恒走流式，这里漏读会让 400 自愈对流式完全失效。
                 // 空流（预读已判定）除外：读下去会阻塞到整段生成结束
-                match r.text().await {
-                    Ok(t) => rbody = t,
-                    Err(e) => {
+                let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                    Ok(Ok(t)) => rbody = t,
+                    Ok(Err(e)) => {
                         rerr = conn_reason(&e);
+                        rstatus = 0;
+                    }
+                    Err(_) => {
+                        rerr = "上游响应体读取超时".into();
                         rstatus = 0;
                     }
                 }
@@ -2102,10 +2157,15 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 drop(r);
             }
         } else {
-            match r.text().await {
-                Ok(t) => rbody = t,
-                Err(e) => {
+            let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                Ok(Ok(t)) => rbody = t,
+                Ok(Err(e)) => {
                     rerr = conn_reason(&e);
+                    rstatus = 0;
+                }
+                Err(_) => {
+                    rerr = "上游响应体读取超时".into();
                     rstatus = 0;
                 }
             }
@@ -2146,14 +2206,14 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         }
         // 400 参数类降级重试：必须在释放之前 continue —— 账号保持持有（INFLIGHT 计数正确），
         // 否则旧号已回池而重试仍在用，并发限额被绕过、最终释放记为 odd release
-        if rstatus == 400 && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
             if convert::strip_reasoning_from_messages(&mut req) {
                 reuse_key = Some(key.clone());
                 continue;
             }
         }
-        if rstatus == 400 && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
             downgraded = true;
             let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
             if convert::downgrade_thinking(&mut req, &up_model, &tdefs) {
@@ -2161,14 +2221,14 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 continue;
             }
         }
-        if rstatus == 400 && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
             if convert::coerce_all_types(&mut req) {
                 reuse_key = Some(key.clone());
                 continue;
             }
         }
-        if rstatus == 400 && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
             if convert::strip_unsupported_params(&mut req, &rbody) {
                 reuse_key = Some(key.clone());
@@ -2384,6 +2444,8 @@ fn slow_start_response(
     user: Option<(String, String)>,
     prize_key: Option<String>,
     want_usage: bool,
+    prize_guard: Option<PrizeGuard>,
+    prize_metered: bool,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     let ep2 = ep_tag.to_string();
@@ -2493,8 +2555,9 @@ fn slow_start_response(
             user,
             prize_key,
             want_usage,
+            prize_metered,
         };
-        run_pump(resp, key, None, sctx, tx).await;
+        run_pump(resp, key, None, sctx, tx, prize_guard).await;
     });
     sse_body_response(rx)
 }
@@ -2687,7 +2750,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 anthropic,
             );
         }
-        prize_guard = Some(PrizeGuard { key: pc.key.clone() });
+        prize_guard = Some(PrizeGuard { key: pc.key.clone(), released: false });
     }
     if let Some(uc) = &user_ctx {
         let Some(u) = crate::users::auth_user(&uc.id) else {
@@ -2867,6 +2930,8 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 Some(protocol.to_string()), stream,
                 user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                 prize_ctx.as_ref().map(|p| p.key.clone()),
+                false,
+                prize_guard.take(),
                 false,            ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
@@ -2950,8 +3015,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                             && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                         user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                         prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
+                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                             want_usage: false,
                     },
+                    prize_guard.take(),
                 ));
             } else {
                 let text = first_chunk
@@ -2963,7 +3030,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     || text.trim_start().starts_with("data: {\"error\"")
                     || (head.contains("\"error\"")
                         && ["thinking", "unsupported", "duplicate"].iter().any(|k| text.to_lowercase().contains(k)));
-                if is_sse_error && !downgraded {
+                if is_sse_error && !downgraded && attempt < max_attempts {
                     downgraded = true;
                     rstatus = 400;
                     rbody = text.clone();
@@ -3009,19 +3076,48 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                                 && util::cfg_int(&cfg, "training_log_max", 500) > 0,
                             user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                             prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
+                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                                 want_usage: false,
                     },
+                        prize_guard.take(),
                     ));
                 }
             }
         }
         if stream {
-            drop(r);
+            if (200..400).contains(&rstatus) {
+                // 2xx/3xx 流式在上方已交接透传：丢弃释放
+                drop(r);
+            } else if rbody.is_empty() && rerr != "上游返回空流" {
+                // 非 2xx 流式必须读错误体：400 自愈（重复字段/思考/反序列化/未知参数）
+                // 与渠道耗尽分类全依赖它——转换端点（/v1/responses、/v1/messages）
+                // 与 chat 直通同享自愈链路
+                let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                    Ok(Ok(t)) => rbody = t,
+                    Ok(Err(e)) => {
+                        rerr = conn_reason(&e);
+                        rstatus = 0;
+                    }
+                    Err(_) => {
+                        rerr = "上游响应体读取超时".into();
+                        rstatus = 0;
+                    }
+                }
+            } else {
+                // 首帧预读已捕获错误体或已判空流：丢弃连接即可
+                drop(r);
+            }
         } else {
-            match r.text().await {
-                Ok(t) => rbody = t,
-                Err(e) => {
+            let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                Ok(Ok(t)) => rbody = t,
+                Ok(Err(e)) => {
                     rerr = conn_reason(&e);
+                    rstatus = 0;
+                }
+                Err(_) => {
+                    rerr = "上游响应体读取超时".into();
                     rstatus = 0;
                 }
             }
@@ -3060,14 +3156,14 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             continue;
         }
         // 400 参数类降级重试：必须在释放之前 continue —— 账号保持持有（INFLIGHT 计数正确）
-        if rstatus == 400 && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::is_duplicate_field_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
             if convert::strip_reasoning_from_messages(&mut chat_req) {
                 reuse_key = Some(key.clone());
                 continue;
             }
         }
-        if rstatus == 400 && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
             downgraded = true;
             let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
             if convert::downgrade_thinking(&mut chat_req, &up_model, &tdefs) {
@@ -3075,14 +3171,14 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 continue;
             }
         }
-        if rstatus == 400 && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::is_deserialize_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
             if convert::coerce_all_types(&mut chat_req) {
                 reuse_key = Some(key.clone());
                 continue;
             }
         }
-        if rstatus == 400 && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
+        if rstatus == 400 && attempt < max_attempts && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
             if convert::strip_unsupported_params(&mut chat_req, &rbody) {
                 reuse_key = Some(key.clone());
