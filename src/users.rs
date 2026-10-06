@@ -760,6 +760,60 @@ pub fn sign_today(uid: &str) -> (bool, String, f64) {
 
 /// 邮箱注册。inv = 可选拉人归因（"<event_id>.<inviter_uid>"）。
 /// 返回 (用户行, 错误)。
+/// 生成并落库邮箱验证码（10 分钟有效；同邮箱 60 秒内只发一次）。返回 6 位数字码。
+pub fn email_code_create(email: &str) -> Result<String, String> {
+    let email = email.trim().to_lowercase();
+    let now = util::now_i();
+    let code = format!("{:06}", rand::Rng::gen_range::<i64, _>(&mut rand::thread_rng(), 0..1000000));
+    store().update(|db| {
+        let obj = db.as_object_mut().unwrap();
+        let m = obj.entry("email_codes").or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(o) = m.as_object_mut() {
+            // 60 秒重发间隔
+            if let Some(prev) = o.get(&email).and_then(|v| v.as_object()) {
+                let issued = util::int_or(prev.get("issued"), 0);
+                if now - issued < 60 {
+                    return;
+                }
+            }
+            o.insert(email.clone(), json!({"code": code, "exp": now + 600, "issued": now}));
+        }
+    });
+    // 回读（60s 间隔时返回已存在的码，保证与实际落库一致）
+    let got = store()
+        .load()
+        .pointer("/email_codes")
+        .and_then(|m| m.get(&email))
+        .map(|v| util::str_or(v.get("code"), ""))
+        .unwrap_or_default();
+    if got.is_empty() {
+        return Err("发送过于频繁，请 1 分钟后再试".into());
+    }
+    Ok(got)
+}
+
+/// 校验邮箱验证码（10 分钟有效，验证后即作废）。
+pub fn email_code_verify(email: &str, code: &str) -> bool {
+    let email = email.trim().to_lowercase();
+    let now = util::now_i();
+    let mut ok = false;
+    store().update(|db| {
+        if let Some(codes) = db.get_mut("email_codes").and_then(|v| v.as_object_mut()) {
+            if let Some(rec) = codes.get(&email) {
+                let exp = util::int_or(rec.get("exp"), 0);
+                let stored = util::str_or(rec.get("code"), "");
+                if exp > now && stored == code.trim() {
+                    ok = true;
+                }
+            }
+            if ok {
+                codes.remove(&email);
+            }
+        }
+    });
+    ok
+}
+
 pub fn email_register(email: &str, password: &str, inv: &str) -> (Option<Value>, String) {
     let email = email.trim().to_lowercase();
     if email.is_empty() || !email.contains('@') {

@@ -570,6 +570,10 @@ async fn h_user_register(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: He
     user_api::register(addr.ip().to_string(), &headers, body).await
 }
 
+async fn h_user_register_code(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::register_send_code(addr.ip().to_string(), &headers, body).await
+}
+
 async fn h_user_forgot(headers: HeaderMap, body: Bytes) -> Response {
     user_api::forgot(&headers, body).await
 }
@@ -1292,6 +1296,7 @@ fn build_router() -> Router {
     .route("/api/user/wheels", get(h_user_wheels))
     .route("/api/user/wheels/draw", post(h_user_wheels_draw))
     .route("/api/user/register", post(h_user_register))
+    .route("/api/user/register/send-code", post(h_user_register_code))
     .route("/api/user/forgot", post(h_user_forgot))
     .route("/api/user/reset", post(h_user_reset_pw))
     .route("/api/user/promo", get(h_user_promo))

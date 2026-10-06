@@ -495,11 +495,33 @@ function bindLoginTabs() {
   $('#back-login-1').onclick = () => showLoginTab('main');
   $('#back-login-2').onclick = () => showLoginTab('main');
   if (invFromUrl()) showLoginTab('register');
+  let codeLeft = 0;
+  const codeBtn = $('#reg-send');
+  setInterval(() => {
+    if (codeLeft > 0) { codeLeft--; codeBtn.textContent = codeLeft + 's'; codeBtn.disabled = true; }
+    else { codeBtn.textContent = '发送验证码'; codeBtn.disabled = false; }
+  }, 1000);
+  codeBtn.onclick = async () => {
+    const email = $('#reg-email').value.trim();
+    if (!email) { lgErr('请先输入邮箱'); return; }
+    codeBtn.disabled = true;
+    try {
+      const res = await fetch('api/user/register/send-code', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email})});
+      const d = await res.json();
+      if (!res.ok) { codeBtn.disabled = false; lgErr((d.error && d.error.message) || '发送失败'); return; }
+      codeLeft = 60;
+      lgErr('');
+      toast(d.message || '验证码已发送');
+    } catch (e) { codeBtn.disabled = false; lgErr('发送失败'); }
+  };
   $('#reg-go').onclick = async () => {
     const email = $('#reg-email').value.trim();
     const pass = $('#reg-pass').value;
+    const code = $('#reg-code').value.trim();
     if (!email || pass.length < 6) { lgErr('请输入邮箱和至少 6 位密码'); return; }
-    const body = {email: email, password: pass};
+    if (!code) { lgErr('请先获取并填写邮箱验证码'); return; }
+    const body = {email: email, password: pass, code: code};
     const inv = invFromUrl();
     if (inv) body.inv = inv;
     try {

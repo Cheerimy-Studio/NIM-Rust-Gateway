@@ -261,8 +261,14 @@ a{text-decoration:none}
     </div>
     <div id="login-tab-register" style="display:none">
       <div class="mb-3"><label class="form-label small fw-semibold">邮箱</label>
-        <input class="form-control" id="reg-email" autocomplete="email" placeholder="用于登录与找回密码"></div>
-      <div class="mb-3"><label class="form-label small fw-semibold">密码（至少 6 位）</label>
+        <input class="form-control" id="reg-email" autocomplete="email"></div>
+      <div class="mb-3"><label class="form-label small fw-semibold">验证码</label>
+        <div class="d-flex gap-2">
+          <input class="form-control" id="reg-code" inputmode="numeric" maxlength="6" placeholder="6 位数字">
+          <button class="btn btn-outline-secondary text-nowrap" id="reg-send" style="min-width:110px">发送验证码</button>
+        </div>
+      </div>
+      <div class="mb-3"><label class="form-label small fw-semibold">密码</label>
         <input class="form-control" id="reg-pass" type="password"></div>
       <button class="btn btn-primary" id="reg-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
         background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35)">注册并登录</button>

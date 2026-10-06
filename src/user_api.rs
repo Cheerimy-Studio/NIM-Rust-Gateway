@@ -244,6 +244,73 @@ pub async fn sign(headers: &HeaderMap) -> Response {
 /// 赠金/充值账本：当前与累计。
 // ---------------- 邮箱注册 / 找回密码（公开） ----------------
 
+/// 发送邮箱注册验证码。body: {email}
+pub async fn register_send_code(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
+    if !crate::admin::login_rate_ok(&(String::from("reg:") + &ip)) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试"}})),
+        )
+            .into_response();
+    }
+    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let email = util::str_or(body_v.get("email"), "").trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "请输入正确的邮箱地址"}})),
+        )
+            .into_response();
+    }
+    // 邮箱正则限制（后台配置）
+    let cfg = store().load();
+    let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
+    let re_pat = util::str_or(cfgc.get("reg_email_regex"), "");
+    if !re_pat.is_empty() {
+        if let Ok(re) = regex::Regex::new(&re_pat) {
+            if !re.is_match(&email) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": {"message": "该邮箱不在允许注册的范围内"}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    // 已注册邮箱不发码（避免骚扰）
+    if store().load().get("users").and_then(|u| u.as_array()).map(|a| {
+        a.iter().any(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email))
+    }).unwrap_or(false) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "该邮箱已注册，请直接登录或找回密码"}})),
+        )
+            .into_response();
+    }
+    let code = match crate::users::email_code_create(&email) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(json!({"error": {"message": e}})),
+            )
+                .into_response()
+        }
+    };
+    let body_mail = format!(
+        "欢迎注册言灵中转！\n\n您的邮箱验证码：{}（10 分钟内有效）\n\n若非本人操作请忽略本邮件。",
+        code
+    );
+    if let Err(e) = crate::mailer::send_mail(&email, "言灵中转 · 注册验证码", &body_mail).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": {"message": e}})),
+        )
+            .into_response();
+    }
+    json_resp(json!({"ok": true, "message": "验证码已发送，请在 10 分钟内完成注册"}))
+}
+
 /// 邮箱注册。body: {email, password, inv?}
 pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
     // 简单速率限制：复用登录失败限流（同一 IP）
@@ -255,9 +322,17 @@ pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response 
             .into_response();
     }
     let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let email = util::str_or(body_v.get("email"), "");
+    let email = util::str_or(body_v.get("email"), "").trim().to_lowercase();
     let password = util::str_or(body_v.get("password"), "");
     let inv = util::str_or(body_v.get("inv"), "");
+    let code = util::str_or(body_v.get("code"), "");
+    if !users::email_code_verify(&email, &code) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {"message": "验证码错误或已过期"}})),
+        )
+            .into_response();
+    }
     let (row, err) = users::email_register(&email, &password, &inv);
     if let Some(u) = row {
         // 注册即登录：种会话
