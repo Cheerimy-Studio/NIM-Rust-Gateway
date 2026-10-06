@@ -246,10 +246,11 @@ pub async fn sign(headers: &HeaderMap) -> Response {
 
 /// 发送邮箱注册验证码。body: {email}
 pub async fn register_send_code(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
-    if !crate::admin::login_rate_ok(&(String::from("reg:") + &ip)) {
+    // 每 IP 每分钟最多 1 次验证码（防短信/邮件轰炸）
+    if !crate::admin::code_rate_ok(&ip) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            axum::Json(json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试"}})),
+            axum::Json(json!({"error": {"message": "发送过于频繁，每分钟仅可发送一次"}})),
         )
             .into_response();
     }

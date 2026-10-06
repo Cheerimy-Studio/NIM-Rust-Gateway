@@ -75,6 +75,27 @@ pub(crate) fn login_rate_ok(ip: &str) -> bool {
     true
 }
 
+pub(crate) static CODE_RATE: Mutex<Option<Vec<(String, f64)>>> = Mutex::new(None);
+
+/// 验证码发送限流：每 IP 每分钟最多 1 次。
+pub(crate) fn code_rate_ok(ip: &str) -> bool {
+    let now = util::now_f();
+    let mut g = CODE_RATE.lock().unwrap();
+    let m = g.get_or_insert_with(Vec::new);
+    if let Some(pos) = m.iter().position(|(k, t)| *k == *ip) {
+        if now - m[pos].1 < 60.0 {
+            return false;
+        }
+        m[pos].1 = now;
+        return true;
+    }
+    m.push((ip.to_string(), now));
+    if m.len() > 5000 {
+        m.retain(|(_, t)| now - *t < 60.0);
+    }
+    true
+}
+
 pub(crate) fn login_rate_clear(ip: &str) {
     let mut g = LOGIN_RATE.lock().unwrap();
     if let Some(m) = g.as_mut() {
