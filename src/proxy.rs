@@ -1747,20 +1747,15 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         return error_resp(400, "请求体不是合法 JSON", "invalid_request_error", None, false);
     }
     let mut req = req0;
-    let model = util::str_or(req.get("model"), "");
+    let mut model = util::str_or(req.get("model"), "");
     let stream = req.get("stream").map(util::truthy).unwrap_or(false);
     let est = util::estimate_request_tokens(&body_text, Some(&req));
     let tok = util::str_or(entry.as_ref().and_then(|e| e.get("t")), "");
-    if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, false) {
-        return bad;
-    }
-    // 奖品 Key：模型锁定 + 并发占位（超限 429）。占位由 HoldGuard 式 Drop 释放。
-    let mut prize_guard: Option<PrizeGuard> = None;
+    // 奖品 Key：模型范围由奖品自身锁定。请求名与锁定名经别名互通即可放行，
+    // 并统一改写为锁定的规范名（路由/计费口径一致）；跳过通用 404 校验
+    // （锁定名可能是被隐藏的映射目标名，通用校验会误杀）
     if let Some(pc) = &prize_ctx {
-        let prize_ok = crate::wheel::lookup_prize_key(&pc.key)
-            .map(|row| crate::wheel::prize_key_allows_model(&row, &model))
-            .unwrap_or(false);
-        if !prize_ok {
+        if !crate::upstreams::models_alias_linked(&model, &pc.model) {
             return error_resp(
                 403,
                 &format!("该奖品 Key 仅限模型 {}，本次请求模型 {}", util::char_prefix(&pc.model, 80), util::char_prefix(&model, 80)),
@@ -1769,6 +1764,17 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 false,
             );
         }
+        if model != pc.model {
+            req["model"] = Value::from(pc.model.clone());
+            model = pc.model.clone();
+        }
+    } else if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, false) {
+        return bad;
+    }
+    // 奖品 Key：模型锁定 + 并发占位（超限 429）。占位由 HoldGuard 式 Drop 释放。
+    let mut prize_guard: Option<PrizeGuard> = None;
+    if let Some(pc) = &prize_ctx {
+        // 模型锁定已在入口统一校验/改写（别名互通口径）
         if !crate::wheel::prize_key_acquire(&pc.key, pc.concurrency) {
             return error_resp(
                 429,
@@ -2700,7 +2706,24 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     let Ok(mut chat_req) = chat_req_v else {
         return error_resp(400, &chat_req_v.unwrap_err(), "invalid_request_error", None, anthropic);
     };
-    let model = util::str_or(req.get("model"), "");
+    let mut model = util::str_or(req.get("model"), "");
+    // 奖品 Key：模型锁定口径与 chat 直通一致（别名互通 + 跳过通用 404）
+    if let Some(pc) = &prize_ctx {
+        if !crate::upstreams::models_alias_linked(&model, &pc.model) {
+            return error_resp(
+                403,
+                &format!("该奖品 Key 仅限模型 {}，本次请求模型 {}", util::char_prefix(&pc.model, 80), util::char_prefix(&model, 80)),
+                "invalid_request_error",
+                Some("prize_model_not_allowed"),
+                anthropic,
+            );
+        }
+        if model != pc.model {
+            req["model"] = Value::from(pc.model.clone());
+            chat_req["model"] = Value::from(pc.model.clone());
+            model = pc.model.clone();
+        }
+    }
     let stream = req.get("stream").map(util::truthy).unwrap_or(false);
     let est = util::estimate_request_tokens(&body_text, Some(&req));
     let reasoning_effort = {
@@ -2729,18 +2752,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     // 奖品 Key：模型锁定 + 并发占位
     let mut prize_guard: Option<PrizeGuard> = None;
     if let Some(pc) = &prize_ctx {
-        let prize_ok = crate::wheel::lookup_prize_key(&pc.key)
-            .map(|row| crate::wheel::prize_key_allows_model(&row, &model))
-            .unwrap_or(false);
-        if !prize_ok {
-            return error_resp(
-                403,
-                &format!("该奖品 Key 仅限模型 {}，本次请求模型 {}", util::char_prefix(&pc.model, 80), util::char_prefix(&model, 80)),
-                "invalid_request_error",
-                Some("prize_model_not_allowed"),
-                anthropic,
-            );
-        }
+        // 模型锁定已在入口统一校验/改写（别名互通口径）
         if !crate::wheel::prize_key_acquire(&pc.key, pc.concurrency) {
             return error_resp(
                 429,

@@ -442,6 +442,28 @@ pub fn apply_param_overrides(key: &Value, model: &str, body: &mut Value) {
     }
 }
 
+/// 两个模型名是否经由任一启用渠道的 model_map 互通（别名↔目标视为同一模型）。
+/// 奖品 Key/用户体验卡的模型锁定按此口径放行，避免"存目标名、调别名"被拒。
+pub fn models_alias_linked(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() || a == b {
+        return a == b;
+    }
+    for u in all_upstreams() {
+        if !u.get("enabled").map(|x| util::truthy(x)).unwrap_or(false) {
+            continue;
+        }
+        if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
+            for (alias, target) in mm {
+                let t = util::str_or(Some(target), "");
+                if (alias == a && t == b) || (alias == b && t == a) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn model_routable(model: &str, hide_mapped_global: bool) -> bool {
     let mut any_enabled = false;
     let db = store().load();

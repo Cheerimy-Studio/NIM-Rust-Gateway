@@ -516,11 +516,6 @@ pub fn balance_of(u: &Value) -> f64 {
     util::round6(grant_of(u) + recharge_of(u))
 }
 
-/// 「余额」判断统一走可用总额（余额预检、旧引用 money_of 的用户侧语义）。
-pub fn user_balance_value(u: &Value) -> f64 {
-    balance_of(u)
-}
-
 /// 用户「当前/总」信息（面板展示）。
 pub fn wallet_row(u: &Value) -> Value {
     json!({
