@@ -762,9 +762,10 @@ function promoCard(ev, d) {
   const money = ev.amount || 0;
   const t1 = Math.max(1, st.t1 || 1);
   const total = Math.max(1, st.total || ev.target || 1);
-  const step2 = Math.max(t1, Math.min(st.step2_need || t1 * 2, total));
-  // 各阶段的人数门槛：第 4 步（提现）不看人数，只看前三步是否领过
-  const needs = [t1, step2, total, total];
+  const step2 = Math.max(t1, Math.min(st.step2_need || Math.min(3, total), total));
+  const step3 = Math.max(step2, Math.min(st.step3_need || Math.min(7, total), total));
+  // 波次叠加曲线的累计门槛（1、3、7、T）：第 4 步提现也要拉满最后一波
+  const needs = [t1, step2, step3, total];
   const flags = [!!st.p1, !!st.p2, !!st.p3, paid];
   const can = [
     eff >= needs[0],
@@ -787,10 +788,9 @@ function promoCard(ev, d) {
     {badge: '第 3 步', name: '冲刺礼', title: '累计邀满 ??? 位好友',
      sub: '总人数保密 · 完成最后冲刺解锁提现资格'},
     {badge: '最后一步', name: '提现', title: '提现 ¥' + money.toFixed(2),
-     sub: st.trial ? '试玩模式 · 余额立刻可用' : '一步到账 · 充值余额立刻可用'},
+     sub: st.trial ? '试玩模式 · 余额立刻可用' : '最后一波 · 达成即刻提现到账'},
   ];
   const stepProg = i => {
-    if (i === 3) return money > 0 ? Math.max(0, Math.min(1, st.collected / money)) : 0;
     const prev = i === 0 ? 0 : needs[i - 1];
     const span = needs[i] - prev;
     if (span <= 0) return eff >= needs[i] ? 1 : 0;
@@ -820,10 +820,10 @@ function promoCard(ev, d) {
       + '<div>充值余额已入账，可在「概览 · 我的钱包」查看</div></div></div>';
   } else if (cur >= 0) {
     const p = Math.round(stepProg(cur) * 100);
-    // 冲刺阶段的差值和门槛不外露：eff + 差值 = 总人数，会把保密的 ??? 算出来
+    // 冲刺/提现阶段的差值和门槛不外露：eff + 差值 = 总人数，会把保密的 ??? 算出来
     const waitTxt = cur < 2
       ? '还差 ' + Math.max(0, needs[cur] - eff) + ' 位好友'
-      : (cur === 2 ? '继续邀请好友，解锁提现资格' : '请先领取前面的奖励');
+      : '继续邀请好友，解锁提现资格';
     const foot = cur < 2
       ? '<span>已邀请 <b>' + eff + '</b> / ' + needs[cur] + ' 人</span>'
       : '<span>已邀请 <b>' + eff + '</b> 人</span>';
@@ -853,7 +853,9 @@ function promoCard(ev, d) {
     + '<div class="promo-how-step"><span class="n">3</span><div><b>好友注册</b><span>进度秒到账</span></div></div>'
     + '</div>';
 
+  // 引导条与神秘奖励之间加一条带标签的分割线
   if (cur >= 0) {
+    html += '<div class="promo-sep"><span><i class="bi bi-gift"></i> 神秘奖励 · 一波比一波大</span></div>';
     for (let i = cur + 1; i < 4; i++) {
       html += '<div class="promo-lock promo-in" style="animation-delay:' + (0.08 * (i - cur)) + 's">'
         + '<div class="promo-lock-ic"><i class="bi bi-lock-fill"></i></div>'
@@ -886,6 +888,7 @@ function promoCard(ev, d) {
     + '<details class="promo-rules"><summary><i class="bi bi-info-circle"></i> 活动规则</summary><ul>'
     + '<li>活动自创建起 7 天有效，到期即止、不可重开；多个活动可同时参加。</li>'
     + '<li>好友通过你的链接注册成功即计入进度；每拉 1 人另 +1 次抽奖机会。</li>'
+    + '<li>邀请要求逐波翻倍（如 1、2、4、8），越往后越接近提现。</li>'
     + '<li>总共需要邀请的人数保密（???），随阶段推进逐步揭晓。</li>'
     + '<li>四个阶段全部完成后，奖励以「充值余额」一次性到账。</li>'
     + '</ul></details>';

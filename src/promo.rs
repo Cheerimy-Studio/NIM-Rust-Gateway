@@ -2,12 +2,13 @@
 //! 活动固定 7 天有效期（到点即止，不可重开）；允许多活动并行。
 //! 进度按「已完成阶段数 / 4」算：collected = A * done / 4，刚加入时就是 0/A，
 //! 不再造 A-0.01 之类的假进度（那会让用户以为只差 1 分钱就能提现）。
-//! 阶梯（自动方案，target=T, amount=A），t1 = ceil(T/5)：
-//!   阶段1  邀请满 t1 人 → 领取（进度到 A/4）
-//!   阶段2  邀请满 min(2*t1, T) 人 → 领取（进度到 A/2）；min 是 T=1 时的
-//!          兜底，否则 2*t1=2 > T=1，永远凑不齐
-//!   阶段3  邀请满 T 人 → 领取，解锁提现
-//!   阶段4  提现 A 元入充值账本
+//! 阶梯（波次叠加曲线，target=T）：
+//!   四波累计门槛 1、3、7、T（波次 1、2、4、其余），全夹在 T 内：
+//!   T=15 → 1/2/4/8；T=4 → 1/2/1/0（累计 1/3/4/4）；T=1 → 全为 1 不死锁
+//!   阶段1  累计满 1 人 → 领取（进度到 A/4）
+//!   阶段2  累计满 3 人 → 领取（进度到 A/2）
+//!   阶段3  累计满 7 人 → 领取，解锁最后一波
+//!   阶段4  累计满 T 人 → 提现 A 元入充值账本
 //!   每拉 1 人 +1 次抽奖（抽奖时可抵扣单次消耗）
 //!   邀请不再送翻倍卡（= 余额奖品等额翻倍的真实资金外流）；存量卡仍有效
 //! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」，
@@ -70,10 +71,18 @@ pub fn active_ok(e: &Value) -> bool {
 
 /// 阶梯参数（管理员只设 withdraw/target，这里自动推方案）
 pub fn ladder(target: i64) -> (i64, i64, i64, i64, i64, i64) {
-    // (t1宝石拉人数, t2金币拉人数, 每轮奖励个数=4, 宝石目标=20, 金币目标=20, 总拉人=target)
+    // (波1人数, 占位, 每轮奖励个数=4, 宝石目标=20, 金币目标=20, 总拉人=target)
     let t = target.max(1);
-    let t1 = ((t + 4) / 5).max(1);
+    let t1 = 1.min(t);
     (t1, t1, 4, 20, 20, t)
+}
+
+/// 四个阶段的累计人数门槛：邀请要求按波次叠加翻倍（波 1、2、4，其余归最后一波）。
+/// 例：target=15 → 累计 1、3、7、15，即四波分别 1、2、4、8 人。
+/// 小目标被 min 截平：target=4 → 累计 1、3、4、4；target=1 → 1、1、1、1。
+pub fn wave_thresholds(target: i64) -> (i64, i64, i64, i64) {
+    let t = target.max(1);
+    (1.min(t), 3.min(t), 7.min(t), t)
 }
 
 fn member_row(db: &mut Value, event_id: &str, uid: &str) -> Option<Value> {
@@ -226,34 +235,44 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             util::int_or(m.get("golds"), 0),
         );
         // 判定阶段（基于拷贝的字段，避免借用冲突）
-        // 阶段2 的门槛夹在 total 内：invited 被 target 截断，target=1 时
-        // t1*2=2 永远达不到，用户会卡死在阶段 2 提不了现
-        let step2_need = (t1 * 2).min(total);
+        // 门槛是波次叠加曲线（1、2、4、其余），全部夹在 total 内：
+        // target=1 时四波全为 1，不会出现永远凑不齐的死门槛
+        let (c1, c2, c3, c4) = wave_thresholds(total);
         let can = match step {
-            1 => !p1 && eff_invited >= t1,
-            2 => !p2 && p1 && eff_invited >= step2_need,
-            3 => !p3 && p2 && p1 && eff_invited >= total,
-            4 => !paid && p1 && p2 && p3,
+            1 => !p1 && eff_invited >= c1,
+            2 => !p2 && p1 && eff_invited >= c2,
+            3 => !p3 && p2 && p1 && eff_invited >= c3,
+            4 => !paid && p1 && p2 && p3 && eff_invited >= c4,
             _ => false,
         };
         if !can {
             deny = Some(match step {
                 1 => format!(
                     "还需邀请 {} 位好友才能领取（已邀请 {}）",
-                    (t1 - eff_invited).max(0),
+                    (c1 - eff_invited).max(0),
                     eff_invited
                 ),
                 2 => format!(
                     "还需邀请 {} 位好友才能领取（已邀请 {}）",
-                    (step2_need - eff_invited).max(0),
+                    (c2 - eff_invited).max(0),
                     eff_invited
                 ),
                 3 => format!(
                     "还需邀请 {} 位好友才能领取（已邀请 {}）",
-                    (total - eff_invited).max(0),
+                    (c3 - eff_invited).max(0),
                     eff_invited
                 ),
-                4 => "请先领取前面阶段的奖励".into(),
+                4 => {
+                    if p1 && p2 && p3 {
+                        format!(
+                            "还需邀请 {} 位好友才能提现（已邀请 {}）",
+                            (c4 - eff_invited).max(0),
+                            eff_invited
+                        )
+                    } else {
+                        "请先领取前面阶段的奖励".into()
+                    }
+                }
                 _ => "阶段参数不正确".into(),
             });
             return;
@@ -420,8 +439,8 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
     // 直接显示 1.47/1.50、还差 0.03，看着像马上就能提现，实际一步没走
     let done_steps = (p1 as i64) + (p2 as i64) + (p3 as i64) + (paid as i64);
     let collected = (amount * done_steps as f64 / 4.0).clamp(0.0, amount);
-    // 阶段2 的门槛不能超过总拉人数，否则 target=1 时永远凑不齐（invited 被 target 截断）
-    let step2_need = (t1 * 2).min(total);
+    // 波次叠加曲线的累计门槛（全部夹在 total 内，target=1 时全为 1 不死锁）
+    let (_c1, c2, c3, _c4) = wave_thresholds(total);
     // 邀请链接
     let link = format!("?inv={}.{}", event_id, uid);
     json!({
@@ -433,7 +452,8 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
         "eff_invited": eff,
         "trial": trial,
         "t1": t1,
-        "step2_need": step2_need,
+        "step2_need": c2,
+        "step3_need": c3,
         "collected": util::round6(collected),
         "remain": util::round6((amount - collected).max(0.0)),
         "diamonds": util::int_or(m.get("diamonds"), 0),

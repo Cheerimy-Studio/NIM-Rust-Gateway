@@ -298,6 +298,13 @@ a{text-decoration:none}
 .promo-how-step div span{display:block;font-size:11px;color:rgba(255,255,255,.75);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .promo-how-arrow{align-self:center;color:rgba(255,255,255,.55);font-size:11px;flex-shrink:0}
+/* 引导条与神秘奖励区的带标签分割线 */
+.promo-sep{display:flex;align-items:center;gap:12px;margin:18px 0 10px;
+  color:rgba(255,255,255,.75);font-size:11.5px;font-weight:800;letter-spacing:1px}
+.promo-sep::before,.promo-sep::after{content:'';flex:1;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.3),transparent)}
+.promo-sep span{display:flex;align-items:center;gap:5px;white-space:nowrap}
+.promo-sep .bi{font-size:12px}
 /* 窄屏改纵向排列，三步文字不再互相挤压 */
 @media (max-width: 575.98px){
   .promo-how{flex-direction:column}
