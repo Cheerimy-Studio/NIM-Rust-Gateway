@@ -331,6 +331,34 @@ a{text-decoration:none}
 .promo-lock:hover{border-color:#ffd7a8;background:rgba(255,255,255,.85)}
 .promo-lock-ic{transition:transform .25s ease}
 .promo-lock:hover .promo-lock-ic{transform:rotate(-12deg) scale(1.08)}
+/* 英雄卡氛围光斑（缓慢漂浮；不越出右/下边界，避免撑出滚动条） */
+.promo-hero::before{content:'';position:absolute;width:190px;height:190px;border-radius:50%;
+  top:-70px;right:0;pointer-events:none;animation:pfloat 7s ease-in-out infinite;
+  background:radial-gradient(circle,rgba(255,215,110,.38),transparent 65%)}
+.promo-hero::after{content:'';position:absolute;width:230px;height:230px;border-radius:50%;
+  bottom:0;left:0;pointer-events:none;animation:pfloat 9s ease-in-out 1.4s infinite reverse;
+  background:radial-gradient(circle,rgba(255,255,255,.14),transparent 60%)}
+@keyframes pfloat{0%,100%{transform:translate(0,0)}50%{transform:translate(16px,20px)}}
+/* 彩带/光斑不允许把页面撑出横向滚动（clip 不产生滚动容器） */
+body{overflow-x:clip}
+/* 进度条流光 */
+.promo-bar>div{position:relative;overflow:hidden}
+.promo-taskbar>div{position:relative;overflow:hidden}
+.promo-bar>div::after,.promo-taskbar>div::after{content:'';position:absolute;top:0;left:-45%;width:45%;height:100%;
+  background:linear-gradient(100deg,transparent,rgba(255,255,255,.45),transparent);
+  transform:skewX(-18deg);animation:pshine 2.8s ease-in-out infinite}
+@keyframes pshine{0%{left:-45%}60%,100%{left:135%}}
+/* 到账成功图标弹跳 */
+.promo-success-ic{animation:pspop .7s cubic-bezier(.2,.9,.3,1.5) both}
+@keyframes pspop{0%{transform:scale(0) rotate(-30deg)}60%{transform:scale(1.25) rotate(8deg)}100%{transform:scale(1) rotate(0)}}
+/* 空状态 */
+.promo-none-ic{font-size:46px;line-height:1;margin-bottom:10px;animation:pfloat 4.5s ease-in-out infinite}
+/* 奖励 chips 悬浮 + 好友头像字符 */
+.promo-chip{transition:transform .18s ease}
+.promo-chip:hover{transform:translateY(-2px)}
+.promo-friend .av{color:#fff;font-weight:800;font-size:11px}
+/* toast 圆角投影 */
+.toast{border-radius:12px !important;box-shadow:0 12px 32px rgba(0,0,0,.28) !important;font-weight:600}
 .lg-tab{display:flex;justify-content:center;gap:14px;margin-bottom:14px;font-size:13px}
 .lg-tab a{color:#98a3b8;text-decoration:none;padding:2px 2px}
 .lg-tab a.on{color:#10b981;font-weight:700;border-bottom:2px solid #10b981}
@@ -603,7 +631,9 @@ a{text-decoration:none}
 </div>
 
 <div class="pane" id="pane-promo">
-  <h2 class="pane-title">拉人活动</h2>
+  <h2 class="pane-title">拉人活动
+    <button class="btn btn-sm btn-outline-secondary ms-auto" id="promo-refresh" title="刷新活动进度"><i class="bi bi-arrow-clockwise"></i></button>
+  </h2>
   <div id="promo-body"></div>
 </div>
 

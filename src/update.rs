@@ -475,6 +475,10 @@ async fn remote_rollback_inner() -> (bool, String) {
         let _ = std::fs::copy(&bak_legacy, &legacy);
         let _ = std::fs::remove_file(&bak_legacy);
     }
+    // 磁盘数据已被换掉，内存 memo 还是回滚前的旧账：不立刻作废的话，
+    // 重启前这几秒里任何一次计费/写日志都会经 flush 把旧数据写回磁盘，
+    // 把刚恢复的数据再次覆盖（等于回滚白做）
+    crate::store::store().discard_memory();
     let _ = std::fs::remove_dir_all(&backup);
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

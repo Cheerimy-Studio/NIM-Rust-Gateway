@@ -1024,7 +1024,13 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
             hint = util::f64_or(b.get("left"), 0.0);
             queue::set_reason(&qid, &breaker_queue_reason(&b));
         }
-        let wait = if hint > 0.0 { hint } else { backoff }.max(poll);
+        let mut wait = if hint > 0.0 { hint } else { backoff }.max(poll);
+        // 睡眠截断到剩余 deadline：熔断剩余秒数可能远超 queue_max_wait
+        // （breaker_seconds 可配到小时级），不截断客户端会在超时上限之外干等
+        let remain = (deadline - Instant::now()).as_secs_f64();
+        if remain > 0.0 {
+            wait = wait.min(remain);
+        }
         // 关键：加上抖动，避免大量等待者同一时刻一起重试
         use rand::Rng;
         let jitter = 0.7 + rand::thread_rng().gen_range(0.0..0.6);
@@ -1432,7 +1438,11 @@ async fn run_pump(
         if ctx.rewrite || want_usage {
             buf.extend_from_slice(&b);
             match buf.iter().rposition(|&c| c == b'\n') {
-                None => continue,
+                None => {
+                    // 整块都压在半行里：不在行界，心跳不能插进未完结的 data: 行中间
+                    at_line = false;
+                    continue;
+                }
                 Some(cut) => {
                     let out = buf[..cut + 1].to_vec();
                     buf = buf[cut + 1..].to_vec();
@@ -1456,6 +1466,8 @@ async fn run_pump(
                         at_line = seg.last() == Some(&b'\n');
                         emit_bytes!(Bytes::from(seg));
                     }
+                    // 刷完完整行后 buf 里还剩半行的话，心跳同样不能插
+                    at_line = buf.is_empty();
                     continue;
                 }
             }
@@ -2077,10 +2089,26 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     .map(|c| String::from_utf8_lossy(c).to_string())
                     .unwrap_or_default();
                 let head = util::char_prefix(&text, 500);
+                // 第三分支不能对首块内容做 "error"+关键词 子串扫描：模型回复
+                // 开头聊到 {"error": "duplicate key"} 这类内容会被误判成上游
+                // 错误流，白白烧一次自愈尝试还把 200 流换成错误响应
+                let sse_err_payload = text
+                    .lines()
+                    .filter_map(|l| {
+                        let payload = l.trim().strip_prefix("data:")?.trim();
+                        if payload == "[DONE]" {
+                            return None;
+                        }
+                        serde_json::from_str::<serde_json::Value>(payload)
+                            .ok()?
+                            .get("error")
+                            .map(|_| true)
+                    })
+                    .next()
+                    .unwrap_or(false);
                 let is_sse_error = text.trim_start().starts_with("event: error")
                     || text.trim_start().starts_with("data: {\"error\"")
-                    || (head.contains("\"error\"")
-                        && ["thinking", "unsupported", "duplicate"].iter().any(|k| text.to_lowercase().contains(k)));
+                    || sse_err_payload;
                 let is_empty = text.trim().is_empty();
                 if is_sse_error && !downgraded && attempt < max_attempts {
                     downgraded = true;
@@ -2944,7 +2972,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 prize_ctx.as_ref().map(|p| p.key.clone()),
                 false,
                 prize_guard.take(),
-                false,            ));
+                // 计次必须跟 chat 端点同口径：写死 false 会让专属额度奖品 Key
+                // 走兜底流时 used 永不累加，额度上限形同虚设
+                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),            ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
             let ms = t0.elapsed().as_millis() as i64;
@@ -3038,10 +3068,26 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     .map(|c| String::from_utf8_lossy(c).to_string())
                     .unwrap_or_default();
                 let head = util::char_prefix(&text, 500);
+                // 第三分支不能对首块内容做 "error"+关键词 子串扫描：模型回复
+                // 开头聊到 {"error": "duplicate key"} 这类内容会被误判成上游
+                // 错误流，白白烧一次自愈尝试还把 200 流换成错误响应
+                let sse_err_payload = text
+                    .lines()
+                    .filter_map(|l| {
+                        let payload = l.trim().strip_prefix("data:")?.trim();
+                        if payload == "[DONE]" {
+                            return None;
+                        }
+                        serde_json::from_str::<serde_json::Value>(payload)
+                            .ok()?
+                            .get("error")
+                            .map(|_| true)
+                    })
+                    .next()
+                    .unwrap_or(false);
                 let is_sse_error = text.trim_start().starts_with("event: error")
                     || text.trim_start().starts_with("data: {\"error\"")
-                    || (head.contains("\"error\"")
-                        && ["thinking", "unsupported", "duplicate"].iter().any(|k| text.to_lowercase().contains(k)));
+                    || sse_err_payload;
                 if is_sse_error && !downgraded && attempt < max_attempts {
                     downgraded = true;
                     rstatus = 400;

@@ -393,17 +393,10 @@ pub fn add_key_kind(user_id: &str, name: &str, kind: &str) -> Value {
         "free" | "paid" => kind,
         _ => "all",
     };
-    // 数量上限：防止脚本化滥建 Key 撑大 users 组（含停用的合计）
+    // 数量上限：防止脚本化滥建 Key 撑大 users 组（含停用的合计）。
+    // 计数必须和插入在同一 update 闭包里：先 load 计数再 update 插入的话，
+    // 两个并发请求都能基于旧快照通过校验，上限被击穿
     const MAX_KEYS_PER_USER: usize = 20;
-    let count = store()
-        .load()
-        .get("user_tokens")
-        .and_then(|t| t.as_array())
-        .map(|a| a.iter().filter(|t| util::str_or(t.get("user_id"), "") == user_id).count())
-        .unwrap_or(0);
-    if count >= MAX_KEYS_PER_USER {
-        return json!({"error": "每个用户最多 20 个 Key，请先删除不用的"});
-    }
     let key = format!("{}{}", user_key_prefix(), util::rand_hex(20));
     let row = json!({
         "id": format!("ut_{}", util::rand_hex(5)),
@@ -415,13 +408,21 @@ pub fn add_key_kind(user_id: &str, name: &str, kind: &str) -> Value {
         "created_at": util::now_i(),
         "last_used_at": 0,
     });
+    let mut over_limit = false;
     store().update(|db| {
         let obj = db.as_object_mut().unwrap();
         let arr = obj.entry("user_tokens").or_insert_with(|| Value::Array(vec![]));
         if let Some(a) = arr.as_array_mut() {
+            if a.iter().filter(|t| util::str_or(t.get("user_id"), "") == user_id).count() >= MAX_KEYS_PER_USER {
+                over_limit = true;
+                return;
+            }
             a.push(row.clone());
         }
     });
+    if over_limit {
+        return json!({"error": "每个用户最多 20 个 Key，请先删除不用的"});
+    }
     row
 }
 
@@ -466,9 +467,14 @@ pub fn lookup_user_key(key: &str) -> Option<(Value, Value)> {
     }
     let db = store().load();
     let tokens = db.get("user_tokens").and_then(|t| t.as_array())?;
+    use subtle::ConstantTimeEq;
+    // API Key 本身就是秘密：比较走常量时间，与其余令牌口径一致
     let t = tokens
         .iter()
-        .find(|t| util::str_or(t.get("key"), "") == key && t.get("enabled").map(util::truthy).unwrap_or(false))?;
+        .find(|t| {
+            let matches: bool = util::str_or(t.get("key"), "").as_bytes().ct_eq(key.as_bytes()).into();
+            matches && t.get("enabled").map(util::truthy).unwrap_or(false)
+        })?;
     let user_id = util::str_or(t.get("user_id"), "");
     let u = auth_user(&user_id)?;
     Some((u, t.clone()))
@@ -729,11 +735,18 @@ pub fn sign_today(uid: &str) -> (bool, String, f64) {
     // 查重、入账、落签到记录必须在同一个串行化临界区（store 互斥锁）里完成：
     // 签到记录是独立文件，若在锁外查重/落盘，并发请求可重复领奖（先查后写的竞态）
     let mut already = false;
+    let mut missing = false;
     let mut credited = false;
     store().update(|db| {
         if sign_store_get(&day, uid).is_some() {
             already = true;
             return;
+        }
+        // 必须先落签到记录再入账：顺序反了的话，写盘失败时 credit 已进 memo
+        // 且必然落盘，用户重试一次就多发一次奖励，且这些入账完全没有流水。
+        // 记录成功而 credit 只在 memo 的情况：崩溃丢失一次签到额，可接受
+        if !sign_store_set(&day, uid, amount) {
+            return; // 写盘失败：整单放弃，用户可重试
         }
         let mut ok = false;
         users_mut(db, |arr| {
@@ -742,15 +755,20 @@ pub fn sign_today(uid: &str) -> (bool, String, f64) {
                 ok = true;
             }
         });
-        // 先落签到记录（写盘失败 → 不入账不放流水，用户可重试；
-        // 记录成功而 credit 只在 memo 的情况：崩溃丢失一次签到额，可接受）
-        if ok && sign_store_set(&day, uid, amount) {
+        if ok {
             fund_log(db, uid, "sign", amount, 0.0, "每日签到");
             credited = true;
+        } else {
+            // 用户不存在：记录已落盘，按已签到收口，避免悬空记录被反复重试
+            missing = true;
         }
     });
     if !credited {
-        let msg = if already { "今天已经签到过了" } else { "用户不存在" };
+        let msg = match (already, missing) {
+            (true, _) => "今天已经签到过了",
+            (_, true) => "用户不存在",
+            _ => "签到记录写入失败，请稍后重试",
+        };
         return (false, msg.to_string(), 0.0);
     }
     (true, "签到成功".into(), amount)
@@ -777,6 +795,9 @@ pub fn email_code_create(email: &str) -> Result<String, String> {
                 }
             }
             o.insert(email.clone(), json!({"code": code, "exp": now + 600, "issued": now}));
+            // 顺带清掉过期/作废的码：只在验证成功时删除的话，
+            // 发了但没完成注册的邮箱会在 mail.json 里永久堆积
+            o.retain(|_, v| util::int_or(v.get("exp"), 0) > now);
         }
     });
     // 回读（60s 间隔时返回已存在的码，保证与实际落库一致）

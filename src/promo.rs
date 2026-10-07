@@ -91,6 +91,26 @@ fn member_mut<'a>(db: &'a mut Value, event_id: &str, uid: &str) -> Option<&'a mu
     })
 }
 
+/// 给成员行累计 n 次有效邀请：invited 封顶 target；翻倍卡按未截断的累计
+/// 邀请数每满 5 发 1 张。不能拿封顶后的 invited 取模——target=4 时第
+/// 5、6、7… 位好友每次都算出 5%5==0，等于无限发翻倍卡（真实资金）
+fn grant_invite_rewards(m: &mut Value, target: i64, n: i64) {
+    if n <= 0 {
+        return;
+    }
+    let old_total = util::int_or(m.get("invited_total"), util::int_or(m.get("invited"), 0));
+    let new_total = old_total + n;
+    let gained_cards = new_total / 5 - old_total / 5;
+    let doubler = util::int_or(m.get("doubler"), 0) + gained_cards;
+    let credits = util::int_or(m.get("draw_credits"), 0) + n;
+    if let Some(o) = m.as_object_mut() {
+        o.insert("invited_total".into(), json!(new_total));
+        o.insert("invited".into(), json!(new_total.min(target)));
+        o.insert("doubler".into(), json!(doubler));
+        o.insert("draw_credits".into(), json!(credits));
+    }
+}
+
 /// 用户加入活动（幂等；试玩模式直接置为拉满）
 pub fn join(event_id: &str, uid: &str) -> Result<Value, String> {
     let e = get_event(event_id).ok_or("活动不存在")?;
@@ -101,16 +121,30 @@ pub fn join(event_id: &str, uid: &str) -> Result<Value, String> {
         let trial = e.get("trial").map(util::truthy).unwrap_or(false);
         let target = util::int_or(e.get("target"), 1).max(1);
         if member_mut(db, event_id, uid).is_none() {
+            // 归因可能先于加入发生（inviter 当时还没 join，hit 已落库但进度没记，
+            // friends 显示拉了 N 人、invited=0）：加入时按已有 hit 一次性回填
+            let pending = hits_arr(db)
+                .iter()
+                .filter(|h| {
+                    util_str(h.get("event_id")) == event_id && util_str(h.get("inviter")) == uid
+                })
+                .count() as i64;
             members_arr(db).push(json!({
                 "event_id": event_id,
                 "user_id": uid,
                 "joined_at": util::now_i(),
                 "invited": if trial { target } else { 0 },
+                "invited_total": 0,
                 "diamonds": 0, "golds": 0,
                 "p1": false, "p2": false, "p3": false, "paid": false,
                 "doubler": 0, "draw_credits": 0,
                 "trial": trial,
             }));
+            if !trial && pending > 0 {
+                if let Some(m) = member_mut(db, event_id, uid) {
+                    grant_invite_rewards(m, target, pending);
+                }
+            }
         }
     });
     Ok(my_status(event_id, uid))
@@ -135,18 +169,10 @@ pub fn attribute(inv: &str, invitee_uid: &str) {
         hits_arr(db).push(json!({
             "event_id": event_id, "inviter": inviter, "invitee": invitee_uid, "t": util::now_i(),
         }));
-        // 邀请人进度
+        // 邀请人进度（翻倍卡按未截断累计数发，见 grant_invite_rewards）
         let target = util::int_or(e.get("target"), 1).max(1);
         if let Some(m) = member_mut(db, event_id, inviter) {
-            let invited = util::int_or(m.get("invited"), 0).min(target) + 1;
-            let doubler = util::int_or(m.get("doubler"), 0)
-                + if invited % 5 == 0 { 1 } else { 0 };
-            let credits = util::int_or(m.get("draw_credits"), 0) + 1;
-            if let Some(o) = m.as_object_mut() {
-                o.insert("invited".into(), json!(invited));
-                o.insert("doubler".into(), json!(doubler));
-                o.insert("draw_credits".into(), json!(credits));
-            }
+            grant_invite_rewards(m, target, 1);
         }
         // 被拉人自动加入活动（非试玩）
         if member_mut(db, event_id, invitee_uid).is_none() {
@@ -184,6 +210,9 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             return;
         };
         let invited = util::int_or(m.get("invited"), 0).min(target);
+        // 阶段判定用成员加入时的 trial 快照：管理员事后把活动翻成试玩，
+        // 不至于瞬间给全部存量成员解锁提现（老成员行没这字段时退回事件值）
+        let trial = m.get("trial").map(util::truthy).unwrap_or(trial);
         let eff_invited = if trial { target } else { invited };
         let (p1, p2, p3, paid) = (
             m.get("p1").map(util::truthy).unwrap_or(false),

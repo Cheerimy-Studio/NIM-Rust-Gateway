@@ -510,6 +510,9 @@ pub async fn promo_overview(headers: &HeaderMap) -> Response {
         .filter(|e| {
             e.get("enabled").map(util::truthy).unwrap_or(false)
                 && !e.get("expired").map(util::truthy).unwrap_or(false)
+                // 试玩活动是管理员体验用（join 即拉满、提现真入账），不向普通用户下发，
+                // 否则等于所有用户白拿全额提现；知道活动 id 的管理员仍可走 API 体验
+                && !e.get("trial").map(util::truthy).unwrap_or(false)
         })
         .map(|e| {
             let id = util::str_or(e.get("id"), "");

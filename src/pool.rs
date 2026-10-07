@@ -1906,6 +1906,12 @@ pub async fn test_key(key_id: &str) -> Value {
         "ip": "-",
         "att": 1,
     });
+    // test_key 从未取号（没有 inc_inflight），release 里却会无条件 dec_inflight：
+    // 不补一对入账的话，计数为 0 时走 odd-release 分支污染泄漏诊断指标，
+    // 更糟的是会把这个账号真实在途请求的并发计数错扣一个
+    if !key_id.is_empty() {
+        inc_inflight(key_id);
+    }
     release(key_id, ok, status, &err, None, Some(&log_row), 0);
     serde_json::json!({"ok": ok, "status": status, "ms": ms, "models": count, "error": err})
 }

@@ -385,14 +385,35 @@ pub fn draw(uid: &str, wheel_id: &str, use_credit: bool) -> (bool, Value) {
                 "cost": crate::util::round6(cost),
             });
         }
-        // 0.5) 拉人活动：优先用邀请抽奖次数抵扣本次消耗（原子：同一临界区内检查并扣减；
-        //      必须在 users 借用块之前 —— obj 此处未被借用）
+        // 0.5) 先确认用户存在且启用：update 闭包提前 return 只会提交已有变更
+        //      不会回滚，抽奖次数若在用户校验之前扣掉、后面又 return，次数就被白吞
+        {
+            let users = obj.entry("users").or_insert_with(|| Value::Array(vec![]));
+            match users.as_array_mut().map(|a| {
+                a.iter().any(|u| {
+                    util_str(u.get("id")) == uid
+                        && u.get("enabled").map(crate::util::truthy).unwrap_or(false)
+                })
+            }) {
+                None => {
+                    err = "存储异常".into();
+                    return;
+                }
+                Some(false) => {
+                    err = "用户不存在或已停用".into();
+                    return;
+                }
+                Some(true) => {}
+            }
+        }
+        // 1) 拉人活动：优先用邀请抽奖次数抵扣本次消耗（原子：同一临界区内检查并扣减；
+        //      必须在 users 可变借用块之外 —— obj 此处未被借用）
         let mut eff_cost = cost;
         if use_credit && cost > 0.0 && crate::promo::consume_draw_credit_obj(obj, uid) {
             eff_cost = 0.0;
             used_credit = true;
         }
-        // 1) 找用户并扣费（优先赠金）
+        // 2) 扣费（优先赠金）
         {
             let users = obj.entry("users").or_insert_with(|| Value::Array(vec![]));
             let Some(a) = users.as_array_mut() else {
@@ -574,9 +595,14 @@ pub fn lookup_prize_key(key: &str) -> Result<Value, &'static str> {
         .get("prize_keys")
         .and_then(|k| k.as_array())
         .ok_or("prize key 无效")?;
+    use subtle::ConstantTimeEq;
+    // 奖品 Key 等同秘密令牌：比较走常量时间
     let row = rows
         .iter()
-        .find(|k| util_str(k.get("key")) == key)
+        .find(|k| {
+            let m: bool = util_str(k.get("key")).as_bytes().ct_eq(key.as_bytes()).into();
+            m
+        })
         .ok_or("prize key 无效")?;
     if !row.get("enabled").map(crate::util::truthy).unwrap_or(false) {
         return Err("prize key 已停用");

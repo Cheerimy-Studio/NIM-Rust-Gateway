@@ -450,6 +450,11 @@ impl ResponsesStream {
                 if self.part_open {
                     self.close_message(out);
                 }
+                // 与 Anthropic 版对齐：先输出 reasoning 块再开 tool 块，
+                // 否则 reasoning 的 done 事件会落到 function_call 事件之后
+                if self.rs_open {
+                    self.close_reasoning(out);
+                }
                 let call_id = util::str_or(tco.get("id").filter(|x| !x.is_null()), "");
                 let call_id = if call_id.is_empty() {
                     util::rand_id("call_")

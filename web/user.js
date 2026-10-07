@@ -468,6 +468,8 @@ $('#key-add').onclick = () => run(async () => {
 
 $('#btn-logout').onclick = () => run(async () => { await api('logout', {method: 'POST'}); showLogin(); });
 
+$('#promo-refresh').onclick = () => run(() => loadPromo());
+
 $('#login-go').onclick = async () => {
   const err = $('#login-err');
   err.style.display = 'none';
@@ -573,7 +575,9 @@ async function loadPromo() {
   const evs = d.events || [];
   box.innerHTML = '';
   if (!evs.length) {
-    box.innerHTML = '<div class="hint text-center py-5">暂无进行中的活动</div>';
+    box.innerHTML = '<div class="promo-none text-center py-5"><div class="promo-none-ic">🧧</div>'
+      + '<div class="fw-bold mb-1">暂无进行中的活动</div>'
+      + '<div class="small text-muted">有新活动时这里会第一时间出现</div></div>';
     promoStopTicker();
     return;
   }
@@ -672,6 +676,27 @@ const PROMO_CLAIM_IDS = ['p-claim1', 'p-claim2', 'p-claim3', 'p-claim4'];
 
 // 「带文案复制」用的邀请语（链接拼在其后）
 const PROMO_SHARE_TEXT = '我在用「言灵中转」，注册就送 AI 额度～用我的专属链接注册，帮我解锁好友红包：';
+
+// 好友头像底色（按邮箱哈希取色，稳定不闪变）
+const PROMO_AV_COLORS = ['#f59e0b', '#3b82f6', '#10b981', '#f97316', '#a78bfa', '#ef4444', '#14b8a6', '#eab308'];
+function promoAvColor(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return PROMO_AV_COLORS[h % PROMO_AV_COLORS.length];
+}
+
+// 金额数字滚动：领取后 collected 变化时从旧值滚到新值
+function promoCountUp(el, from, to) {
+  if (Math.abs(to - from) < 0.005) { el.textContent = to.toFixed(2); return; }
+  const t0 = performance.now(), dur = 750;
+  const frame = now => {
+    const k = Math.min(1, (now - t0) / dur);
+    const e = 1 - Math.pow(1 - k, 3);
+    el.textContent = (from + (to - from) * e).toFixed(2);
+    if (k < 1) requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
 
 // 好友加入多久了
 function promoAgo(t) {
@@ -844,9 +869,12 @@ function promoCard(ev, d) {
   const friends = st.friends || [];
   if (friends.length) {
     html += '<div class="mt-3 mb-1 small" style="opacity:.85">已有 <b>' + friends.length + '</b> 位好友通过你的链接加入</div>'
-      + friends.slice(0, 8).map(f =>
-        '<div class="promo-friend"><span class="av">🙋</span><span class="nm">' + esc(f.invitee)
-        + '</span><span class="tm">' + promoAgo(f.t) + '</span></div>').join('');
+      + friends.slice(0, 8).map(f => {
+        const who = f.invitee || '?';
+        return '<div class="promo-friend"><span class="av" style="background:' + promoAvColor(who) + '">'
+          + esc(who.charAt(0).toUpperCase()) + '</span><span class="nm">' + esc(who)
+          + '</span><span class="tm">' + promoAgo(f.t) + '</span></div>';
+      }).join('');
   } else if (!paid) {
     html += '<div class="promo-friend promo-friend-empty mt-3">还没有好友加入——把上面的链接发给朋友，注册成功就计入进度～</div>';
   }
@@ -865,10 +893,20 @@ function promoCard(ev, d) {
     + '</div>'
     + '<div class="small mb-2" style="opacity:.9">' + promoCdPart(exp)
     + ' · 已邀请 <b>' + st.invited + '</b> / ' + ev.target + ' 人</div>'
-    + '<div class="promo-amount">¥' + st.collected.toFixed(2) + '<small> / ' + money.toFixed(2) + '</small></div>'
+    + '<div class="promo-amount">¥<b class="promo-amt">' + st.collected.toFixed(2) + '</b><small> / ' + money.toFixed(2) + '</small></div>'
     + '<div class="promo-bar my-2"><div style="width:' + pct + '%"></div></div>'
     + '<div class="promo-gap">' + (paid ? '已成功提现，余额已到账！' : '还差 <b>¥' + st.remain.toFixed(2) + '</b> 即可提现') + '</div>'
     + html;
+
+  // 奖金数字滚动：只在上次渲染值与本次不同时播放（首次渲染不吵）
+  const amtEl = card.querySelector('.promo-amt');
+  if (amtEl) {
+    window.__promoAmt = window.__promoAmt || {};
+    const prev = Object.prototype.hasOwnProperty.call(window.__promoAmt, ev.id)
+      ? window.__promoAmt[ev.id] : st.collected;
+    window.__promoAmt[ev.id] = st.collected;
+    promoCountUp(amtEl, prev, st.collected);
+  }
 
   const inp = card.querySelector('#promo-link-input');
   const cp = card.querySelector('#promo-copy');

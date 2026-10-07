@@ -407,17 +407,27 @@ impl Store {
         migrate(&mut db);
         if canonical(&db) != before || !loaded_any {
             // 首建 / 迁移变更：全表落盘一次
+            let mut all_ok = true;
             for (gi, (group, keys)) in GROUPS.iter().enumerate() {
                 let obj = extract_group(&db, keys);
                 let payload = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".into());
                 match write_group_file(group, &payload) {
                     Ok(()) => saved[gi] = group_hash(&obj),
-                    Err(e) => warn_persist(&e),
+                    Err(e) => {
+                        warn_persist(&e);
+                        all_ok = false;
+                    }
                 }
             }
-            if let Some(legacy) = legacy_db_json() {
-                let renamed = data_dir().join("db.json.migrated");
-                let _ = fs::rename(&legacy, &renamed);
+            // 只有全部表写成功才把旧 db.json 改名让位：中途失败时保留它，
+            // 下次启动重试迁移，否则唯一一份迁移前数据会被改名弄丢
+            if all_ok {
+                if let Some(legacy) = legacy_db_json() {
+                    let renamed = data_dir().join("db.json.migrated");
+                    let _ = fs::rename(&legacy, &renamed);
+                }
+            } else {
+                inner.dirty = true; // 写失败的表交由下一轮 flush 重试
             }
         }
         inner.saved = saved;
@@ -464,6 +474,19 @@ impl Store {
         bump_gen();
         inner.memo_at = Instant::now();
         db
+    }
+
+    /// 丢弃内存 memo（数据目录被外部替换/回滚后调用）。
+    /// 不丢的话：替换完磁盘的几秒窗口里任何一次 update/flush 都会把
+    /// 内存里的旧数据原样写回，把刚恢复的数据再次覆盖掉
+    pub fn discard_memory(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.memo = None;
+        inner.dirty = false;
+        inner.dir_fp = None;
+        inner.saved = vec![0; GROUPS.len()];
+        inner.memo_at = Instant::now();
+        bump_gen();
     }
 
     /// 把内存态按表落盘：只写内容有变化的表。
