@@ -390,11 +390,31 @@ pub async fn forgot(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
         )
             .into_response();
     }
-    let proto = headers
+    // 站在反代后面时从转发头推断协议，拼给用户的链接（邀请/找回重置）才不跑偏。
+    // 只认 http/https，转发头畸形（多值、大小写、垃圾值）时一律落回 http，
+    // 并兼容 X-Forwarded-SSL: on 与 Cloudflare 的 Cf-Visitor
+    let xfp = headers
         .get("x-forwarded-proto")
         .and_then(|x| x.to_str().ok())
-        .map(|p| p.split(',').next().unwrap_or("http").trim().to_string())
-        .unwrap_or_else(|| "http".into());
+        .map(|p| p.split(',').next().unwrap_or("").trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let forwarded_ssl_on = headers
+        .get("x-forwarded-ssl")
+        .and_then(|x| x.to_str().ok())
+        .map(|x| x.trim().eq_ignore_ascii_case("on"))
+        .unwrap_or(false);
+    let cf_https = headers
+        .get("cf-visitor")
+        .and_then(|x| x.to_str().ok())
+        .map(|x| x.contains("https"))
+        .unwrap_or(false);
+    let proto = if xfp == "https" || xfp == "http" {
+        xfp
+    } else if forwarded_ssl_on || cf_https {
+        "https".into()
+    } else {
+        "http".into()
+    };
     let host = headers
         .get("host")
         .and_then(|x| x.to_str().ok())
@@ -458,11 +478,31 @@ pub async fn promo_overview(headers: &HeaderMap) -> Response {
     let Ok(uid) = user_require(headers, false) else { return user_require_err() };
     let cfg = store().load();
     let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
-    let proto = headers
+    // 站在反代后面时从转发头推断协议，拼给用户的链接（邀请/找回重置）才不跑偏。
+    // 只认 http/https，转发头畸形（多值、大小写、垃圾值）时一律落回 http，
+    // 并兼容 X-Forwarded-SSL: on 与 Cloudflare 的 Cf-Visitor
+    let xfp = headers
         .get("x-forwarded-proto")
         .and_then(|x| x.to_str().ok())
-        .map(|p| p.split(',').next().unwrap_or("http").trim().to_string())
-        .unwrap_or_else(|| "http".into());
+        .map(|p| p.split(',').next().unwrap_or("").trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let forwarded_ssl_on = headers
+        .get("x-forwarded-ssl")
+        .and_then(|x| x.to_str().ok())
+        .map(|x| x.trim().eq_ignore_ascii_case("on"))
+        .unwrap_or(false);
+    let cf_https = headers
+        .get("cf-visitor")
+        .and_then(|x| x.to_str().ok())
+        .map(|x| x.contains("https"))
+        .unwrap_or(false);
+    let proto = if xfp == "https" || xfp == "http" {
+        xfp
+    } else if forwarded_ssl_on || cf_https {
+        "https".into()
+    } else {
+        "http".into()
+    };
     let host = headers.get("host").and_then(|x| x.to_str().ok()).unwrap_or("").to_string();
     let base = format!("{}://{}/user", proto, host);
     let events = crate::promo::admin_list()

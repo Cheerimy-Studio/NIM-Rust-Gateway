@@ -574,6 +574,7 @@ async function loadPromo() {
   box.innerHTML = '';
   if (!evs.length) {
     box.innerHTML = '<div class="hint text-center py-5">暂无进行中的活动</div>';
+    promoStopTicker();
     return;
   }
   for (const ev of evs) {
@@ -590,9 +591,10 @@ async function loadPromo() {
       burstInto(hero, 26);
     }
   }
+  promoStartTicker();
 }
 
-// 剩余时间文案：永远不出现光秃秃的「0 天」
+// 剩余时间文案：永远不出现光秃秃的「0 天」（也是倒计时 span 的首帧兜底）
 function promoLeftText(exp) {
   exp = exp || 0;
   if (exp <= 0) return '长期有效';
@@ -600,6 +602,51 @@ function promoLeftText(exp) {
   if (left <= 0) return '活动已结束';
   if (left < 86400) return '今天结束';
   return '剩余 ' + Math.ceil(left / 86400) + ' 天';
+}
+
+// 到秒倒计时单元格：promoStartTicker 每秒刷新 [data-cd]
+function promoCdHtml(exp) {
+  exp = exp || 0;
+  return '<span class="promo-cd" data-cd="' + exp + '">' + promoLeftText(exp) + '</span>';
+}
+// 无期限的活动不显示「距结束」，只显示「长期有效」
+function promoCdPart(exp) {
+  exp = exp || 0;
+  return exp > 0 ? '距结束 ' + promoCdHtml(exp) : '<span class="promo-cd">长期有效</span>';
+}
+
+let PROMO_TIMER = null;
+function promoStopTicker() {
+  if (PROMO_TIMER) { clearInterval(PROMO_TIMER); PROMO_TIMER = null; }
+}
+function promoStartTicker() {
+  promoStopTicker();
+  const pad = n => String(n).padStart(2, '0');
+  let reloading = false;
+  const tick = () => {
+    const els = document.querySelectorAll('[data-cd]');
+    if (!els.length) { promoStopTicker(); return; }
+    const nowS = Date.now() / 1000;
+    let anyOver = false;
+    els.forEach(el => {
+      const exp = +el.dataset.cd || 0;
+      if (exp <= 0) return; // 长期有效：不走秒
+      let left = Math.floor(exp - nowS);
+      if (left <= 0) { left = 0; anyOver = true; }
+      const dd = Math.floor(left / 86400);
+      const hms = pad(Math.floor(left % 86400 / 3600)) + ':' + pad(Math.floor(left % 3600 / 60)) + ':' + pad(left % 60);
+      el.textContent = (dd > 0 ? dd + ' 天 ' : '') + hms;
+      el.classList.toggle('urgent', left > 0 && left < 86400);
+      el.classList.toggle('over', left <= 0);
+    });
+    // 活动到点：稍候刷一次，让过期活动从列表里消失
+    if (anyOver && !reloading) {
+      reloading = true;
+      setTimeout(() => { reloading = false; if (document.querySelector('[data-cd]')) loadPromo(); }, 1500);
+    }
+  };
+  tick();
+  PROMO_TIMER = setInterval(tick, 1000);
 }
 
 // 通用彩带爆开：复用 .promo-confetti 的 pconf 位移动画
@@ -623,25 +670,64 @@ function burstInto(el, n) {
 // 四个阶段按钮的固定 id（promo_funnel.py 断言依赖这些字面量）
 const PROMO_CLAIM_IDS = ['p-claim1', 'p-claim2', 'p-claim3', 'p-claim4'];
 
+// 「带文案复制」用的邀请语（链接拼在其后）
+const PROMO_SHARE_TEXT = '我在用「言灵中转」，注册就送 AI 额度～用我的专属链接注册，帮我解锁好友红包：';
+
+// 好友加入多久了
+function promoAgo(t) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - (t || 0)));
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+
+// 复制成功的按钮反馈：短暂变绿 + 换成「已复制 ✓」
+function promoCopied(btn) {
+  if (!btn || btn.dataset.busy) return;
+  btn.dataset.busy = '1';
+  const old = btn.innerHTML;
+  btn.innerHTML = '已复制 ✓';
+  btn.classList.add('promo-copy-ok');
+  setTimeout(() => {
+    btn.innerHTML = old;
+    delete btn.dataset.busy;
+    btn.classList.remove('promo-copy-ok');
+  }, 1600);
+}
+
 function promoCard(ev, d) {
   const card = document.createElement('div');
   card.className = 'promo-hero mb-4';
   card.setAttribute('data-evh', ev.id || '');
   const st = ev.joined ? ev : null;
-  const leftTxt = promoLeftText(st ? st.expires_at : ev.expires_at);
+  const exp = (st ? st.expires_at : ev.expires_at) || 0;
   if (!st || !st.joined) {
     card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-2">'
       + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
       + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
       + '</div>'
       + '<div class="mb-2">邀请好友注册，赢 <b>¥' + ev.amount + '</b> 余额！</div>'
-      + '<div class="small mb-3" style="opacity:.85">活动目标：邀请 ' + ev.target + ' 位好友 · ' + leftTxt + '</div>'
+      + '<div class="small mb-3" style="opacity:.9">活动目标：邀请 ' + ev.target + ' 位好友 · ' + promoCdPart(exp) + '</div>'
       + '<button class="pbtn primary" id="promo-join">立即参与</button>';
-    card.querySelector('#promo-join').onclick = () => run(async () => {
-      await api('promo/join', {method: 'POST', json: {id: ev.id}});
-      toast('已加入活动');
-      loadPromo();
-    });
+    const jb = card.querySelector('#promo-join');
+    jb.onclick = () => {
+      if (jb.dataset.busy) return;
+      jb.dataset.busy = '1';
+      const old = jb.textContent;
+      jb.textContent = '加入中…';
+      run(async () => {
+        try {
+          await api('promo/join', {method: 'POST', json: {id: ev.id}});
+          toast('已加入活动');
+        } catch (err) {
+          delete jb.dataset.busy;
+          jb.textContent = old;
+          throw err;
+        }
+        loadPromo();
+      });
+    };
     return card;
   }
 
@@ -686,6 +772,13 @@ function promoCard(ev, d) {
     return Math.max(0, Math.min(1, (eff - prev) / span));
   };
 
+  // 邀请链接以「用户当前访问的地址」生成为准：走 127.0.0.1 就是 127.0.0.1、
+  // 走域名就是域名、协议跟浏览器一致；服务器拼的 link_full 在反代转发头
+  // 缺失时会失真（http/内网地址），因此只作兜底
+  const inviteLink = st.link
+    ? (location.origin + '/user' + st.link)
+    : (st.link_full || '');
+
   let html = '';
   const doneN = paid ? 4 : cur;
   for (let i = 0; i < doneN; i++) {
@@ -721,9 +814,16 @@ function promoCard(ev, d) {
   }
 
   html += '<div class="small mb-1 mt-3" style="opacity:.85">你的专属邀请链接（好友注册即算你拉新）：</div>'
-    + '<div class="promo-link"><input readonly id="promo-link-input" value="'
-    + esc(st.link_full || (location.origin + '/user' + st.link)) + '">'
-    + '<button class="btn btn-light btn-sm fw-bold" id="promo-copy">复制</button></div>';
+    + '<div class="promo-link"><input readonly id="promo-link-input" value="' + esc(inviteLink) + '">'
+    + '<button class="btn btn-light btn-sm fw-bold text-nowrap" id="promo-copy">复制链接</button>'
+    + '<button class="btn btn-warning btn-sm fw-bold text-nowrap" id="promo-copy-msg">带文案复制</button></div>'
+    + '<div class="promo-how">'
+    + '<div class="promo-how-step"><span class="n">1</span><div><b>复制链接</b><span>点上方按钮</span></div></div>'
+    + '<div class="promo-how-arrow"><i class="bi bi-chevron-right"></i></div>'
+    + '<div class="promo-how-step"><span class="n">2</span><div><b>发给好友</b><span>微信 / QQ 都行</span></div></div>'
+    + '<div class="promo-how-arrow"><i class="bi bi-chevron-right"></i></div>'
+    + '<div class="promo-how-step"><span class="n">3</span><div><b>好友注册</b><span>进度秒到账</span></div></div>'
+    + '</div>';
 
   if (cur >= 0) {
     for (let i = cur + 1; i < 4; i++) {
@@ -741,34 +841,69 @@ function promoCard(ev, d) {
   if (st.golds > 0) chips.push('<span class="promo-chip"><i class="bi bi-coin"></i>金币 ' + st.golds + '/' + (st.gold_need || 20) + '</span>');
   if (chips.length) html += '<div class="d-flex gap-2 flex-wrap my-3">' + chips.join('') + '</div>';
 
-  const friends = (st.friends || []).slice(0, 8).map(f =>
-    '<div class="small" style="opacity:.8">' + esc(f.invitee) + '</div>').join('');
-  if (friends) html += '<div class="mt-3"><div class="small fw-bold mb-1">已拉好友</div>' + friends + '</div>';
-  html += '<div class="mt-2"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘用次数抽奖 →</a></div>';
+  const friends = st.friends || [];
+  if (friends.length) {
+    html += '<div class="mt-3 mb-1 small" style="opacity:.85">已有 <b>' + friends.length + '</b> 位好友通过你的链接加入</div>'
+      + friends.slice(0, 8).map(f =>
+        '<div class="promo-friend"><span class="av">🙋</span><span class="nm">' + esc(f.invitee)
+        + '</span><span class="tm">' + promoAgo(f.t) + '</span></div>').join('');
+  } else if (!paid) {
+    html += '<div class="promo-friend promo-friend-empty mt-3">还没有好友加入——把上面的链接发给朋友，注册成功就计入进度～</div>';
+  }
+
+  html += '<div class="mt-2 mb-1"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘用次数抽奖 →</a></div>'
+    + '<details class="promo-rules"><summary><i class="bi bi-info-circle"></i> 活动规则</summary><ul>'
+    + '<li>活动自创建起 7 天有效，到期即止、不可重开；多个活动可同时参加。</li>'
+    + '<li>好友通过你的链接注册成功即计入进度；每拉 1 人另 +1 次抽奖机会。</li>'
+    + '<li>每拉满 5 人额外得 1 张翻倍卡，抽奖抽到余额奖品时可让它翻倍一次。</li>'
+    + '<li>四个阶段全部完成后，奖励以「充值余额」一次性到账。</li>'
+    + '</ul></details>';
 
   card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-1">'
     + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
     + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
     + '</div>'
-    + '<div class="small mb-2" style="opacity:.9">' + leftTxt + ' · 已邀请 <b>' + st.invited + '</b> / ' + ev.target + ' 人</div>'
+    + '<div class="small mb-2" style="opacity:.9">' + promoCdPart(exp)
+    + ' · 已邀请 <b>' + st.invited + '</b> / ' + ev.target + ' 人</div>'
     + '<div class="promo-amount">¥' + st.collected.toFixed(2) + '<small> / ' + money.toFixed(2) + '</small></div>'
     + '<div class="promo-bar my-2"><div style="width:' + pct + '%"></div></div>'
     + '<div class="promo-gap">' + (paid ? '已成功提现，余额已到账！' : '还差 <b>¥' + st.remain.toFixed(2) + '</b> 即可提现') + '</div>'
     + html;
 
+  const inp = card.querySelector('#promo-link-input');
   const cp = card.querySelector('#promo-copy');
-  if (cp) cp.onclick = () => copyText(card.querySelector('#promo-link-input').value)
-    .then(ok => toast(ok ? '邀请链接已复制' : '复制失败'));
+  const cpm = card.querySelector('#promo-copy-msg');
+  if (inp) inp.onclick = () => inp.select();
+  if (cp) cp.onclick = () => copyText(inviteLink).then(ok => {
+    if (ok) { promoCopied(cp); toast('邀请链接已复制，发给好友吧'); }
+    else toast('复制失败，请手动选择链接复制', 'danger');
+  });
+  if (cpm) cpm.onclick = () => copyText(PROMO_SHARE_TEXT + inviteLink).then(ok => {
+    if (ok) { promoCopied(cpm); toast('邀请文案已复制'); }
+    else toast('复制失败，请手动复制', 'danger');
+  });
   const gw = card.querySelector('#promo-goto-wheel');
   if (gw) gw.onclick = () => document.querySelector('a[data-p="wheel"]').click();
   if (cur >= 0) {
     const b = card.querySelector('#' + PROMO_CLAIM_IDS[cur]);
-    if (b) b.onclick = () => run(async () => {
-      await api('promo/claim', {method: 'POST', json: {id: ev.id, step: cur + 1}});
-      window.__promoReveal = {step: cur + 1, id: ev.id};
-      toast('领取成功！');
-      loadPromo();
-    });
+    if (b) b.onclick = () => {
+      if (b.dataset.busy) return;
+      b.dataset.busy = '1';
+      const old = b.innerHTML;
+      b.innerHTML = '领取中…';
+      run(async () => {
+        try {
+          await api('promo/claim', {method: 'POST', json: {id: ev.id, step: cur + 1}});
+          window.__promoReveal = {step: cur + 1, id: ev.id};
+          toast('领取成功！');
+        } catch (err) {
+          delete b.dataset.busy;
+          b.innerHTML = old;
+          throw err;
+        }
+        loadPromo();
+      });
+    };
   }
   return card;
 }

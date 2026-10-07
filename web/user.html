@@ -281,6 +281,56 @@ a{text-decoration:none}
 /* 卡面要作为彩带爆开的定位容器 */
 .promo-hero{position:relative}
 .promo-success.revealed{animation:ppop .75s cubic-bezier(.2,.9,.25,1.35) both}
+/* 到秒倒计时 */
+.promo-cd{font-weight:800;color:#ffe9c9;font-variant-numeric:tabular-nums;letter-spacing:.3px}
+.promo-cd.urgent{color:#ffd76e;animation:pcd 1s step-start infinite}
+.promo-cd.over{opacity:.6}
+@keyframes pcd{50%{opacity:.45}}
+/* 三步引导：复制 → 发给好友 → 好友注册 */
+.promo-how{display:flex;align-items:stretch;gap:6px;margin-top:14px}
+.promo-how-step{flex:1;display:flex;align-items:center;gap:8px;min-width:0;
+  background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);
+  border-radius:12px;padding:9px 10px}
+.promo-how-step .n{width:20px;height:20px;border-radius:50%;background:#ffd76e;color:#7a3a10;
+  font-weight:900;font-size:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.promo-how-step b{display:block;font-size:12.5px;color:#fff;white-space:nowrap}
+.promo-how-step div{min-width:0}
+.promo-how-step div span{display:block;font-size:11px;color:rgba(255,255,255,.75);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.promo-how-arrow{align-self:center;color:rgba(255,255,255,.55);font-size:11px;flex-shrink:0}
+/* 窄屏改纵向排列，三步文字不再互相挤压 */
+@media (max-width: 575.98px){
+  .promo-how{flex-direction:column}
+  .promo-how-arrow{transform:rotate(90deg);margin:-3px 0}
+}
+/* 复制成功反馈 + 链接行窄屏换行 */
+.promo-copy-ok{background:#16a34a !important;border-color:#16a34a !important;color:#fff !important}
+.promo-link{flex-wrap:wrap}
+/* 好友列表 */
+.promo-friend{display:flex;align-items:center;gap:9px;padding:7px 11px;border-radius:10px;
+  background:rgba(255,255,255,.1);margin-bottom:6px;font-size:12.5px}
+.promo-friend .av{width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.22);
+  display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
+.promo-friend .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.promo-friend .tm{margin-left:auto;opacity:.6;font-size:11px;flex-shrink:0}
+.promo-friend-empty{border:1.5px dashed rgba(255,255,255,.3);background:none;
+  color:rgba(255,255,255,.78);justify-content:center;text-align:center;font-size:12px;padding:12px}
+/* 活动规则折叠 */
+.promo-rules{margin-top:12px;font-size:12px;color:rgba(255,255,255,.92)}
+.promo-rules summary{cursor:pointer;font-weight:700;opacity:.85;list-style:none;user-select:none}
+.promo-rules summary::-webkit-details-marker{display:none}
+.promo-rules summary .bi{margin-right:4px}
+.promo-rules[open] summary{opacity:1}
+.promo-rules ul{margin:8px 0 0;padding-left:18px;line-height:1.95;opacity:.8}
+/* 领取按钮微交互（整卡不做 transform hover，避免和进场动画的 fill 冲突） */
+.promo-claim{transition:transform .18s ease}
+.promo-claim:not(:disabled):hover{transform:translateY(-1px)}
+.promo-claim:not(:disabled):active{transform:translateY(1px) scale(.99)}
+/* 锁卡悬停小反馈 */
+.promo-lock{transition:border-color .2s ease,background .2s ease}
+.promo-lock:hover{border-color:#ffd7a8;background:rgba(255,255,255,.85)}
+.promo-lock-ic{transition:transform .25s ease}
+.promo-lock:hover .promo-lock-ic{transform:rotate(-12deg) scale(1.08)}
 .lg-tab{display:flex;justify-content:center;gap:14px;margin-bottom:14px;font-size:13px}
 .lg-tab a{color:#98a3b8;text-decoration:none;padding:2px 2px}
 .lg-tab a.on{color:#10b981;font-weight:700;border-bottom:2px solid #10b981}
