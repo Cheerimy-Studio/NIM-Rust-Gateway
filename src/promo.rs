@@ -1,4 +1,4 @@
-//! 拉人活动（拼多多式）：管理员只设「提现金额 + 拉人次数」，阶梯自动计算。
+//! 拉人活动（拼多多式）：管理员只设「奖励金额 + 拉人次数」，阶梯自动计算。
 //! 活动固定 7 天有效期（到点即止，不可重开）；允许多活动并行。
 //! 进度按「已完成阶段数 / 4」算：collected = A * done / 4，刚加入时就是 0/A，
 //! 不再造 A-0.01 之类的假进度（那会让用户以为只差 1 分钱就能提现）。
@@ -8,7 +8,7 @@
 //!   阶段1  累计满 1 人 → 领取（进度到 A/4）
 //!   阶段2  累计满 3 人 → 领取（进度到 A/2）
 //!   阶段3  累计满 7 人 → 领取，解锁最后一波
-//!   阶段4  累计满 T 人 → 提现 A 元入充值账本
+//!   阶段4  累计满 T 人 → 发 A 元赠金（credit grant，非充值非提现）
 //!   邀请只推进度：不送抽奖次数、不送翻倍卡（存量仍可在转盘消耗）
 //! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」，
 //! 且总邀请人数对用户保密（显示 ???），要到冲刺阶段自己拉够才知道。
@@ -69,13 +69,6 @@ pub fn active_ok(e: &Value) -> bool {
 }
 
 /// 阶梯参数（管理员只设 withdraw/target，这里自动推方案）
-pub fn ladder(target: i64) -> (i64, i64, i64, i64, i64, i64) {
-    // (波1人数, 占位, 每轮奖励个数=4, 宝石目标=20, 金币目标=20, 总拉人=target)
-    let t = target.max(1);
-    let t1 = 1.min(t);
-    (t1, t1, 4, 20, 20, t)
-}
-
 /// 四个阶段的累计人数门槛：邀请要求按波次叠加翻倍（波 1、2、4，其余归最后一波）。
 /// 例：target=15 → 累计 1、3、7、15，即四波分别 1、2、4、8 人。
 /// 小目标被 min 截平：target=4 → 累计 1、3、4、4；target=1 → 1、1、1、1。
@@ -142,7 +135,6 @@ pub fn join(event_id: &str, uid: &str) -> Result<Value, String> {
                 "joined_at": util::now_i(),
                 "invited": if trial { target } else { 0 },
                 "invited_total": 0,
-                "diamonds": 0, "golds": 0,
                 "p1": false, "p2": false, "p3": false, "paid": false,
                 "doubler": 0, "draw_credits": 0,
                 "trial": trial,
@@ -158,7 +150,7 @@ pub fn join(event_id: &str, uid: &str) -> Result<Value, String> {
 }
 
 /// 注册归因：新用户带 inv=<event_id>.<inviter_uid> 注册时调用。
-/// 邀请人 +1 拉人数、+1 抽奖次数；每满 5 人 +1 翻倍卡。被拉人自动加入活动。
+/// 邀请人拉新进度 +1（不送抽奖次数/翻倍卡）。被拉人自动加入活动。
 pub fn attribute(inv: &str, invitee_uid: &str) {
     let Some((event_id, inviter)) = inv.split_once('.') else { return };
     let e = match get_event(event_id) {
@@ -187,7 +179,7 @@ pub fn attribute(inv: &str, invitee_uid: &str) {
                 "event_id": event_id,
                 "user_id": invitee_uid,
                 "joined_at": util::now_i(),
-                "invited": 0, "diamonds": 0, "golds": 0,
+                "invited": 0,
                 "p1": false, "p2": false, "p3": false, "paid": false,
                 "doubler": 0, "draw_credits": 0, "trial": false,
             }));
@@ -195,8 +187,8 @@ pub fn attribute(inv: &str, invitee_uid: &str) {
     });
 }
 
-/// 领取阶段奖励（阶段1/2 的宝石/金币兑换、阶段3 提现）。
-/// step: 1=兑换钻石 2=兑换金币 3=提现
+/// 领取阶段奖励（阶段1/2 的宝石/金币兑换、阶段4 领赠金）。
+/// step: 1=兑换钻石 2=兑换金币 3=冲刺 4=领赠金
 pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     let e = get_event(event_id).ok_or("活动不存在")?;
     if !active_ok(&e) {
@@ -205,7 +197,7 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     let amount = util::f64_or(e.get("amount"), 0.0);
     let target = util::int_or(e.get("target"), 1).max(1);
     let trial = e.get("trial").map(util::truthy).unwrap_or(false);
-    let (t1, _t2, _per, gem_need, gold_need, total) = ladder(target);
+    let total = target;
     let mut out = my_status(event_id, uid);
     let mut ledger: Option<(f64, f64, String)> = None;
     // 不满足条件时原来直接 return，前端拿到的 my_status 和成功时一模一样，
@@ -218,7 +210,7 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
         };
         let invited = util::int_or(m.get("invited"), 0).min(target);
         // 阶段判定用成员加入时的 trial 快照：管理员事后把活动翻成试玩，
-        // 不至于瞬间给全部存量成员解锁提现（老成员行没这字段时退回事件值）
+        // 不至于瞬间给全部存量成员解锁赠金领取（老成员行没这字段时退回事件值）
         let trial = m.get("trial").map(util::truthy).unwrap_or(trial);
         let eff_invited = if trial { target } else { invited };
         let (p1, p2, p3, paid) = (
@@ -226,10 +218,6 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             m.get("p2").map(util::truthy).unwrap_or(false),
             m.get("p3").map(util::truthy).unwrap_or(false),
             m.get("paid").map(util::truthy).unwrap_or(false),
-        );
-        let (diamonds, golds) = (
-            util::int_or(m.get("diamonds"), 0),
-            util::int_or(m.get("golds"), 0),
         );
         // 判定阶段（基于拷贝的字段，避免借用冲突）
         // 门槛是波次叠加曲线（1、2、4、其余），全部夹在 total 内：
@@ -262,7 +250,7 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
                 4 => {
                     if p1 && p2 && p3 {
                         format!(
-                            "还需邀请 {} 位好友才能提现（已邀请 {}）",
+                            "还需邀请 {} 位好友才能领取赠金（已邀请 {}）",
                             (c4 - eff_invited).max(0),
                             eff_invited
                         )
@@ -278,11 +266,9 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
         if let Some(o) = m.as_object_mut() {
             match step {
                 1 => {
-                    o.insert("diamonds".into(), json!((diamonds + 4).min(gem_need)));
                     o.insert("p1".into(), json!(true));
                 }
                 2 => {
-                    o.insert("golds".into(), json!((golds + 4).min(gold_need)));
                     o.insert("p2".into(), json!(true));
                 }
                 3 => {
@@ -295,17 +281,17 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             }
         }
         if step == 4 {
-            // 提现：A 元入充值账本（真正的发放点）——走 credit() 保证
-            // balance/recharge_total/账本三者一致，与转盘余额奖品同口径
+            // 赠金：A 元入赠金账本（真正的发放点）——走 credit() 保证
+            // balance/grant_total/账本三者一致；产品口径是「赠金」不是提现
             if let Some(arr) = db.get_mut("users").and_then(|u| u.as_array_mut()) {
                 for u in arr.iter_mut() {
                     if util_str(u.get("id")) == uid {
-                        crate::users::credit(u, "recharge", amount);
+                        crate::users::credit(u, "grant", amount);
                         break;
                     }
                 }
             }
-            ledger = Some((0.0, amount, "拉人活动提现".into()));
+            ledger = Some((amount, 0.0, "拉人活动赠金".into()));
         }
         if let Some((dg, dr, note)) = ledger {
             crate::users::fund_log(db, uid, "prize", dg, dr, &note);
@@ -407,7 +393,8 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
     let e = get_event(event_id).unwrap_or(json!({}));
     let amount = util::f64_or(e.get("amount"), 0.0);
     let target = util::int_or(e.get("target"), 1).max(1);
-    let (t1, _t2, per, gem_need, gold_need, total) = ladder(target);
+    let t1 = 1.min(target);
+    let total = target;
     let db = store().load();
     let m = db
         .get("invite_members")
@@ -453,10 +440,7 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
         "step3_need": c3,
         "collected": util::round6(collected),
         "remain": util::round6((amount - collected).max(0.0)),
-        "diamonds": util::int_or(m.get("diamonds"), 0),
-        "golds": util::int_or(m.get("golds"), 0),
-        "gem_need": gem_need, "gold_need": gold_need,
-        "per": per, "total": total,
+        "total": total,
         "p1": p1, "p2": p2, "p3": p3, "paid": paid,
         "draw_credits": util::int_or(m.get("draw_credits"), 0),
         "doubler": util::int_or(m.get("doubler"), 0),

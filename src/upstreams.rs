@@ -663,6 +663,8 @@ pub fn validate_save(data: &Value) -> (Option<Value>, String) {
         "param_overrides": parse_param_overrides(data.get("param_overrides").unwrap_or(&Value::Object(Obj::new()))),
         "thinking_defaults": join_lines(data.get("thinking_defaults").unwrap_or(&Value::Null)),
         "enabled": util::as_bool(data.get("enabled").unwrap_or(&Value::Bool(true)), true),
+        // 渠道开关：把调用方客户端的 User-Agent 透传给上游（默认关）
+        "pass_client_ua": util::as_bool(data.get("pass_client_ua").unwrap_or(&Value::Bool(false)), false),
     });
     // 载荷未带 prices 时不要插入空对象：否则 save() 的旧字段保留循环会认为
     // 新行已有该键，导致渠道表单保存（前端从不发送 prices）抹掉已设定价

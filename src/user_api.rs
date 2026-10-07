@@ -547,6 +547,17 @@ pub async fn promo_join(headers: &HeaderMap, body: Bytes) -> Response {
     let Ok(uid) = user_require(headers, true) else { return user_require_err() };
     let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let id = util::str_or(body_v.get("id"), "");
+    // 试玩活动是管理员预览用（用户列表层已隐藏，但邀请链接会泄露活动 id），
+    // join 入口再挡一道：任何普通用户都不允许加入 trial 活动
+    if let Some(e) = crate::promo::get_event(&id) {
+        if e.get("trial").map(util::truthy).unwrap_or(false) {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": {"message": "试玩活动暂不开放参加"}})),
+            )
+                .into_response();
+        }
+    }
     match crate::promo::join(&id, &uid) {
         Ok(st) => json_resp(json!({"ok": true, "status": st})),
         Err(e) => (
@@ -563,6 +574,16 @@ pub async fn promo_claim(headers: &HeaderMap, body: Bytes) -> Response {
     let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let id = util::str_or(body_v.get("id"), "");
     let step = util::int_or(body_v.get("step"), 1);
+    // trial 活动的领取入口一并封死（防止存量 trial 成员行走真金发放）
+    if let Some(e) = crate::promo::get_event(&id) {
+        if e.get("trial").map(util::truthy).unwrap_or(false) {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": {"message": "试玩活动暂不开放领取"}})),
+            )
+                .into_response();
+        }
+    }
     match crate::promo::claim(&id, &uid, step) {
         Ok(st) => json_resp(json!({"ok": true, "status": st})),
         Err(e) => (

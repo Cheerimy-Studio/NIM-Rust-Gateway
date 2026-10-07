@@ -1899,7 +1899,7 @@ pub async fn promo_save(headers: &HeaderMap, body: Bytes) -> Response {
     if !(amount > 0.0) {
         return (
             StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "提现金额必须大于 0"}})),
+            axum::Json(json!({"error": {"message": "奖励金额必须大于 0"}})),
         )
             .into_response();
     }

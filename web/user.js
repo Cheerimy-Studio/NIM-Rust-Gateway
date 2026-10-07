@@ -732,7 +732,7 @@ function promoCard(ev, d) {
       + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
       + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
       + '</div>'
-      + '<div class="mb-2">邀请好友注册，赢 <b>¥' + ev.amount + '</b> 余额！</div>'
+      + '<div class="mb-2">邀请好友注册，赢 <b>¥' + ev.amount + '</b> 赠金！</div>'
       + '<div class="small mb-3" style="opacity:.9">活动目标：邀请 ??? 位好友 · ' + promoCdPart(exp) + '</div>'
       + '<button class="pbtn primary" id="promo-join">立即参与</button>';
     const jb = card.querySelector('#promo-join');
@@ -764,14 +764,14 @@ function promoCard(ev, d) {
   const total = Math.max(1, st.total || ev.target || 1);
   const step2 = Math.max(t1, Math.min(st.step2_need || Math.min(3, total), total));
   const step3 = Math.max(step2, Math.min(st.step3_need || Math.min(7, total), total));
-  // 波次叠加曲线的累计门槛（1、3、7、T）：第 4 步提现也要拉满最后一波
+  // 波次叠加曲线的累计门槛（1、3、7、T）：第 4 步领赠金也要拉满最后一波
   const needs = [t1, step2, step3, total];
   const flags = [!!st.p1, !!st.p2, !!st.p3, paid];
   const can = [
     eff >= needs[0],
     flags[0] && eff >= needs[1],
     flags[0] && flags[1] && eff >= needs[2],
-    flags[0] && flags[1] && flags[2],
+    flags[0] && flags[1] && flags[2] && eff >= needs[3],
   ];
   // 拼多多式分阶段解锁：只展示「当前这一步」，后面的一律打码
   const cur = flags.indexOf(false);
@@ -786,11 +786,13 @@ function promoCard(ev, d) {
      title: d12 > 0 ? '再邀 ' + d12 + ' 位好友' : '累计邀满 ' + needs[1] + ' 位好友',
      sub: '好友注册即计入 · 完成后进度到 ¥' + at(1)},
     {badge: '第 3 步', name: '冲刺礼', title: '累计邀满 ??? 位好友',
-     sub: '总人数保密 · 完成最后冲刺解锁提现资格'},
-    {badge: '最后一步', name: '提现', title: '提现 ¥' + money.toFixed(2),
-     sub: st.trial ? '试玩模式 · 余额立刻可用' : '最后一波 · 达成即刻提现到账'},
+     sub: '总人数保密 · 完成最后冲刺解锁赠金领取'},
+    {badge: '最后一步', name: '领赠金', title: '领 ¥' + money.toFixed(2) + ' 赠金',
+     sub: st.trial ? '试玩模式 · 赠金立刻可用' : '最后一波 · 达成即刻到账'},
   ];
   const stepProg = i => {
+    // 冲刺/领赠金波改用金额进度：人数百分比配合「已邀请 N 人」能反解出保密的总数
+    if (i >= 2) return money > 0 ? Math.max(0, Math.min(1, st.collected / money)) : 0;
     const prev = i === 0 ? 0 : needs[i - 1];
     const span = needs[i] - prev;
     if (span <= 0) return eff >= needs[i] ? 1 : 0;
@@ -816,14 +818,14 @@ function promoCard(ev, d) {
   if (paid) {
     html += '<div class="promo-success" data-ev="' + esc(ev.id) + '">'
       + '<div class="promo-success-ic">🎉</div>'
-      + '<div><b>¥' + money.toFixed(2) + ' 已到账！</b>'
-      + '<div>充值余额已入账，可在「概览 · 我的钱包」查看</div></div></div>';
+      + '<div><b>¥' + money.toFixed(2) + ' 赠金已到账！</b>'
+      + '<div>赠金已入账，可在「概览 · 我的钱包」查看</div></div></div>';
   } else if (cur >= 0) {
     const p = Math.round(stepProg(cur) * 100);
-    // 冲刺/提现阶段的差值和门槛不外露：eff + 差值 = 总人数，会把保密的 ??? 算出来
+    // 冲刺/领赠金阶段的差值和门槛不外露：eff + 差值 = 总人数，会把保密的 ??? 算出来
     const waitTxt = cur < 2
       ? '还差 ' + Math.max(0, needs[cur] - eff) + ' 位好友'
-      : '继续邀请好友，解锁提现资格';
+      : '继续邀请好友，解锁赠金领取';
     const foot = cur < 2
       ? '<span>已邀请 <b>' + eff + '</b> / ' + needs[cur] + ' 人</span>'
       : '<span>已邀请 <b>' + eff + '</b> 人</span>';
@@ -867,8 +869,6 @@ function promoCard(ev, d) {
   const chips = [];
   if (st.draw_credits > 0) chips.push('<span class="promo-chip"><i class="bi bi-ticket-perforated"></i>抽奖次数 × ' + st.draw_credits + '</span>');
   if (st.doubler > 0) chips.push('<span class="promo-chip"><i class="bi bi-stack"></i>翻倍卡 × ' + st.doubler + '</span>');
-  if (st.diamonds > 0) chips.push('<span class="promo-chip"><i class="bi bi-gem"></i>钻石 ' + st.diamonds + '/' + (st.gem_need || 20) + '</span>');
-  if (st.golds > 0) chips.push('<span class="promo-chip"><i class="bi bi-coin"></i>金币 ' + st.golds + '/' + (st.gold_need || 20) + '</span>');
   if (chips.length) html += '<div class="d-flex gap-2 flex-wrap my-3">' + chips.join('') + '</div>';
 
   const friends = st.friends || [];
@@ -884,11 +884,10 @@ function promoCard(ev, d) {
     html += '<div class="promo-friend promo-friend-empty mt-3">还没有好友加入——把上面的链接发给朋友，注册成功就计入进度～</div>';
   }
 
-  html += '<div class="mt-2 mb-1"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘抽奖 →</a></div>'
-    + '<details class="promo-rules"><summary><i class="bi bi-info-circle"></i> 活动规则</summary><ul>'
+  html += '<details class="promo-rules"><summary><i class="bi bi-info-circle"></i> 活动规则</summary><ul>'
     + '<li>活动自创建起 7 天有效，到期即止、不可重开；多个活动可同时参加。</li>'
     + '<li>好友通过你的链接注册成功即计入进度；每拉 1 人进度 +1。</li>'
-    + '<li>四个阶段全部完成后，奖励以「充值余额」一次性到账。</li>'
+    + '<li>四个阶段全部完成后，奖励以「赠金」一次性到账。</li>'
     + '<li>本活动最终解释权归平台所有。</li>'
     + '</ul></details>';
 
@@ -900,7 +899,7 @@ function promoCard(ev, d) {
     + ' · 已邀请 <b>' + st.invited + '</b> 人</div>'
     + '<div class="promo-amount">¥<b class="promo-amt">' + st.collected.toFixed(2) + '</b><small> / ' + money.toFixed(2) + '</small></div>'
     + '<div class="promo-bar my-2"><div style="width:' + pct + '%"></div></div>'
-    + '<div class="promo-gap">' + (paid ? '已成功提现，余额已到账！' : '还差 <b>¥' + st.remain.toFixed(2) + '</b> 即可提现') + '</div>'
+    + '<div class="promo-gap">' + (paid ? '赠金已到账，可在「概览 · 我的钱包」查看！' : '还差 <b>¥' + st.remain.toFixed(2) + '</b> 即可领取赠金') + '</div>'
     + html;
 
   // 奖金数字滚动：只在上次渲染值与本次不同时播放（首次渲染不吵）
@@ -925,8 +924,6 @@ function promoCard(ev, d) {
     if (ok) { promoCopied(cpm); toast('邀请文案已复制'); }
     else toast('复制失败，请手动复制', 'danger');
   });
-  const gw = card.querySelector('#promo-goto-wheel');
-  if (gw) gw.onclick = () => document.querySelector('a[data-p="wheel"]').click();
   if (cur >= 0) {
     const b = card.querySelector('#' + PROMO_CLAIM_IDS[cur]);
     if (b) b.onclick = () => {

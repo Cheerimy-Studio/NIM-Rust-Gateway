@@ -207,7 +207,6 @@ $('#promo-add').onclick = guard(async () => {
     name: name,
     amount: parseFloat($('#promo-amount').value) || 0,
     target: parseInt($('#promo-target').value) || 0,
-    trial: $('#promo-trial').checked,
     enabled: $('#promo-enabled').checked,
   }});
   toast('活动已创建');
@@ -643,6 +642,7 @@ async function loadUpstreams() {
       $('#up-models').value = (u.models || []).join('\n');
       $('#up-map').value = Object.entries(u.model_map || {}).map(([k, v]) => `${k}=${v}`).join('\n');
       for (const [id, key] of UP_FIELDS) $('#' + id).value = u[key] || 0;
+      $('#up-pua').checked = !!u.pass_client_ua;
       $('#up-herr').value = String(u.hide_errors || 0);
       $('#up-hname').value = String(u.hide_mapped || 0);
       tdefLoad(u.thinking_defaults || '');
@@ -861,6 +861,7 @@ function bindUpstreams() {
       daily_cap: $('#up-daily').value,
       models: $('#up-models').value,
       model_map: $('#up-map').value,
+      pass_client_ua: $('#up-pua').checked,
       hide_errors: $('#up-herr').value,
       hide_mapped: $('#up-hname').value,
       thinking_defaults: tdefDump(),
@@ -877,6 +878,7 @@ function bindUpstreams() {
     $('#up-daily').value = '0';
     $('#up-models').value = '';
     $('#up-map').value = '';
+    $('#up-pua').checked = false;
     $('#up-herr').value = '0';
     $('#up-hname').value = '0';
     tdefClear();

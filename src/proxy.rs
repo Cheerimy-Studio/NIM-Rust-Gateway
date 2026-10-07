@@ -1917,12 +1917,28 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
             let client = get_http(verify_tls, connect_to);
             let url = format!("{}/{}", upstreams::base_for(&key), endpoint);
+            // 渠道开关「透传调用方 User-Agent」：开启时把下游客户端的 UA 原样
+            // 带给上游（默认关；关=不带 UA，保持既有行为）
+            // 开关挂在渠道（upstreams 行）上，pool key 行不携带该字段
+            let pass_ua = upstreams::get_upstream(&util::str_or(key.get("upstream_id"), ""))
+                .and_then(|u| u.get("pass_client_ua").cloned())
+                .map(|v| util::truthy(&v))
+                .unwrap_or(false);
+            let client_ua = if pass_ua {
+                ctx.headers.get("user-agent").and_then(|x| x.to_str().ok()).map(|s| s.to_string())
+            } else {
+                None
+            };
             let fut = client
                 .post(&url)
                 .header("Accept", if stream { "text/event-stream" } else { "application/json" })
                 .header("Authorization", format!("Bearer {}", util::str_or(key.get("apikey"), "")))
                 .header("Content-Type", "application/json")
                 .body(body.clone());
+            let fut = match client_ua {
+                Some(ua) => fut.header("User-Agent", ua),
+                None => fut,
+            };
             let built = fut.build();
             if let Err(e) = &built {
                 rerr = conn_reason(e);
@@ -2906,12 +2922,28 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
             let client = get_http(verify_tls, connect_to);
             let url = format!("{}/chat/completions", upstreams::base_for(&key));
+            // 渠道开关「透传调用方 User-Agent」：开启时把下游客户端的 UA 原样
+            // 带给上游（默认关；关=不带 UA，保持既有行为）
+            // 开关挂在渠道（upstreams 行）上，pool key 行不携带该字段
+            let pass_ua = upstreams::get_upstream(&util::str_or(key.get("upstream_id"), ""))
+                .and_then(|u| u.get("pass_client_ua").cloned())
+                .map(|v| util::truthy(&v))
+                .unwrap_or(false);
+            let client_ua = if pass_ua {
+                ctx.headers.get("user-agent").and_then(|x| x.to_str().ok()).map(|s| s.to_string())
+            } else {
+                None
+            };
             let fut = client
                 .post(&url)
                 .header("Accept", if stream { "text/event-stream" } else { "application/json" })
                 .header("Authorization", format!("Bearer {}", util::str_or(key.get("apikey"), "")))
                 .header("Content-Type", "application/json")
                 .body(raw.clone());
+            let fut = match client_ua {
+                Some(ua) => fut.header("User-Agent", ua),
+                None => fut,
+            };
             let built = fut.build();
             if let Err(e) = &built {
                 rerr = conn_reason(e);
