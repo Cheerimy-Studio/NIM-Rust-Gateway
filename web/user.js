@@ -733,7 +733,7 @@ function promoCard(ev, d) {
       + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
       + '</div>'
       + '<div class="mb-2">邀请好友注册，赢 <b>¥' + ev.amount + '</b> 余额！</div>'
-      + '<div class="small mb-3" style="opacity:.9">活动目标：邀请 ' + ev.target + ' 位好友 · ' + promoCdPart(exp) + '</div>'
+      + '<div class="small mb-3" style="opacity:.9">活动目标：邀请 ??? 位好友 · ' + promoCdPart(exp) + '</div>'
       + '<button class="pbtn primary" id="promo-join">立即参与</button>';
     const jb = card.querySelector('#promo-join');
     jb.onclick = () => {
@@ -784,8 +784,8 @@ function promoCard(ev, d) {
     {badge: '第 2 步', name: '进阶礼',
      title: d12 > 0 ? '再邀 ' + d12 + ' 位好友' : '累计邀满 ' + needs[1] + ' 位好友',
      sub: '好友注册即计入 · 完成后进度到 ¥' + at(1)},
-    {badge: '第 3 步', name: '冲刺礼', title: '累计邀满 ' + needs[2] + ' 位好友',
-     sub: '完成最后冲刺 · 解锁提现资格'},
+    {badge: '第 3 步', name: '冲刺礼', title: '累计邀满 ??? 位好友',
+     sub: '总人数保密 · 完成最后冲刺解锁提现资格'},
     {badge: '最后一步', name: '提现', title: '提现 ¥' + money.toFixed(2),
      sub: st.trial ? '试玩模式 · 余额立刻可用' : '一步到账 · 充值余额立刻可用'},
   ];
@@ -807,8 +807,10 @@ function promoCard(ev, d) {
   let html = '';
   const doneN = paid ? 4 : cur;
   for (let i = 0; i < doneN; i++) {
+    // 已完成的冲刺步直接亮出真实总人数（这时候公布反而有成就感）
+    const doneTitle = i === 2 ? '累计邀满 ' + needs[2] + ' 位好友' : TASKS[i].title;
     html += '<div class="promo-stage done"><div class="ic">✓</div>'
-      + '<div class="tx">' + TASKS[i].badge + ' · ' + TASKS[i].title + '</div>'
+      + '<div class="tx">' + TASKS[i].badge + ' · ' + doneTitle + '</div>'
       + '<span class="promo-tag">已完成</span></div>';
   }
   if (paid) {
@@ -818,12 +820,13 @@ function promoCard(ev, d) {
       + '<div>充值余额已入账，可在「概览 · 我的钱包」查看</div></div></div>';
   } else if (cur >= 0) {
     const p = Math.round(stepProg(cur) * 100);
-    const waitTxt = cur < 3
+    // 冲刺阶段的差值和门槛不外露：eff + 差值 = 总人数，会把保密的 ??? 算出来
+    const waitTxt = cur < 2
       ? '还差 ' + Math.max(0, needs[cur] - eff) + ' 位好友'
-      : '请先领取前面的奖励';
-    const foot = cur < 3
+      : (cur === 2 ? '继续邀请好友，解锁提现资格' : '请先领取前面的奖励');
+    const foot = cur < 2
       ? '<span>已邀请 <b>' + eff + '</b> / ' + needs[cur] + ' 人</span>'
-      : '<span>前三阶段全部完成</span>';
+      : '<span>已邀请 <b>' + eff + '</b> 人</span>';
     html += '<div class="promo-task promo-in" data-ev="' + esc(ev.id) + '">'
       + '<div class="promo-task-top"><span class="promo-badge">' + TASKS[cur].badge + '</span>'
       + '<span class="promo-task-name">' + TASKS[cur].name + '</span></div>'
@@ -883,7 +886,7 @@ function promoCard(ev, d) {
     + '<details class="promo-rules"><summary><i class="bi bi-info-circle"></i> 活动规则</summary><ul>'
     + '<li>活动自创建起 7 天有效，到期即止、不可重开；多个活动可同时参加。</li>'
     + '<li>好友通过你的链接注册成功即计入进度；每拉 1 人另 +1 次抽奖机会。</li>'
-    + '<li>每拉满 5 人额外得 1 张翻倍卡，抽奖抽到余额奖品时可让它翻倍一次。</li>'
+    + '<li>总共需要邀请的人数保密（???），随阶段推进逐步揭晓。</li>'
     + '<li>四个阶段全部完成后，奖励以「充值余额」一次性到账。</li>'
     + '</ul></details>';
 
@@ -892,7 +895,7 @@ function promoCard(ev, d) {
     + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
     + '</div>'
     + '<div class="small mb-2" style="opacity:.9">' + promoCdPart(exp)
-    + ' · 已邀请 <b>' + st.invited + '</b> / ' + ev.target + ' 人</div>'
+    + ' · 已邀请 <b>' + st.invited + '</b> 人</div>'
     + '<div class="promo-amount">¥<b class="promo-amt">' + st.collected.toFixed(2) + '</b><small> / ' + money.toFixed(2) + '</small></div>'
     + '<div class="promo-bar my-2"><div style="width:' + pct + '%"></div></div>'
     + '<div class="promo-gap">' + (paid ? '已成功提现，余额已到账！' : '还差 <b>¥' + st.remain.toFixed(2) + '</b> 即可提现') + '</div>'

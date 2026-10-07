@@ -8,9 +8,10 @@
 //!          兜底，否则 2*t1=2 > T=1，永远凑不齐
 //!   阶段3  邀请满 T 人 → 领取，解锁提现
 //!   阶段4  提现 A 元入充值账本
-//!   翻倍卡：每拉 5 人额外 +1 张（抽奖余额奖品翻倍一次）
 //!   每拉 1 人 +1 次抽奖（抽奖时可抵扣单次消耗）
-//! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」。
+//!   邀请不再送翻倍卡（= 余额奖品等额翻倍的真实资金外流）；存量卡仍有效
+//! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」，
+//! 且总邀请人数对用户保密（显示 ???），要到冲刺阶段自己拉够才知道。
 //! 试玩模式：加入即视为拉满，全流程免拉人走通（管理员体验用）。
 
 use crate::store::store;
@@ -91,17 +92,17 @@ fn member_mut<'a>(db: &'a mut Value, event_id: &str, uid: &str) -> Option<&'a mu
     })
 }
 
-/// 给成员行累计 n 次有效邀请：invited 封顶 target；翻倍卡按未截断的累计
-/// 邀请数每满 5 发 1 张。不能拿封顶后的 invited 取模——target=4 时第
-/// 5、6、7… 位好友每次都算出 5%5==0，等于无限发翻倍卡（真实资金）
+/// 给成员行累计 n 次有效邀请：invited 封顶 target（展示/门槛用），invited_total
+/// 保留未截断累计；每拉 1 人 +1 次抽奖。
+/// 活动调整：邀请不再送翻倍卡（翻倍卡=余额奖品等额翻倍，等于真实资金外流），
+/// 存量翻倍卡仍在转盘生效；invited_total 继续维护，防再引入按封顶值取模的错
 fn grant_invite_rewards(m: &mut Value, target: i64, n: i64) {
     if n <= 0 {
         return;
     }
     let old_total = util::int_or(m.get("invited_total"), util::int_or(m.get("invited"), 0));
     let new_total = old_total + n;
-    let gained_cards = new_total / 5 - old_total / 5;
-    let doubler = util::int_or(m.get("doubler"), 0) + gained_cards;
+    let doubler = util::int_or(m.get("doubler"), 0);
     let credits = util::int_or(m.get("draw_credits"), 0) + n;
     if let Some(o) = m.as_object_mut() {
         o.insert("invited_total".into(), json!(new_total));

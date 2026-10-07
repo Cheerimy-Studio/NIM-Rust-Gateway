@@ -1,6 +1,6 @@
 [package]
 name = "nim-gateway"
-version = "1.7.29"
+version = "1.7.30"
 edition = "2021"
 
 [dependencies]
