@@ -9,8 +9,7 @@
 //!   阶段2  累计满 3 人 → 领取（进度到 A/2）
 //!   阶段3  累计满 7 人 → 领取，解锁最后一波
 //!   阶段4  累计满 T 人 → 提现 A 元入充值账本
-//!   每拉 1 人 +1 次抽奖（抽奖时可抵扣单次消耗）
-//!   邀请不再送翻倍卡（= 余额奖品等额翻倍的真实资金外流）；存量卡仍有效
+//!   邀请只推进度：不送抽奖次数、不送翻倍卡（存量仍可在转盘消耗）
 //! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」，
 //! 且总邀请人数对用户保密（显示 ???），要到冲刺阶段自己拉够才知道。
 //! 试玩模式：加入即视为拉满，全流程免拉人走通（管理员体验用）。
@@ -102,9 +101,9 @@ fn member_mut<'a>(db: &'a mut Value, event_id: &str, uid: &str) -> Option<&'a mu
 }
 
 /// 给成员行累计 n 次有效邀请：invited 封顶 target（展示/门槛用），invited_total
-/// 保留未截断累计；每拉 1 人 +1 次抽奖。
-/// 活动调整：邀请不再送翻倍卡（翻倍卡=余额奖品等额翻倍，等于真实资金外流），
-/// 存量翻倍卡仍在转盘生效；invited_total 继续维护，防再引入按封顶值取模的错
+/// 保留未截断累计。
+/// 活动调整：邀请只推进度——不再送抽奖次数、不再送翻倍卡；
+/// 存量的抽奖次数/翻倍卡仍可在转盘消耗（消耗处有 >0 守卫）
 fn grant_invite_rewards(m: &mut Value, target: i64, n: i64) {
     if n <= 0 {
         return;
@@ -112,12 +111,10 @@ fn grant_invite_rewards(m: &mut Value, target: i64, n: i64) {
     let old_total = util::int_or(m.get("invited_total"), util::int_or(m.get("invited"), 0));
     let new_total = old_total + n;
     let doubler = util::int_or(m.get("doubler"), 0);
-    let credits = util::int_or(m.get("draw_credits"), 0) + n;
     if let Some(o) = m.as_object_mut() {
         o.insert("invited_total".into(), json!(new_total));
         o.insert("invited".into(), json!(new_total.min(target)));
         o.insert("doubler".into(), json!(doubler));
-        o.insert("draw_credits".into(), json!(credits));
     }
 }
 

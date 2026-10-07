@@ -853,9 +853,9 @@ function promoCard(ev, d) {
     + '<div class="promo-how-step"><span class="n">3</span><div><b>好友注册</b><span>进度秒到账</span></div></div>'
     + '</div>';
 
-  // 引导条与神秘奖励之间加一条带标签的分割线
+  // 引导条与神秘奖励之间加一条素分割线（不带文案）
   if (cur >= 0) {
-    html += '<div class="promo-sep"><span><i class="bi bi-gift"></i> 神秘奖励 · 一波比一波大</span></div>';
+    html += '<div class="promo-sep"></div>';
     for (let i = cur + 1; i < 4; i++) {
       html += '<div class="promo-lock promo-in" style="animation-delay:' + (0.08 * (i - cur)) + 's">'
         + '<div class="promo-lock-ic"><i class="bi bi-lock-fill"></i></div>'
@@ -884,13 +884,12 @@ function promoCard(ev, d) {
     html += '<div class="promo-friend promo-friend-empty mt-3">还没有好友加入——把上面的链接发给朋友，注册成功就计入进度～</div>';
   }
 
-  html += '<div class="mt-2 mb-1"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘用次数抽奖 →</a></div>'
+  html += '<div class="mt-2 mb-1"><a href="javascript:void(0)" class="small" style="color:#ffe9c9" id="promo-goto-wheel">去大转盘抽奖 →</a></div>'
     + '<details class="promo-rules"><summary><i class="bi bi-info-circle"></i> 活动规则</summary><ul>'
     + '<li>活动自创建起 7 天有效，到期即止、不可重开；多个活动可同时参加。</li>'
-    + '<li>好友通过你的链接注册成功即计入进度；每拉 1 人另 +1 次抽奖机会。</li>'
-    + '<li>邀请要求逐波翻倍（如 1、2、4、8），越往后越接近提现。</li>'
-    + '<li>总共需要邀请的人数保密（???），随阶段推进逐步揭晓。</li>'
+    + '<li>好友通过你的链接注册成功即计入进度；每拉 1 人进度 +1。</li>'
     + '<li>四个阶段全部完成后，奖励以「充值余额」一次性到账。</li>'
+    + '<li>本活动最终解释权归平台所有。</li>'
     + '</ul></details>';
 
   card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-1">'
