@@ -3,7 +3,6 @@
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::RwLock;
 
@@ -267,9 +266,4 @@ pub fn refresh_pool_cap() {
         .unwrap_or(0);
     let cap = pool_size(&cfg, accounts);
     POOL_CAP.store(cap, Ordering::SeqCst);
-}
-
-#[allow(unused)]
-fn _touch(h: HashMap<String, String>) -> HashMap<String, String> {
-    h
 }

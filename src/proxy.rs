@@ -23,6 +23,42 @@ const REGEX_SCAN_MAX: usize = 8000;
 const HB: f64 = 10.0; // 心跳间隔：必须远小于中间代理空闲超时（nginx 默认 60s）
 const QUEUE_POLL_MAX: f64 = 3.0;
 const QUEUE_MAX_WAITING: i64 = 200;
+/// 词沙拉检测阈值：内容长度低于此值不检测（短回复误报率不可控）
+const GARBLED_MIN_LEN: usize = 120;
+/// 词沙拉判定：密集特殊 token 泄漏（模型/模板故障的特征）。只检测累积开头
+/// 32KB —— 判定要在首帧透传前做出，全量扫描太迟也太贵
+const GARBLED_SCAN_MAX: usize = 32768;
+
+/// 内容是否是「词沙拉」：上游/模型故障产出的乱码文本（特殊 token 泄漏、
+/// 多语言碎片混杂）。判据是「语言段交替密度」——把开头 32KB 切成 ASCII 段
+/// 与非 ASCII 段，正常中英混排是段落级交替（每百字符个位数切换），词沙拉是
+/// token 级交替（每百字符几十次切换）。只扫开头：判定要在首帧透传前做出。
+fn looks_garbled(text: &str) -> bool {
+    let s: Vec<char> = text.chars().take(GARBLED_SCAN_MAX).collect();
+    if s.len() < GARBLED_MIN_LEN {
+        return false;
+    }
+    let mut transitions = 0usize;
+    let mut prev: Option<bool> = None;
+    for &c in &s {
+        let ascii = c.is_ascii();
+        if prev != Some(ascii) {
+            if prev.is_some() {
+                transitions += 1;
+            }
+            prev = Some(ascii);
+        }
+    }
+    let density = transitions as f64 / s.len() as f64 * 100.0;
+    density > 18.0
+}
+
+/// 特殊 token 泄漏的密集出现（<|xxx|> / <|close|> 等控制标记）
+fn has_token_leak(text: &str) -> bool {
+    let head: String = text.chars().take(GARBLED_SCAN_MAX).collect();
+    let pat_count = head.matches("<|").count();
+    pat_count >= 3
+}
 
 static WAITING: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
 
@@ -1310,6 +1346,11 @@ async fn run_pump(
     let mut scrubbed = false;
     let mut bang_tail: usize = 0;
     let mut train: Vec<u8> = Vec::new();
+    // 乱码嗅探窗：先攒原始 SSE 字节（≤4KB），提取纯内容文本后判定。
+    // 不能拿原始字节直接算密度 —— SSE 的 JSON 帧包装会把正常中文流的
+    // ASCII/非 ASCII 切换次数也抬高，纯内容才可判。判定通过后不再扫
+    let mut sniff_buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut sniff_done = false;
 
     let is_convert = ctx.protocol.is_some();
     // ZCode 0.16.x / ai-sdk 2.x：请求声明 stream_options.include_usage 时按行缓冲
@@ -1426,6 +1467,26 @@ async fn run_pump(
         out_bytes += chunk.len();
         if first_chunk_at == 0.0 {
             first_chunk_at = util::now_f();
+        }
+        // 乱码嗅探（前 4KB 原始字节内）：命中即中止，按乱码收口释放。
+        // 已下发的前缀注定是乱码开头，但继续透传只会更糟——短乱码可容忍，
+        // 几十 KB 不可容忍；客户端会收到显式 error 事件而非静默坏回复
+        if !sniff_done {
+            if sniff_buf.len() < 4096 {
+                sniff_buf.extend_from_slice(&chunk);
+            }
+            if sniff_buf.len() >= 1024 {
+                // content 与 reasoning 一起判定：词沙拉在推理段出现得更早更密
+                let (content, reasoning) = train_sse_text(&sniff_buf);
+                let joined = format!("{}{}", content, reasoning);
+                if has_token_leak(&joined) || looks_garbled(&joined) {
+                    truncated = "上游输出乱码（特殊 token 泄漏或词沙拉），已中止".into();
+                    break;
+                }
+                if sniff_buf.len() >= 4096 {
+                    sniff_done = true; // 窗口耗尽且干净：后续不再付嗅探成本
+                }
+            }
         }
         if ctx.capture_train && train.len() < 1048576 {
             train.extend_from_slice(&chunk);
@@ -2105,7 +2166,6 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     .as_ref()
                     .map(|c| String::from_utf8_lossy(c).to_string())
                     .unwrap_or_default();
-                let head = util::char_prefix(&text, 500);
                 // 第三分支不能对首块内容做 "error"+关键词 子串扫描：模型回复
                 // 开头聊到 {"error": "duplicate key"} 这类内容会被误判成上游
                 // 错误流，白白烧一次自愈尝试还把 200 流换成错误响应
@@ -2229,6 +2289,12 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 success = false;
                 rerr = "上游返回空响应".into();
                 rstatus = 502;
+            } else if has_token_leak(st) || looks_garbled(st) {
+                // 词沙拉/特殊 token 泄漏：模型或推理模板故障的乱码输出（K3 实例）。
+                // 按上游侧失败收口（冷却/熔断接管），换号重试；不把乱码透传给用户
+                success = false;
+                rerr = "上游输出乱码（特殊 token 泄漏或词沙拉），已丢弃".into();
+                rstatus = 502;
             } else if st.starts_with('{') && util::char_prefix(st, 200).contains("\"error\"") {
                 if let Ok(j) = serde_json::from_str::<Value>(st) {
                     if j.get("error").map(|e| util::truthy(e)).unwrap_or(false) {
@@ -2244,10 +2310,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         } else {
             util::upstream_snippet(&json!({"status": rstatus, "body": rbody, "error": rerr}))
         };
-        // 瞬态错误（连接失败/超时/5xx/空响应）先同号快速重试一次（不惩罚账号）
+        // 瞬态错误（连接失败/超时/5xx/空响应/乱码）先同号快速重试一次（不惩罚账号）
         if !success
             && !same_key_tried.contains(&util::str_or(key.get("id"), ""))
-            && (rstatus == 0 || rstatus >= 500)
+            && (rstatus == 0 || rstatus >= 500 || rerr.contains("乱码"))
             && attempt < max_attempts
         {
             same_key_tried.insert(util::str_or(key.get("id"), ""));
@@ -3100,7 +3166,6 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     .as_ref()
                     .map(|c| String::from_utf8_lossy(c).to_string())
                     .unwrap_or_default();
-                let head = util::char_prefix(&text, 500);
                 // 第三分支不能对首块内容做 "error"+关键词 子串扫描：模型回复
                 // 开头聊到 {"error": "duplicate key"} 这类内容会被误判成上游
                 // 错误流，白白烧一次自愈尝试还把 200 流换成错误响应
@@ -3221,6 +3286,12 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 success = false;
                 rerr = "上游返回空响应".into();
                 rstatus = 502;
+            } else if has_token_leak(st) || looks_garbled(st) {
+                // 词沙拉/特殊 token 泄漏：模型或推理模板故障的乱码输出（K3 实例）。
+                // 按上游侧失败收口（冷却/熔断接管），换号重试；不把乱码透传给用户
+                success = false;
+                rerr = "上游输出乱码（特殊 token 泄漏或词沙拉），已丢弃".into();
+                rstatus = 502;
             } else if st.starts_with('{') && util::char_prefix(st, 200).contains("\"error\"") {
                 if let Ok(j) = serde_json::from_str::<Value>(st) {
                     if j.get("error").map(|e| util::truthy(e)).unwrap_or(false) {
@@ -3238,7 +3309,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         };
         if !success
             && !same_key_tried.contains(&util::str_or(key.get("id"), ""))
-            && (rstatus == 0 || rstatus >= 500)
+            && (rstatus == 0 || rstatus >= 500 || rerr.contains("乱码"))
             && attempt < max_attempts
         {
             same_key_tried.insert(util::str_or(key.get("id"), ""));

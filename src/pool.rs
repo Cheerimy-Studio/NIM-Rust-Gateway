@@ -2,7 +2,7 @@
 
 use crate::store::{store, Obj, Value};
 use crate::util;
-use crate::{queue, upstreams};
+use crate::upstreams;
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -93,6 +93,19 @@ pub fn classify(http_status: i64, errno: i64, error: &str) -> &'static str {
     {
         return "channel";
     }
+    // 乱码输出（词沙拉/特殊 token 泄漏）：模型或推理模板故障，与连接无关。
+    // 必须独立分级进冷却与熔断 —— 否则坏模板会把整池账号轮着烧一遍才罢休
+    if low.contains("乱码") || low.contains("garbled") {
+        return "garbled";
+    }
+    // 流式泵的中断/超时带着 HTTP 200 释放（200 是响应头状态，不代表流的结局）。
+    // 落进 "req" 桶的话既不冷却、不进熔断，还会把连续失败清零 —— 假死上游零惩罚
+    if http_status == 200 && (low.contains("超时") || low.contains("未返回")) {
+        return "timeout";
+    }
+    if http_status == 200 && low.contains("中断") {
+        return "conn";
+    }
     if (http_status == 400 || http_status == 404)
         && (low.contains("model") || low.contains("模型"))
         && MODEL_NEG_NOT_FOUND.iter().any(|k| low.contains(k))
@@ -107,6 +120,16 @@ pub fn classify(http_status: i64, errno: i64, error: &str) -> &'static str {
     }
     if http_status == 402 {
         return "payment";
+    }
+    // WAF/CDN 拦截页是 HTML，不是上游 API 的 JSON 鉴权响应：按基础设施抖动("conn")
+    // 处理。误判成 auth 的话，一波 403 挑战页就能把全池账号刷成 invalid_key ——
+    // 这是「服务器网络波动把所有号封禁」的主要放大器
+    if (http_status == 401 || http_status == 403)
+        && ["<html", "<!doctype", "just a moment", "attention required", "cf-error"]
+            .iter()
+            .any(|k| low.contains(k))
+    {
+        return "conn";
     }
     if http_status == 401 || http_status == 403 {
         return "auth";
@@ -1276,6 +1299,11 @@ fn release_fn(
                     o.insert("total_success".into(), Value::from(ts + 1));
                     o.insert("consecutive_failures".into(), Value::from(0));
                     o.insert("rl_streak".into(), Value::from(0));
+                    // hard_fail_count 的语义是「连续」硬失败：成功必须清零。
+                    // 不清零的话它是终身累加的 —— 历史抖动攒够 hard_fail_disable_count
+                    // 之后，再遇一次瞬时 401/403/402 就又封 24h，而且此后每次抖动
+                    // 都再封 24h（网络波动全池封禁的根因）
+                    o.insert("hard_fail_count".into(), Value::from(0));
                 }
             } else {
                 if let Some(o) = k.as_object_mut() {
@@ -1312,7 +1340,6 @@ fn release_fn(
                         }
                     }
                     "auth" | "payment" => {
-                        let cfail;
                         let hfail;
                         {
                             let o = k.as_object_mut().unwrap();
@@ -1320,10 +1347,8 @@ fn release_fn(
                             let h = util::int_or(o.get("hard_fail_count"), 0) + 1;
                             o.insert("consecutive_failures".into(), Value::from(c));
                             o.insert("hard_fail_count".into(), Value::from(h));
-                            cfail = c;
                             hfail = h;
                         }
-                        let _ = cfail;
                         let reason = if cls == "payment" { "no_credit" } else { "invalid_key" };
                         let limit = eff("hard_fail_disable_count", cfg_int_("hard_fail_disable_count", 3));
                         if limit > 0 && hfail >= limit {
@@ -1353,6 +1378,9 @@ fn release_fn(
                             "5xx" => "cool_5xx_seconds",
                             "timeout" => "cool_timeout_seconds",
                             "conn" => "cool_conn_seconds",
+                            // 乱码是模板/模型侧故障：冷却参照 5xx —— 熔断接管前
+                            // 别让坏模板把整池账号轮着烧
+                            "garbled" => "cool_5xx_seconds",
                             _ => "",
                         };
                         if !cool_field.is_empty() {
@@ -1512,10 +1540,10 @@ fn release_fn(
                     r.truncate(20);
                 }
             }
-            // 模型熔断：仅统计真实上游侧失败（5xx / 超时 / 连接失败）
+            // 模型熔断：仅统计真实上游侧失败（5xx / 超时 / 连接失败 / 乱码）
             if !uid2.is_empty()
                 && !success
-                && ["5xx", "timeout", "conn"].contains(&classify(http_status, errno, error))
+                && ["5xx", "timeout", "conn", "garbled"].contains(&classify(http_status, errno, error))
             {
                 let model_name = util::str_or(log.and_then(|l| l.get("model")), "");
                 if !model_name.is_empty() && model_name != "-" && cfg.get("breaker_enabled").map(util::truthy).unwrap_or(true) {
@@ -1909,10 +1937,4 @@ pub async fn test_key(key_id: &str) -> Value {
     }
     release(key_id, ok, status, &err, None, Some(&log_row), 0);
     serde_json::json!({"ok": ok, "status": status, "ms": ms, "models": count, "error": err})
-}
-
-// queue 模块引用（避免未使用告警）
-#[allow(unused)]
-fn _touch_queue() {
-    let _ = queue::stats(false);
 }

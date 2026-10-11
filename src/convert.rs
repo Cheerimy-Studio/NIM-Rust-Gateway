@@ -1,7 +1,7 @@
 //! 协议转换（core/convert.py 的移植）：Responses / Anthropic ↔ Chat Completions。
 
 use crate::util;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 pub fn py_str(v: &Value) -> String {
@@ -1122,9 +1122,4 @@ pub fn is_channel_exhausted(body_text: &str) -> bool {
     ["no available channel", "no channel available", "无可用渠道", "channel_exhausted"]
         .iter()
         .any(|k| s.contains(k))
-}
-
-#[allow(unused)]
-fn _touch(m: Map<String, Value>) -> Map<String, Value> {
-    m
 }
