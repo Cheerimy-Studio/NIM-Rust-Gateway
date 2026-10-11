@@ -269,10 +269,6 @@ pub fn coerce_param_value(val: &Value) -> Value {
     Value::from(v.to_string())
 }
 
-fn is_full_match(s: &str, f: impl Fn(char) -> bool) -> bool {
-    !s.is_empty() && s.chars().all(f)
-}
-
 fn valid_param_name(name: &str) -> bool {
     let n = name.chars().count();
     if n == 0 || n > 32 {
@@ -527,7 +523,7 @@ pub fn curated_models() -> Vec<String> {
         })
         .unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
-    let mut push = |m: &str, out: &mut Vec<String>| {
+    let push = |m: &str, out: &mut Vec<String>| {
         if !m.is_empty() && !out.iter().any(|x| x == m) {
             out.push(m.to_string());
         }

@@ -2,7 +2,7 @@
 //! 余额类奖品直接入账本，体验卡/专属额度发放独立 prize Key。
 //! 消耗优先扣赠金。存储走 wheels 组（wheels/prize_keys/draw_logs 三张表）。
 
-use crate::store::{store, Obj};
+use crate::store::store;
 use serde_json::{json, Value};
 
 /// 奖品 Key 前缀（体验卡/专属额度）：与用户 Key 同协议调用 /v1，但独立表鉴权。
@@ -325,7 +325,7 @@ pub fn draw(uid: &str, wheel_id: &str, use_credit: bool) -> (bool, Value) {
         };
         // 0) 临界区内复验转盘状态：预读与扣费之间转盘可能被停用/改价，
         //    沿用过期快照会按旧价扣费发旧奖。状态有变则本次拒绝（未扣费）。
-        let mut w_now_val = Value::Null;
+        let w_now_val;
         {
             let w_now = obj
                 .get("wheels")

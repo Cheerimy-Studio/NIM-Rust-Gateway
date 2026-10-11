@@ -2,12 +2,13 @@
 //! 活动固定 7 天有效期（到点即止，不可重开）；允许多活动并行。
 //! 进度按「已完成阶段数 / 4」算：collected = A * done / 4，刚加入时就是 0/A，
 //! 不再造 A-0.01 之类的假进度（那会让用户以为只差 1 分钱就能提现）。
-//! 阶梯（波次叠加曲线，target=T）：
-//!   四波累计门槛 1、3、7、T（波次 1、2、4、其余），全夹在 T 内：
-//!   T=15 → 1/2/4/8；T=4 → 1/2/1/0（累计 1/3/4/4）；T=1 → 全为 1 不死锁
-//!   阶段1  累计满 1 人 → 领取（进度到 A/4）
-//!   阶段2  累计满 3 人 → 领取（进度到 A/2）
-//!   阶段3  累计满 7 人 → 领取，解锁最后一波
+//! 阶梯（等比平滑曲线，target=T）：
+//!   四波人数尽量均衡（每波 ≈ T/4），累计门槛单调夹在 [1, T] 内：
+//!   T=15 → 4/4/4/3（累计 4/8/12/15）；T=100 → 25/25/25/25；
+//!   T=4 → 1/1/1/1；T=1 → 全为 1 不死锁
+//!   阶段1  累计满第一波 → 领取（进度到 A/4）
+//!   阶段2  累计满第二波 → 领取（进度到 A/2）
+//!   阶段3  累计满第三波 → 领取，解锁最后一波
 //!   阶段4  累计满 T 人 → 发 A 元赠金（credit grant，非充值非提现）
 //!   邀请只推进度：不送抽奖次数、不送翻倍卡（存量仍可在转盘消耗）
 //! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」，
@@ -68,22 +69,21 @@ pub fn active_ok(e: &Value) -> bool {
 }
 
 /// 阶梯参数（管理员只设 withdraw/target，这里自动推方案）
-/// 四个阶段的累计人数门槛：邀请要求按波次叠加翻倍（波 1、2、4，其余归最后一波）。
-/// 例：target=15 → 累计 1、3、7、15，即四波分别 1、2、4、8 人。
-/// 小目标被 min 截平：target=4 → 累计 1、3、4、4；target=1 → 1、1、1、1。
+/// 四个阶段的累计人数门槛：四波人数均衡切分（每波 ≈ target/4），而不是把
+/// target-7 全压给最后一波 —— 旧的 1/3/7/T 曲线在 T=15 时第 4 波要一口气
+/// 拉 8 人、T=100 时要拉 93 人，前三波却只合计 7 人，用户在阶段 3 的 ??? 上
+/// 根本看不出还要拉多少，极易弃坑。
+/// 切分用余数前摊：累计门槛 = ceil(T*k/4)（k=1..4），单调不减且末波恒为 T；
+/// 小目标自动压平：target=4 → 1/2/3/4；target=1 → 1/1/1/1（不死锁、不重复发奖——
+/// 四阶段门槛相同时各阶段仍须逐个领取，invited ≥ 1 即全部可领，行为与旧版一致）。
 pub fn wave_thresholds(target: i64) -> (i64, i64, i64, i64) {
     let t = target.max(1);
-    (1.min(t), 3.min(t), 7.min(t), t)
-}
-
-fn member_row(db: &mut Value, event_id: &str, uid: &str) -> Option<Value> {
-    members_arr(db)
-        .iter()
-        .find(|m| {
-            util_str(m.get("event_id")) == event_id
-                && util_str(m.get("user_id")) == uid
-        })
-        .cloned()
+    let c = |k: i64| ((t * k) as f64 / 4.0).ceil() as i64;
+    let (mut c1, c2, c3, c4) = (c(1), c(2), c(3), t);
+    if c1 < 1 {
+        c1 = 1;
+    }
+    (c1, c2.max(c1), c3.max(c2), c4.max(c3))
 }
 
 fn member_mut<'a>(db: &'a mut Value, event_id: &str, uid: &str) -> Option<&'a mut Value> {
@@ -194,7 +194,7 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     let amount = util::f64_or(e.get("amount"), 0.0);
     let target = util::int_or(e.get("target"), 1).max(1);
     let total = target;
-    let mut out = my_status(event_id, uid);
+    let out;
     let mut ledger: Option<(f64, f64, String)> = None;
     // 不满足条件时原来直接 return，前端拿到的 my_status 和成功时一模一样，
     // 用户点了没反应、以为按钮坏了；这里把原因带出去
@@ -297,12 +297,6 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     Ok(out)
 }
 
-/// 用邀请次数抵扣一次抽奖消耗（wheel draw 原子闭包内调用）。返回是否抵扣成功。
-pub fn consume_draw_credit(db: &mut Value, uid: &str) -> bool {
-    let obj = db.as_object_mut().unwrap();
-    consume_draw_credit_obj(obj, uid)
-}
-
 pub fn consume_draw_credit_obj(obj: &mut serde_json::Map<String, Value>, uid: &str) -> bool {
     // ⚠ 调用方持有 store 互斥锁：此处绝不可再走 store().load()（重入死锁），
     // 活动状态直接从同一 db 的 invite_events 里读
@@ -358,12 +352,6 @@ pub fn doubler_count(uid: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// 消耗一张翻倍卡（抽奖余额奖品翻倍时调用；跨活动找第一张）。返回是否成功。
-pub fn consume_doubler(db: &mut Value, uid: &str) -> bool {
-    let obj = db.as_object_mut().unwrap();
-    consume_doubler_obj(obj, uid)
-}
-
 pub fn consume_doubler_obj(obj: &mut serde_json::Map<String, Value>, uid: &str) -> bool {
     let arr = obj.entry("invite_members").or_insert_with(|| Value::Array(vec![]));
     for m in arr.as_array_mut().unwrap().iter_mut() {
@@ -386,7 +374,7 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
     let e = get_event(event_id).unwrap_or(json!({}));
     let amount = util::f64_or(e.get("amount"), 0.0);
     let target = util::int_or(e.get("target"), 1).max(1);
-    let t1 = 1.min(target);
+    let (t1, _c2, _c3, _c4) = wave_thresholds(target);
     let total = target;
     let db = store().load();
     let m = db
@@ -415,7 +403,7 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
     // 直接显示 1.47/1.50、还差 0.03，看着像马上就能提现，实际一步没走
     let done_steps = (p1 as i64) + (p2 as i64) + (p3 as i64) + (paid as i64);
     let collected = (amount * done_steps as f64 / 4.0).clamp(0.0, amount);
-    // 波次叠加曲线的累计门槛（全部夹在 total 内，target=1 时全为 1 不死锁）
+    // 等比平滑曲线的累计门槛（ceil(T*k/4)，target=1 时全为 1 不死锁）
     let (_c1, c2, c3, _c4) = wave_thresholds(total);
     // 邀请链接
     let link = format!("?inv={}.{}", event_id, uid);

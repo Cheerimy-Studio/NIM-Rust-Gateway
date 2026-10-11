@@ -6,13 +6,8 @@
 
 use crate::store::{store, Obj, Value};
 use crate::util;
-use serde_json::{json, Map};
+use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Mutex;
-
-pub fn round6(f: f64) -> f64 {
-    util::round6(f)
-}
 
 fn money(v: Option<&Value>) -> f64 {
     util::f64_or(v, 0.0)
@@ -178,12 +173,10 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                         return;
                     }
                     let kind = util::str_or(body.get("kind"), "recharge");
-                    if let Some(o) = u.as_object_mut() {
-                        if kind == "grant" {
-                            credit(u, "grant", v);
-                        } else {
-                            credit(u, "recharge", v);
-                        }
+                    if kind == "grant" {
+                        credit(u, "grant", v);
+                    } else {
+                        credit(u, "recharge", v);
                     }
                     note = Some((
                         if kind == "grant" { "grant" } else { "recharge" },
@@ -200,9 +193,7 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                         err = "金额不能为负数".into();
                         return;
                     }
-                    if let Some(o) = u.as_object_mut() {
-                        credit(u, "recharge", v);
-                    }
+                    credit(u, "recharge", v);
                     note = Some(("recharge", 0.0, util::round6(v), "注册赠送".into()));
                     ok = true;
                 }
@@ -213,9 +204,7 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                         err = "金额不能为负数".into();
                         return;
                     }
-                    if let Some(o) = u.as_object_mut() {
-                        credit(u, "grant", v);
-                    }
+                    credit(u, "grant", v);
                     note = Some(("grant", util::round6(v), 0.0, "管理员发放".into()));
                     ok = true;
                 }
@@ -653,27 +642,6 @@ pub fn user_draws_page(user_id: &str, page: i64, per: usize) -> (Vec<Value>, i64
     let start = ((page - 1) * per) as usize;
     rows = rows.into_iter().skip(start).take(per as usize).collect();
     (rows, total)
-}
-
-/// 迁移旧用户行：补 grant/grant_total/recharge_total 字段（老账本 balance 全额划入充值账本，
-/// 当前与累计一致；grant 缺失即视为从未有过赠金）。在 list_users 读路径上做，幂等零迁移成本。
-fn ensure_money_fields(u: &mut Value) {
-    if let Some(o) = u.as_object_mut() {
-        let has_grant = o.contains_key("grant");
-        let balance = util::round6(util::f64_or(o.get("balance"), 0.0));
-        let grant = util::round6(util::f64_or(o.get("grant"), 0.0));
-        let recharge = util::round6(util::f64_or(o.get("balance"), 0.0));
-        if !has_grant {
-            o.insert("grant".into(), json!(0.0));
-            o.insert("grant_total".into(), json!(0.0));
-            o.insert("recharge_total".into(), json!(balance.max(0.0)));
-        } else if !o.contains_key("grant_total") {
-            o.insert("grant_total".into(), json!(grant));
-        }
-        if !o.contains_key("recharge_total") {
-            o.insert("recharge_total".into(), json!(recharge.max(0.0)));
-        }
-    }
 }
 
 // ---------------------------------------------------------------- 签到
@@ -1317,20 +1285,6 @@ pub fn user_logs_page(user_id: &str, kind: &str, page: i64, per: usize) -> (Vec<
     (rows, total)
 }
 
-/// 该用户日志总条数（概览/统计用）：付费 + 免费。
-pub fn user_logs_count(user_id: &str) -> i64 {
-    let db = store().load();
-    ["user_logs_paid", "user_logs_free"]
-        .iter()
-        .map(|k| {
-            db.get(*k)
-                .and_then(|l| l.as_array())
-                .map(|a| a.iter().filter(|r| util::str_or(r.get("user_id"), "") == user_id).count() as i64)
-                .unwrap_or(0)
-        })
-        .sum()
-}
-
 /// 模型广场：对外可用模型 + 价格（取各渠道最低价；无价 = 免费）。
 pub fn model_square() -> Vec<Value> {
     let db = store().load();
@@ -1405,23 +1359,5 @@ pub fn model_square() -> Vec<Value> {
             })
         })
         .collect()
-}
-
-/// 计入/查询用户免费、付费窗口的辅助（管理端展示用）。
-pub fn rpm_snapshot(user_id: &str) -> Value {
-    let db = store().load();
-    let now = util::now_f();
-    let ent = db
-        .pointer("/user_rpm")
-        .and_then(|m| m.get(user_id))
-        .cloned()
-        .unwrap_or(json!({}));
-    let count = |k: &str| -> i64 {
-        ent.get(k)
-            .and_then(|w| w.as_array())
-            .map(|a| a.iter().filter(|t| now - t.as_f64().unwrap_or(0.0) < 60.0).count() as i64)
-            .unwrap_or(0)
-    };
-    json!({"free": count("free_window"), "paid": count("paid_window")})
 }
 

@@ -2,12 +2,7 @@
 //!
 //! 会话：ngw_user cookie（HMAC 签名，含用户 id）；POST 双提交校验 ngw_ucsrfs cookie。
 
-use crate::store::{csrf_token, session_cookie, store};pub fn user_session_id_pub(secret: &str, cookie: &str) -> Option<String> {
-    crate::users::user_session_id(secret, cookie)
-}
-pub fn auth_user_pub(uid: &str) -> Option<Value> {
-    crate::users::auth_user(uid)
-}
+use crate::store::store;
 use crate::users;
 use crate::util;
 use crate::webhttp::*;
@@ -177,19 +172,6 @@ pub async fn logout(headers: &HeaderMap) -> Response {
     resp
 }
 
-/// 登录后设置 CSRF cookie（用户面板刷新页面时 JS 无 Cookie 可读，走服务端种入）。
-pub async fn refresh_csrf(headers: &HeaderMap) -> Response {
-    match user_require(headers, false) {
-        Ok(uid) => {
-            let cfg = store().load();
-            let secret = util::str_or(cfg.get("config").and_then(|c| c.get("session_secret")), "");
-            let csrf = users::user_csrf_token(&secret, &uid);
-            json_resp(json!({"ok": true, "csrf": csrf}))
-        }
-        Err(e) => e,
-    }
-}
-
 fn me_row(u: &Value) -> Value {
     json!({
         "id": util::str_or(u.get("id"), ""),
@@ -245,7 +227,7 @@ pub async fn sign(headers: &HeaderMap) -> Response {
 // ---------------- 邮箱注册 / 找回密码（公开） ----------------
 
 /// 发送邮箱注册验证码。body: {email}
-pub async fn register_send_code(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
+pub async fn register_send_code(ip: String, _headers: &HeaderMap, body: Bytes) -> Response {
     // 每 IP 每分钟最多 1 次验证码（防短信/邮件轰炸）
     if !crate::admin::code_rate_ok(&ip) {
         return (

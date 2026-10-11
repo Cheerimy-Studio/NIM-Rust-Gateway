@@ -10,8 +10,6 @@
 //!      （/releases/latest 天然排除 draft 与 prerelease），按当前平台挑选资产、
 //!      与运行版本比较——已是最新则不下载不重启。只发正式版才会被线上收到。
 
-use crate::store::store;
-use crate::util;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 

@@ -716,17 +716,6 @@ impl AcquireOut {
             wait_hint: 0.0,
         }
     }
-
-    pub fn to_value(&self) -> Value {
-        serde_json::json!({
-            "result": self.result,
-            "key": self.key.clone(),
-            "reason": self.reason,
-            "total": self.total,
-            "permanent": self.permanent,
-            "wait_hint": self.wait_hint,
-        })
-    }
 }
 
 /// 取号：在 STORE 锁内执行调度逻辑。
@@ -855,7 +844,7 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
     };
     let mut cfg_cache: HashMap<String, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, Vec<Value>)> =
         HashMap::new();
-    let mut chan_cfg = |up: Option<&Value>| -> (
+    let chan_cfg = |up: Option<&Value>| -> (
         i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, Vec<Value>,
     ) {
         (
@@ -1014,7 +1003,6 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
             continue;
         }
 
-        let mut weight = 10;
         if up.is_some() {
             let pb_min = db
                 .get("pool_buckets")
@@ -1036,7 +1024,7 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
                 reason[R_POOL_DAILY] += 1;
                 continue;
             }
-            weight = up
+            let weight = up
                 .and_then(|u| u.get("weight"))
                 .and_then(util::py_int)
                 .map(|w| w.max(1))
@@ -1878,7 +1866,7 @@ pub async fn test_key(key_id: &str) -> Value {
     let apikey = util::str_or(key.get("apikey"), "");
     let t0 = std::time::Instant::now();
     let mut status: i64 = 0;
-    let mut body = String::new();
+    let body;
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .build()
@@ -1894,7 +1882,9 @@ pub async fn test_key(key_id: &str) -> Value {
             status = r.status().as_u16() as i64;
             body = r.text().await.unwrap_or_default();
         }
-        Err(e) => body = e.to_string(),
+        Err(e) => {
+            body = e.to_string();
+        }
     }
     let ms = t0.elapsed().as_millis() as i64;
     let data: Option<Value> = serde_json::from_str(&body).ok();

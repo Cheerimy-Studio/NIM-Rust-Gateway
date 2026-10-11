@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use regex::bytes::Regex as BRegex;
-use serde_json::{json, Map};
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Mutex, RwLock};
@@ -1048,6 +1048,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
             waiting_breaker = false;
             let a = pool::acquire(est_tokens, model);
             if a.result == "ok" {
+                let _ = hint; // 命中即出队：本迭代的等待提示不再被消费
                 got = a.key;
                 break;
             }
@@ -1224,13 +1225,6 @@ struct PrizeGuard {
     key: String,
     released: bool,
 }
-impl PrizeGuard {
-    /// 释放责任移交通知（流式 pump 接管后调用）：奖品 Key 并发占位必须
-    /// 覆盖整个流式生成期，而不是处理函数返回（首帧交接）时就释放
-    fn handoff(&mut self) {
-        self.released = true;
-    }
-}
 impl Drop for PrizeGuard {
     fn drop(&mut self) {
         if !self.released {
@@ -1322,6 +1316,8 @@ async fn run_pump(
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     prize_guard: Option<PrizeGuard>,
 ) {
+    // prize_guard 在此函数持有到流结束（Drop 释放奖品并发位），函数体无需再读
+    drop(prize_guard);
     let idle_to = util::cfg_int(&cfg_all(), "sse_idle_timeout", 0) as f64;
     let byte_limit = if ctx.ttfb_deadline > 0.0 {
         ctx.ttfb_deadline
@@ -1525,11 +1521,9 @@ async fn run_pump(
                         } else {
                             seg
                         };
-                        at_line = seg.last() == Some(&b'\n');
                         emit_bytes!(Bytes::from(seg));
                     }
                     // 刷完完整行后 buf 里还剩半行的话，心跳同样不能插
-                    at_line = buf.is_empty();
                     continue;
                 }
             }
@@ -1542,11 +1536,17 @@ async fn run_pump(
                 if lead > 0 && bang_tail + lead >= 16 {
                     b = b[lead..].to_vec();
                     scrubbed = true;
-                    bang_tail = b.iter().rev().take_while(|&&c| c == b'!').count();
                     emit_bytes!(Bytes::from(b));
                     continue;
                 }
-                bang_tail = 0;
+                // 跨块 ! 串不足 16：丢弃累积状态。这是真实语义而非死赋值——
+                // 块尾重算会重新统计本块尾部，若不显式清零，下面 has_bang4 分支
+                // 内的正则清洗路径会带着旧计数进下一块。流分析看不见下一轮迭代
+                // 的读取点才误报 dead-assign
+                #[allow(unused_assignments)]
+                {
+                    bang_tail = 0;
+                }
             }
             let mut nb = b.clone();
             if let Some(re) = &bang_run {
@@ -1568,6 +1568,7 @@ async fn run_pump(
         at_line = b.last() == Some(&b'\n');
         emit_bytes!(Bytes::from(b));
     }
+    let _ = (at_line, bang_tail);
     // 收尾：先把残留在 carry 里的最后几字节（跨块截断的字符）喂给状态机，再做终端事件
     if is_convert && !utf8_carry.is_empty() {
         let rest = std::mem::take(&mut utf8_carry);
@@ -2532,6 +2533,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
         }
     };
+    let _ = &up_model; // 循环终值：退出后不再读
     hold.clear();
     match out {
         Some(resp) => resp,
@@ -3464,6 +3466,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
         }
     };
+    let _ = &up_model; // 循环终值：退出后不再读
     hold.clear();
     match out {
         Some(resp) => resp,

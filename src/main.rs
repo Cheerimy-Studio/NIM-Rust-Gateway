@@ -23,7 +23,7 @@ use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, options, post};
+use axum::routing::{get, options, post};
 use axum::Router;
 use serde_json::json;
 use std::net::SocketAddr;
@@ -63,10 +63,6 @@ fn html_resp(name: &str, csrf: &str, no_cache: bool) -> Response {
         );
     }
     resp
-}
-
-fn ip_of(headers: &HeaderMap, addr: Option<SocketAddr>) -> String {
-    proxy::Ctx::new(headers.clone(), addr).ip
 }
 
 // ---------------------------------------------------------------- /v1 处理器
@@ -807,7 +803,7 @@ pub fn self_restart(reason: &str) -> bool {
         // 刚刚替换过 exe：杀毒/索引器可能短暂锁住新文件导致启动失败，
         // 重试几次再放弃（旧进程在此期间继续服务，不产生停机）
         let mut last = String::new();
-        for attempt in 0..3 {
+        for _attempt in 0..3 {
             match std::process::Command::new(&exe).args(&args).env("NGW_RESTART_CHILD", "1").spawn() {
                 Ok(_) => std::process::exit(0),
                 Err(e) => {

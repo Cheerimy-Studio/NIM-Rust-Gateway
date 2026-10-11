@@ -1,6 +1,6 @@
 //! 排队系统（core/queue.py 的移植）：FIFO 队列、位置追踪、统计、公开状态查询。
 
-use crate::store::{store, Obj, Value};
+use crate::store::{store, Value};
 use crate::util;
 
 const QUEUE_MAX_ENTRIES: usize = 500;

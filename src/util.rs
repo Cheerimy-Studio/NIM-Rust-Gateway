@@ -1,8 +1,7 @@
 //! 通用工具函数（core/util.py 的逐行移植）。
 
-use md5::{Digest, Md5};
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// os.urandom(6).hex()
 pub fn rand_id(prefix: &str) -> String {
@@ -179,11 +178,6 @@ pub fn json_compact(v: &Value) -> String {
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
-}
-
-/// 安全取子字典：值不是 object 时返回空。
-pub fn sub_dict<'a>(v: Option<&'a Value>) -> Option<&'a Map<String, Value>> {
-    v.and_then(|x| x.as_object())
 }
 
 /// Python bool() 的真值语义（非空字符串即真，不做 "false" 识别）。
@@ -405,18 +399,6 @@ pub fn tomorrow_midnight(now: i64) -> i64 {
         }
         _ => now + 86400,
     }
-}
-
-/// md5 hex 前 8 位（导入兜底：无 email 的账号生成 unknown-xxxxxxxx）。
-pub fn md5_prefix8(s: &str) -> String {
-    let mut h = Md5::new();
-    h.update(s.as_bytes());
-    let d = h.finalize();
-    d.iter().map(|x| format!("{:02x}", x)).collect::<String>()[..8].to_string()
-}
-
-pub fn value_get_num(v: Option<&Value>) -> i64 {
-    int_or(v, 0)
 }
 
 /// Python str() 的语义：None→"None"、True/False 首字母大写。

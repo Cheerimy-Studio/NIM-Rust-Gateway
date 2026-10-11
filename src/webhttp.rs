@@ -1,6 +1,6 @@
 //! HTTP 公共层：CORS、错误响应、静态页面、上游客户端注册表。
 
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -29,7 +29,6 @@ pub mod web_assets {
     pub const LOGIN_HTML: &str = include_str!("../web/login.html");
     pub const QUEUE_HTML: &str = include_str!("../web/queue.html");
     pub const USER_HTML: &str = include_str!("../web/user.html");
-    pub const USER_LOGIN_HTML: &str = include_str!("../web/user_login.html");
     pub const USER_JS: &str = include_str!("../web/user.js");
 }
 
@@ -132,20 +131,6 @@ fn err_retry_after(mut resp: Response, status: u16) -> Response {
 
 pub fn json_resp(v: Value) -> Response {
     with_cors(axum::Json(v).into_response())
-}
-
-pub fn text_resp(content: &str, content_type: &str, no_cache: bool) -> Response {
-    let mut resp = content.to_string().into_response();
-    if let Ok(v) = HeaderValue::from_str(content_type) {
-        resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
-    }
-    if no_cache {
-        resp.headers_mut().insert(
-            axum::http::header::CACHE_CONTROL,
-            HeaderValue::from_static("no-cache, must-revalidate"),
-        );
-    }
-    resp
 }
 
 /// 令牌遮罩：可辨识但不泄露完整令牌。

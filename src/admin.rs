@@ -13,7 +13,6 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{json, Map};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Instant;
 
 const CSRF_COOKIE: &str = "ngw_csrf";
 
@@ -82,7 +81,7 @@ pub(crate) fn code_rate_ok(ip: &str) -> bool {
     let now = util::now_f();
     let mut g = CODE_RATE.lock().unwrap();
     let m = g.get_or_insert_with(Vec::new);
-    if let Some(pos) = m.iter().position(|(k, t)| *k == *ip) {
+    if let Some(pos) = m.iter().position(|(k, _)| *k == *ip) {
         if now - m[pos].1 < 60.0 {
             return false;
         }
@@ -425,7 +424,6 @@ pub async fn keys(headers: &HeaderMap, query: Option<String>) -> Response {
     }
     let total = rows.len() as i64;
     let start = ((page - 1) * per) as usize;
-    let end = (page * per) as usize;
     let rows: Vec<Value> = rows.into_iter().skip(start as usize).take(per as usize).collect();
     json_resp(json!({
         "total": total,
@@ -1426,9 +1424,6 @@ pub async fn intercept_rule_delete(headers: &HeaderMap, body: Bytes) -> Response
     let mut removed = false;
     store().update(|db| {
         if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
-            if let Some(rules) = cfg.get_mut("custom_rules").and_then(|r| r.as_array()) {
-                let before = rules.len();
-            }
             if let Some(rules) = cfg.get_mut("custom_rules").and_then(|r| r.as_array_mut()) {
                 let before = rules.len();
                 rules.retain(|r| !(r.is_object() && util::str_or(r.get("id"), "") == rid));

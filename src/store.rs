@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
-pub type Db = Value;
 pub type Obj = Map<String, Value>;
 
 pub struct Store {
