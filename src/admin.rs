@@ -1874,7 +1874,7 @@ pub async fn promo_list(headers: &HeaderMap) -> Response {
     json_resp(json!({"rows": crate::promo::admin_list()}))
 }
 
-/// 保存（新建/编辑）活动。body: {id?, name, amount, target, trial, enabled}
+/// 保存（新建/编辑）活动。body: {id?, name, amount, target, enabled}
 pub async fn promo_save(headers: &HeaderMap, body: Bytes) -> Response {
     if let Err(e) = require(headers, true) {
         return e;
@@ -1912,7 +1912,6 @@ pub async fn promo_save(headers: &HeaderMap, body: Bytes) -> Response {
     }
     let id_in = util::str_or(body.get("id"), "");
     let enabled = body.get("enabled").map(util::truthy).unwrap_or(false);
-    let trial = body.get("trial").map(util::truthy).unwrap_or(false);
     let now = util::now_i();
     let mut err = String::new();
     let mut out_id = String::new();
@@ -1935,7 +1934,6 @@ pub async fn promo_save(headers: &HeaderMap, body: Bytes) -> Response {
                 o.insert("name".into(), json!(util::str_cut(&name, 40)));
                 o.insert("amount".into(), json!(util::round6(amount)));
                 o.insert("target".into(), json!(target));
-                o.insert("trial".into(), json!(trial));
                 o.insert("enabled".into(), json!(enabled));
             }
             out_id = id_in;
@@ -1946,7 +1944,6 @@ pub async fn promo_save(headers: &HeaderMap, body: Bytes) -> Response {
                 "name": util::str_cut(&name, 40),
                 "amount": util::round6(amount),
                 "target": target,
-                "trial": trial,
                 "enabled": enabled,
                 "created_at": now,
                 "expires_at": now + crate::promo::EVENT_TTL_SECS,

@@ -730,7 +730,6 @@ function promoCard(ev, d) {
   if (!st || !st.joined) {
     card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-2">'
       + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
-      + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
       + '</div>'
       + '<div class="mb-2">邀请好友注册，赢 <b>¥' + ev.amount + '</b> 赠金！</div>'
       + '<div class="small mb-3" style="opacity:.9">活动目标：邀请 ??? 位好友 · ' + promoCdPart(exp) + '</div>'
@@ -788,7 +787,7 @@ function promoCard(ev, d) {
     {badge: '第 3 步', name: '冲刺礼', title: '累计邀满 ??? 位好友',
      sub: '总人数保密 · 完成最后冲刺解锁赠金领取'},
     {badge: '最后一步', name: '领赠金', title: '领 ¥' + money.toFixed(2) + ' 赠金',
-     sub: st.trial ? '试玩模式 · 赠金立刻可用' : '最后一波 · 达成即刻到账'},
+     sub: '最后一波 · 达成即刻到账'},
   ];
   const stepProg = i => {
     // 冲刺/领赠金波改用金额进度：人数百分比配合「已邀请 N 人」能反解出保密的总数
@@ -843,7 +842,7 @@ function promoCard(ev, d) {
       + '</div></div>';
   }
 
-  html += '<div class="small mb-1 mt-3" style="opacity:.85">你的专属邀请链接（好友注册即算你拉新）：</div>'
+  html += '<div class="small mb-1 mt-3" style="opacity:.85">你的专属邀请链接：</div>'
     + '<div class="promo-link"><input readonly id="promo-link-input" value="' + esc(inviteLink) + '">'
     + '<button class="btn btn-light btn-sm fw-bold text-nowrap" id="promo-copy">复制链接</button>'
     + '<button class="btn btn-warning btn-sm fw-bold text-nowrap" id="promo-copy-msg">带文案复制</button></div>'
@@ -893,7 +892,6 @@ function promoCard(ev, d) {
 
   card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-1">'
     + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
-    + (ev.trial ? '<span class="badge bg-warning text-dark">试玩模式</span>' : '')
     + '</div>'
     + '<div class="small mb-2" style="opacity:.9">' + promoCdPart(exp)
     + ' · 已邀请 <b>' + st.invited + '</b> 人</div>'

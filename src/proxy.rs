@@ -928,6 +928,10 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         // permanent 由 acquire 计算：重算一次（total>0 且结构上无账号可服务）
         let mut total = 0i64;
         let mut model_ok = 0i64;
+        let global_hide = db
+            .get("config")
+            .map(|c| c.get("hide_mapped_names").map(util::truthy).unwrap_or(true))
+            .unwrap_or(true);
         if let Some(keys) = db.get("keys").and_then(|x| x.as_array()) {
             let ups: HashMap<String, Value> = db
                 .get("upstreams")
@@ -950,13 +954,10 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
                     model_ok += 1;
                     continue;
                 }
-                let hide = upstreams::hide_original(up, db.get("config"));
-                let targets: Vec<String> = up
-                    .and_then(|u| u.get("model_map").and_then(|m| m.as_object()))
-                    .map(|m| m.values().map(|v| util::str_or(Some(v), "")).collect())
-                    .unwrap_or_default();
-                if hide && targets.iter().any(|t| t == model) {
-                    continue;
+                if let Some(u) = up {
+                    if upstreams::hidden_target(u, model, global_hide) {
+                        continue;
+                    }
                 }
                 let models = up.and_then(|u| u.get("models").and_then(|m| m.as_array()));
                 if let Some(ms) = models {

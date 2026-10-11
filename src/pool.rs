@@ -550,6 +550,7 @@ pub fn mark_model_missing(db: &mut Value, uid: &str, model: &str) {
 pub fn capable_channels(db: &Value, model: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let cfg = db.get("config").cloned().unwrap_or(Value::Null);
+    let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
     let ups: HashMap<String, &Value> = db
         .get("upstreams")
         .and_then(|x| x.as_array())
@@ -577,13 +578,7 @@ pub fn capable_channels(db: &Value, model: &str) -> Vec<String> {
         }
         if !model.is_empty() {
             if let Some(u) = up {
-                let hide = upstreams::hide_original(Some(u), Some(&cfg));
-                let targets: Vec<String> = u
-                    .get("model_map")
-                    .and_then(|m| m.as_object())
-                    .map(|m| m.values().map(|v| util::str_or(Some(v), "")).collect())
-                    .unwrap_or_default();
-                if hide && targets.iter().any(|t| t == model) {
+                if upstreams::hidden_target(u, model, global_hide) {
                     continue;
                 }
                 let models = u.get("models").and_then(|m| m.as_array());
@@ -821,6 +816,7 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
     }
 
     // 渠道覆盖设置按渠道预计算一次
+    let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
     let chan_eff = |up: Option<&Value>, field: &str, default: i64| -> i64 {
         let v = match up {
             Some(u) => util::int_or(u.get(field), 0),
@@ -834,10 +830,10 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
             default
         }
     };
-    let mut cfg_cache: HashMap<String, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, bool, Vec<Value>, Vec<String>)> =
+    let mut cfg_cache: HashMap<String, (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, Vec<Value>)> =
         HashMap::new();
     let mut chan_cfg = |up: Option<&Value>| -> (
-        i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, bool, Vec<Value>, Vec<String>,
+        i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, Vec<Value>,
     ) {
         (
             chan_eff(up, "rpm", cfg_rpm),
@@ -850,10 +846,7 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
             chan_eff(up, "total_concurrency", cfg_chan_conc),
             chan_eff(up, "rpm_cap", cfg_pool_rpm),
             chan_eff(up, "daily_cap", cfg_pool_daily),
-            upstreams::hide_original(up, Some(&cfg)),
             up.and_then(|u| u.get("models").and_then(|m| m.as_array()).cloned())
-                .unwrap_or_default(),
-            up.and_then(|u| u.get("model_map").and_then(|m| m.as_object()).map(|m| m.values().map(|v| util::str_or(Some(v), "")).collect()))
                 .unwrap_or_default(),
         )
     };
@@ -883,7 +876,7 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
                 continue;
             }
         }
-        let (rpm, tpm, daily_cap, daily_tok, hourly, cooldown_ms, acct_conc, chan_conc, pool_rpm_cap, pool_daily_cap, hide, chan_models, chan_targets) =
+        let (rpm, tpm, daily_cap, daily_tok, hourly, cooldown_ms, acct_conc, chan_conc, pool_rpm_cap, pool_daily_cap, chan_models) =
             match cfg_cache.get(&uid) {
                 Some(t) => t.clone(),
                 None => {
@@ -893,9 +886,11 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
                 }
             };
         if !model.is_empty() && up.is_some() {
-            if hide && chan_targets.iter().any(|t| t == model) {
-                reason[R_MODEL_HIDDEN] += 1;
-                continue;
+            if let Some(u) = up {
+                if upstreams::hidden_target(u, model, global_hide) {
+                    reason[R_MODEL_HIDDEN] += 1;
+                    continue;
+                }
             }
             if !chan_models.is_empty() && !chan_models.iter().any(|m| util::str_or(Some(m), "") == model) {
                 reason[R_CHANNEL_MODEL] += 1;

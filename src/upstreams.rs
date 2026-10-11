@@ -480,43 +480,36 @@ pub fn model_routable(model: &str, hide_mapped_global: bool) -> bool {
                 continue;
             }
         }
-        let hm = util::int_or(u.get("hide_mapped"), 0);
-        let hide = if hm == 0 { hide_mapped_global } else { hm == 1 };
-        if hide {
-            let targets = u
-                .get("model_map")
-                .and_then(|m| m.as_object())
-                .map(|m| m.values().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            if targets.iter().any(|t| util::str_or(Some(t), "") == model) {
-                continue;
-            }
+        if hidden_target(u, model, hide_mapped_global) {
+            continue;
         }
         return true;
     }
     !any_enabled
 }
 
-pub fn hide_original(up: Option<&Value>, cfg: Option<&Value>) -> bool {
-    let v = match up {
-        Some(u) => util::int_or(u.get("hide_mapped"), 0),
-        None => 0,
-    };
-    if v == 1 {
-        return true;
+/// 某模型是否被该渠道的「隐原名」规则挡住（只对 model_map 的目标名生效）。
+/// 渠道显式「禁止访问」(hide_mapped=1) 恒生效；「继承全局」(0) 时，显式列进
+/// models 清单的目标名视为已对外授权，不被全局隐藏拦截（否则清单里同时列了
+/// 别名和裸名的渠道，裸名会静默 404 —— ZCode 直呼 gpt-6-luna 就踩了这个坑）；
+/// 「允许访问」(2) 不拦。
+pub fn hidden_target(u: &Value, model: &str, global_hide: bool) -> bool {
+    let hm = util::int_or(u.get("hide_mapped"), 0);
+    let hide = if hm == 0 { global_hide } else { hm == 1 };
+    if !hide {
+        return false;
     }
-    if v == 0 {
-        let global = match cfg {
-            Some(c) => c.get("hide_mapped_names").map(|x| util::truthy(x)).unwrap_or(true),
-            None => store()
-                .load()
-                .pointer("/config/hide_mapped_names")
-                .map(|x| util::truthy(x))
-                .unwrap_or(true),
-        };
-        return global;
+    if hm != 1 {
+        if let Some(ms) = u.get("models").and_then(|x| x.as_array()) {
+            if ms.iter().any(|m| util::str_or(Some(m), "") == model) {
+                return false;
+            }
+        }
     }
-    false
+    u.get("model_map")
+        .and_then(|m| m.as_object())
+        .map(|mm| mm.values().any(|v| util::str_or(Some(v), "") == model))
+        .unwrap_or(false)
 }
 
 /// 网关对外可调用的模型清单（只由渠道配置决定，不访问上游）。
@@ -540,15 +533,19 @@ pub fn curated_models() -> Vec<String> {
         }
     };
     let mut curated = false;
+    let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
     for u in &ups {
-        let hidden: HashSet<String> = if hide_original(Some(u), Some(&cfg)) {
-            u.get("model_map")
-                .and_then(|m| m.as_object())
-                .map(|m| m.values().map(|v| util::str_or(Some(v), "")).collect())
-                .unwrap_or_default()
-        } else {
-            HashSet::new()
-        };
+        // 隐藏集 = 被隐原名规则挡住的映射目标名；显式列进 models 的不算（见 hidden_target）
+        let hidden: HashSet<String> = u
+            .get("model_map")
+            .and_then(|m| m.as_object())
+            .map(|mm| {
+                mm.values()
+                    .map(|v| util::str_or(Some(v), ""))
+                    .filter(|t| hidden_target(u, t, global_hide))
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Some(ms) = u.get("models").and_then(|x| x.as_array()) {
             for m in ms {
                 let s = util::str_or(Some(m), "");

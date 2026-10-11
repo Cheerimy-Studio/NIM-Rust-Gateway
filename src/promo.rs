@@ -12,7 +12,6 @@
 //!   邀请只推进度：不送抽奖次数、不送翻倍卡（存量仍可在转盘消耗）
 //! 前端按拼多多式分阶段解锁：只展示当前这一步，后面几步打码成「神秘奖励」，
 //! 且总邀请人数对用户保密（显示 ???），要到冲刺阶段自己拉够才知道。
-//! 试玩模式：加入即视为拉满，全流程免拉人走通（管理员体验用）。
 
 use crate::store::store;
 use crate::util;
@@ -111,14 +110,13 @@ fn grant_invite_rewards(m: &mut Value, target: i64, n: i64) {
     }
 }
 
-/// 用户加入活动（幂等；试玩模式直接置为拉满）
+/// 用户加入活动（幂等）
 pub fn join(event_id: &str, uid: &str) -> Result<Value, String> {
     let e = get_event(event_id).ok_or("活动不存在")?;
     if !active_ok(&e) {
         return Err(if expired(&e) { "活动已过期" } else { "活动未开启" }.into());
     }
     store().update(|db| {
-        let trial = e.get("trial").map(util::truthy).unwrap_or(false);
         let target = util::int_or(e.get("target"), 1).max(1);
         if member_mut(db, event_id, uid).is_none() {
             // 归因可能先于加入发生（inviter 当时还没 join，hit 已落库但进度没记，
@@ -133,13 +131,12 @@ pub fn join(event_id: &str, uid: &str) -> Result<Value, String> {
                 "event_id": event_id,
                 "user_id": uid,
                 "joined_at": util::now_i(),
-                "invited": if trial { target } else { 0 },
+                "invited": 0,
                 "invited_total": 0,
                 "p1": false, "p2": false, "p3": false, "paid": false,
                 "doubler": 0, "draw_credits": 0,
-                "trial": trial,
             }));
-            if !trial && pending > 0 {
+            if pending > 0 {
                 if let Some(m) = member_mut(db, event_id, uid) {
                     grant_invite_rewards(m, target, pending);
                 }
@@ -173,7 +170,7 @@ pub fn attribute(inv: &str, invitee_uid: &str) {
         if let Some(m) = member_mut(db, event_id, inviter) {
             grant_invite_rewards(m, target, 1);
         }
-        // 被拉人自动加入活动（非试玩）
+        // 被拉人自动加入活动
         if member_mut(db, event_id, invitee_uid).is_none() {
             members_arr(db).push(json!({
                 "event_id": event_id,
@@ -181,7 +178,7 @@ pub fn attribute(inv: &str, invitee_uid: &str) {
                 "joined_at": util::now_i(),
                 "invited": 0,
                 "p1": false, "p2": false, "p3": false, "paid": false,
-                "doubler": 0, "draw_credits": 0, "trial": false,
+                "doubler": 0, "draw_credits": 0,
             }));
         }
     });
@@ -196,7 +193,6 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     }
     let amount = util::f64_or(e.get("amount"), 0.0);
     let target = util::int_or(e.get("target"), 1).max(1);
-    let trial = e.get("trial").map(util::truthy).unwrap_or(false);
     let total = target;
     let mut out = my_status(event_id, uid);
     let mut ledger: Option<(f64, f64, String)> = None;
@@ -209,10 +205,7 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
             return;
         };
         let invited = util::int_or(m.get("invited"), 0).min(target);
-        // 阶段判定用成员加入时的 trial 快照：管理员事后把活动翻成试玩，
-        // 不至于瞬间给全部存量成员解锁赠金领取（老成员行没这字段时退回事件值）
-        let trial = m.get("trial").map(util::truthy).unwrap_or(trial);
-        let eff_invited = if trial { target } else { invited };
+        let eff_invited = invited;
         let (p1, p2, p3, paid) = (
             m.get("p1").map(util::truthy).unwrap_or(false),
             m.get("p2").map(util::truthy).unwrap_or(false),
@@ -410,9 +403,8 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
     let Some(m) = m else {
         return json!({"joined": false});
     };
-    let trial = m.get("trial").map(util::truthy).unwrap_or(false);
     let invited = util::int_or(m.get("invited"), 0).min(target);
-    let eff = if trial { total } else { invited };
+    let eff = invited;
     let (p1, p2, p3, paid) = (
         m.get("p1").map(util::truthy).unwrap_or(false),
         m.get("p2").map(util::truthy).unwrap_or(false),
@@ -434,7 +426,6 @@ pub fn my_status(event_id: &str, uid: &str) -> Value {
         "target": target,
         "invited": invited,
         "eff_invited": eff,
-        "trial": trial,
         "t1": t1,
         "step2_need": c2,
         "step3_need": c3,
@@ -490,7 +481,6 @@ pub fn admin_list() -> Vec<Value> {
                 "name": util_str(e.get("name")),
                 "amount": util::f64_or(e.get("amount"), 0.0),
                 "target": util::int_or(e.get("target"), 0),
-                "trial": e.get("trial").map(util::truthy).unwrap_or(false),
                 "enabled": e.get("enabled").map(util::truthy).unwrap_or(false),
                 "expired": expired(e),
                 // promo_overview 拿这里的 expires_at 拼用户侧倒计时，

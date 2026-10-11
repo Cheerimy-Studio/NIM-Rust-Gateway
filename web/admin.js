@@ -165,7 +165,7 @@ async function loadPromoAdmin() {
   for (const e of rows) {
     const tr = document.createElement('tr');
     if (!e.enabled) tr.classList.add('table-light');
-    const mode = e.trial ? '<span class="badge bg-warning text-dark">试玩</span>' : '<span class="badge bg-primary-subtle text-primary">正式</span>';
+    const mode = '<span class="badge bg-primary-subtle text-primary">正式</span>';
     const st = e.expired ? '<span class="badge bg-secondary">已过期</span>'
       : e.enabled ? '<span class="badge bg-success">进行中</span>' : '<span class="badge bg-secondary">已停用</span>';
     tr.innerHTML = '<td class="fw-semibold">' + esc(e.name || e.id) + '</td>'
