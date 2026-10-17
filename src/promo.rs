@@ -194,7 +194,6 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     let amount = util::f64_or(e.get("amount"), 0.0);
     let target = util::int_or(e.get("target"), 1).max(1);
     let total = target;
-    let out;
     let mut ledger: Option<(f64, f64, String)> = None;
     // 不满足条件时原来直接 return，前端拿到的 my_status 和成功时一模一样，
     // 用户点了没反应、以为按钮坏了；这里把原因带出去
@@ -293,8 +292,7 @@ pub fn claim(event_id: &str, uid: &str, step: i64) -> Result<Value, String> {
     if let Some(msg) = deny {
         return Err(msg);
     }
-    out = my_status(event_id, uid);
-    Ok(out)
+    Ok(my_status(event_id, uid))
 }
 
 pub fn consume_draw_credit_obj(obj: &mut serde_json::Map<String, Value>, uid: &str) -> bool {
@@ -482,4 +480,3 @@ pub fn admin_list() -> Vec<Value> {
         })
         .collect()
 }
-

@@ -18,10 +18,10 @@
 
 ## 构建
 
-需要 Rust 1.75+。
+使用当前 Rust stable 工具链与仓库中的 Cargo.lock 构建。
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 产物：`target/release/nim-gateway`（Windows 为 `nim-gateway.exe`）。
@@ -39,7 +39,7 @@ run.bat           # Windows
 |---|---|---|
 | `NGW_PORT` / `PORT` | 监听端口 | 8100 |
 | `NGW_DATA_DIR` | 数据目录（db.json 所在位置） | `./data` |
-| `NGW_ADMIN_PASSWORD` | 首次初始化的管理员密码 | 随机生成 |
+| `NGW_ADMIN_PASSWORD` | 启动时同步管理员密码；密码变化时使旧会话失效 | 首次启动随机生成 |
 | `NGW_UPDATE_URL` | 自建更新源 | GitHub Releases |
 | `NGW_UPDATE_REPO` | 更新仓库名 | `Cheerimy-Studio/NIM-Rust-Gateway` |
 
@@ -82,6 +82,22 @@ data/db/signs/            签到记录（每天一个文件）
 
 从旧版单文件升级：首次启动自动拆分迁移，原 `db.json` 改名 `db.json.migrated` 留存。
 更新/回滚会整目录备份与还原数据。
+
+## 验证与流式行为
+
+```bash
+cargo test --locked --all-targets
+```
+
+测试覆盖跨网络分块的 UTF-8 / CRLF、工具调用转换、异常断流、真实 usage、
+成功调用计费、客户端断连释放、并发排队上限、签到目录备份与多用户日志迁移。
+CI 在 Linux 和 Windows 上运行测试。
+
+流式响应以完整 SSE 事件为单位转发，单事件上限为 1 MiB（不是整个回复的上限）。
+真实 usage 优先；缺失时仅对生成内容估算。收到 `[DONE]`，或在所有 choice 都有
+`finish_reason` 且没有残缺事件时关闭连接，才视为正常结束。中断、错误事件与残缺
+JSON 会返回协议对应的流内错误，记为失败且不扣费。网关不会依据中英混排密度或
+正文中的特殊 token 示例判定“乱码”而截断回复。
 
 ## 接口
 

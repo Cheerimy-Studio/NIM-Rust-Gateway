@@ -528,27 +528,45 @@ fn unpack_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-
-
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {}", e))?;
     let rd = std::fs::read_dir(src).map_err(|e| format!("读取目录失败: {}", e))?;
-    for e in rd.flatten() {
+    for e in rd {
+        let e = e.map_err(|err| format!("读取备份条目失败: {}", err))?;
         let p = e.path();
-        // 子目录递归拷贝：db/signs/（按天分片的签到数据）在 db/ 之下，
-        // 只拷顶层文件的话整个 signs 目录被静默跳过——回滚后签到记录全丢
-        if p.is_dir() {
-            let name = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-            copy_dir(&p, &dst.join(&name))?;
+        let name = e.file_name();
+        let label = name.to_string_lossy();
+        if label.ends_with(".tmp") || label.contains(".corrupt-") || label.contains(".rollback") {
             continue;
         }
-        if p.is_file() {
-            let name = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-            if name.ends_with(".tmp") || name.contains(".corrupt-") || name.contains(".rollback") {
-                continue;
-            }
-            std::fs::copy(&p, dst.join(&name)).map_err(|err| format!("拷贝 {} 失败: {}", name, err))?;
+        let kind = e.file_type().map_err(|err| format!("读取文件类型失败: {}", err))?;
+        // Do not follow symlinks outside the data directory.
+        if kind.is_dir() {
+            copy_dir(&p, &dst.join(&name))?;
+        } else if kind.is_file() {
+            std::fs::copy(&p, dst.join(&name)).map_err(|err| format!("拷贝 {} 失败: {}", label, err))?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_preserves_nested_sign_records() {
+        let root = std::env::temp_dir().join(format!("ngw-backup-{}", crate::util::rand_hex(8)));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        std::fs::create_dir_all(src.join("signs")).unwrap();
+        std::fs::write(src.join("users.json"), b"users").unwrap();
+        std::fs::write(src.join("signs/sign_2026-10-11.json"), b"signs").unwrap();
+        std::fs::write(src.join("partial.tmp"), b"partial").unwrap();
+        copy_dir(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(dst.join("users.json")).unwrap(), b"users");
+        assert_eq!(std::fs::read(dst.join("signs/sign_2026-10-11.json")).unwrap(), b"signs");
+        assert!(!dst.join("partial.tmp").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

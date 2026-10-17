@@ -248,9 +248,8 @@ fn write_group_file(group: &str, payload: &str) -> Result<(), String> {
     }
     // 断电/崩溃时元数据日志可能只落下 rename 而数据块还没写盘，
     // 重命名前强制刷盘，避免表文件（含余额/口令哈希）损坏或半截
-    if let Ok(f) = fs::OpenOptions::new().write(true).open(&tmp) {
-        let _ = f.sync_all();
-    }
+    fs::OpenOptions::new().write(true).open(&tmp)
+        .and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
@@ -334,6 +333,7 @@ impl Store {
             }
             if let Some(o) = cfg.as_object_mut() {
                 o.insert("admin_password_hash".into(), Value::from(hash_password(&env_pw)));
+                o.insert("session_secret".into(), Value::from(util::rand_hex(24)));
             }
         }
         self.update(|d| {

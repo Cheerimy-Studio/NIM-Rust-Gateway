@@ -1725,7 +1725,6 @@ pub async fn remote_rollback(headers: &HeaderMap) -> Response {
     json_resp(json!({"ok": true, "note": msg}))
 }
 
-
 // ============================================================ 多用户管理
 
 pub async fn users_list(headers: &HeaderMap) -> Response {
@@ -1857,7 +1856,6 @@ pub async fn user_logs_admin(headers: &HeaderMap, raw_query: Option<String>) -> 
     let (rows, total) = crate::users::user_logs_page(&id, &kind, page, per.clamp(1, 300));
     json_resp(json!({"rows": rows, "total": total, "kind": kind, "per": per.clamp(1, 300)}))
 }
-
 
 // ============================================================ 拉人活动
 
@@ -2095,7 +2093,6 @@ pub async fn prices_save(headers: &HeaderMap, body: Bytes) -> Response {
     json_resp(json!({"ok": true}))
 }
 
-
 // ---------------------------------------------------------------- 大转盘
 
 /// GET /api/wheels — 全量（含 real_weight，仅管理端）。
@@ -2207,7 +2204,6 @@ pub async fn prize_keys_op(headers: &HeaderMap, body: Bytes) -> Response {
     });
     json_resp(json!({"ok": ok}))
 }
-
 
 // ---------------------------------------------------------------- 用户资金/抽奖明细（管理端）
 

@@ -1,4 +1,4 @@
-//! 排队系统（core/queue.py 的移植）：FIFO 队列、位置追踪、统计、公开状态查询。
+//! 排队系统（core/queue.py 的移植）：等待登记、按入队时间展示、统计、公开状态查询。
 
 use crate::store::{store, Value};
 use crate::util;
@@ -124,7 +124,6 @@ pub fn stats(public: bool) -> Value {
     let db = store().load();
     let max_wait = cfg_max_wait();
     let now = util::now_f();
-    let cutoff = now - (max_wait as f64) * 2.0;
     let mut rows: Vec<Value> = Vec::new();
     let mut entries: Vec<Value> = db
         .get("queue")
@@ -142,9 +141,6 @@ pub fn stats(public: bool) -> Value {
     });
     for e in entries {
         let t = util::f64_or(e.get("t"), 0.0);
-        if t < cutoff {
-            continue;
-        }
         let mut row = serde_json::json!({
             "wait": ((now - t).max(0.0) * 10.0).round() / 10.0,
             "ep": util::str_or(e.get("ep"), ""),
@@ -166,4 +162,3 @@ pub fn stats(public: bool) -> Value {
         "rows": rows,
     })
 }
-

@@ -10,6 +10,7 @@ mod proxy;
 mod queue;
 mod store;
 mod streams;
+mod sse;
 mod upstreams;
 mod update;
 mod users;
@@ -1045,24 +1046,6 @@ async fn periodic_restart_loop() {
     }
 }
 
-fn prune_queue() {
-    store().update(|db| {
-        let cfg = db.get("config").cloned().unwrap_or(json!({}));
-        let now = util::now_f();
-        let mut mw = util::cfg_int(&cfg, "queue_max_wait", 15);
-        mw = if mw == 0 { 0 } else { mw.max(5) };
-        let cool429 = util::cfg_int(&cfg, "cool_429_seconds", 0);
-        let allowed = if mw > 0 && cool429 > 0 { mw.max((cool429 + 2).min(600)) } else { mw };
-        let cutoff = now - (if allowed > 0 { allowed + 60 } else { 900 }) as f64;
-        if let Some(o) = db.as_object_mut() {
-            let q = o.entry("queue").or_insert_with(|| serde_json::Value::Array(vec![]));
-            if let Some(a) = q.as_array_mut() {
-                a.retain(|e| e.is_object() && util::f64_or(e.get("t"), 0.0) >= cutoff);
-            }
-        }
-    });
-}
-
 // ---------------------------------------------------------------- 启动
 
 /// 启动最早期应用配置里的显示时区：daily 统计/日上限重置走 chrono::Local，
@@ -1130,7 +1113,7 @@ async fn main() {
         }
     }
     store_ref.flush();
-    prune_queue();
+    queue::clear(); // 重启前的请求已不存在，不能保留幽灵队列。
 
     tokio::spawn(flush_loop());
     tokio::spawn(signal_watch());

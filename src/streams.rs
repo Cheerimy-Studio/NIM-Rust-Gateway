@@ -47,7 +47,7 @@ pub fn sse_frame(event: &str, data: &Value) -> String {
 }
 
 struct Base {
-    buffer: String,
+    decoder: crate::sse::Decoder,
     usage: Option<Value>,
     done: bool,
 }
@@ -61,7 +61,7 @@ enum Raw {
 impl Base {
     fn new() -> Self {
         Base {
-            buffer: String::new(),
+            decoder: crate::sse::Decoder::default(),
             usage: None,
             done: false,
         }
@@ -69,15 +69,7 @@ impl Base {
 
     /// 处理一个 SSE 事件块。
     fn handle_raw(&mut self, raw: &str) -> Raw {
-        let mut data = String::new();
-        for line in raw.split('\n') {
-            if let Some(rest) = line.strip_prefix("data:") {
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(rest.trim_start());
-            }
-        }
+        let Some(data) = crate::sse::data(raw) else { return Raw::None };
         if data.is_empty() {
             return Raw::None;
         }
@@ -143,15 +135,13 @@ impl ResponsesStream {
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut String) {
-        // CRLF 归一化在拼接后的完整 buffer 上做：
-        // \r 在块尾、\n 在下一块头时，
-        // 按块独立 replace 会漏归一，残留 \r 让事件解析悄悄丢帧
-        self.base.buffer.push_str(chunk);
-        self.base.buffer = self.base.buffer.replace("\r\n", "\n");
-        loop {
-            let Some(pos) = self.base.buffer.find("\n\n") else { return };
-            let raw: String = self.base.buffer[..pos].to_string();
-            self.base.buffer = self.base.buffer[pos + 2..].to_string();
+        if self.base.done { return; }
+        let events = match self.base.decoder.feed(chunk.as_bytes()) {
+            Ok(events) => events,
+            Err(error) => { self.fail(&error, out); return; }
+        };
+        for raw in events {
+            if self.base.done { break; }
             match self.base.handle_raw(&raw) {
                 Raw::Chunk(c) => self.handle_chunk(&c, out),
                 Raw::Done => self.finalize(out),
@@ -244,30 +234,25 @@ impl ResponsesStream {
     }
 
     fn build_output(&self) -> Vec<Value> {
-        let mut out: Vec<Value> = Vec::new();
+        let mut items: Vec<(i64, Value)> = Vec::new();
         if !self.rs_acc.is_empty() {
-            out.push(json!({
-                "id": self.rs_id,
-                "type": "reasoning",
+            items.push((self.rs_oi, json!({
+                "id": self.rs_id, "type": "reasoning",
                 "summary": [{"type": "summary_text", "text": self.rs_acc}],
-            }));
+            })));
         }
         if !self.text_acc.is_empty() || self.tools.is_empty() {
-            out.push(json!({
-                "id": self.msg_id,
-                "type": "message",
-                "status": "completed",
+            items.push((self.msg_oi, json!({
+                "id": self.msg_id, "type": "message", "status": "completed",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": self.text_acc, "annotations": []}],
-            }));
+            })));
         }
-        let mut idxs: Vec<i64> = self.tools.keys().copied().collect();
-        idxs.sort();
-        for i in idxs {
-            let t = &self.tools[&i];
-            out.push(self.tool_item(t, "completed"));
+        for tool in self.tools.values() {
+            items.push((tool.oi, self.tool_item(tool, "completed")));
         }
-        out
+        items.sort_by_key(|(index, _)| *index);
+        items.into_iter().map(|(_, item)| item).collect()
     }
 
     fn tool_item(&self, t: &RsTool, status: &str) -> Value {
@@ -297,10 +282,6 @@ impl ResponsesStream {
         let Some(rs) = rs else { return };
         let Some(rs) = rs.as_str() else { return };
         if rs.is_empty() {
-            return;
-        }
-        // 退化思考整段丢弃，不向下游转发
-        if util::degenerate_reasoning(&Value::from(rs)) {
             return;
         }
         if !self.rs_open {
@@ -450,7 +431,8 @@ impl ResponsesStream {
         for tc in tcs {
             let Some(tco) = tc.as_object() else { continue };
             let idx = util::int_or(tco.get("index").filter(|x| !x.is_null()), 0);
-            if !self.tools.contains_key(&idx) {
+            let is_new = !self.tools.contains_key(&idx);
+            if is_new {
                 if self.part_open {
                     self.close_message(out);
                 }
@@ -527,7 +509,7 @@ impl ResponsesStream {
         }
         if self.part_open {
             self.close_message(out);
-        } else if self.tools.is_empty() {
+        } else if self.tools.is_empty() && self.text_acc.is_empty() {
             self.open_empty(out);
             self.close_message(out);
         }
@@ -546,21 +528,13 @@ impl ResponsesStream {
         }
         let status = self.final_status();
         let resp = self.skeleton(status, true);
-        out.push_str(&sse_frame("response.completed", &json!({"response": resp})));
+        out.push_str(&sse_frame(if status == "incomplete" { "response.incomplete" } else { "response.completed" }, &json!({"response": resp})));
     }
 
     /// 上游中断/超时：发出 response.failed 事件并终止。
     /// 训练资料取全文用。
     pub fn text_acc(&self) -> String {
         self.text_acc.clone()
-    }
-
-    /// 上游真实 usage（含 prompt/completion tokens）：泵按真值计费
-    pub fn real_usage(&self) -> Option<(i64, i64)> {
-        let u = self.base.usage.as_ref()?;
-        let pt = util::int_or(u.get("prompt_tokens"), 0);
-        let ct = util::int_or(u.get("completion_tokens"), 0);
-        if pt > 0 || ct > 0 { Some((pt, ct)) } else { None }
     }
 
     pub fn reasoning_acc(&self) -> String {
@@ -624,15 +598,13 @@ impl AnthropicStream {
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut String) {
-        // CRLF 归一化在拼接后的完整 buffer 上做：
-        // \r 在块尾、\n 在下一块头时，
-        // 按块独立 replace 会漏归一，残留 \r 让事件解析悄悄丢帧
-        self.base.buffer.push_str(chunk);
-        self.base.buffer = self.base.buffer.replace("\r\n", "\n");
-        loop {
-            let Some(pos) = self.base.buffer.find("\n\n") else { return };
-            let raw: String = self.base.buffer[..pos].to_string();
-            self.base.buffer = self.base.buffer[pos + 2..].to_string();
+        if self.base.done { return; }
+        let events = match self.base.decoder.feed(chunk.as_bytes()) {
+            Ok(events) => events,
+            Err(error) => { self.fail(&error, out); return; }
+        };
+        for raw in events {
+            if self.base.done { break; }
             match self.base.handle_raw(&raw) {
                 Raw::Chunk(c) => self.handle_chunk(&c, out),
                 Raw::Done => self.finalize(out),
@@ -717,9 +689,6 @@ impl AnthropicStream {
         if rs.is_empty() {
             return;
         }
-        if util::degenerate_reasoning(&Value::from(rs.clone())) {
-            return;
-        }
         if let Some(ti) = self.text_idx {
             out.push_str(&sse_frame(
                 "content_block_stop",
@@ -791,7 +760,8 @@ impl AnthropicStream {
         for tc in tcs {
             let Some(tco) = tc.as_object() else { continue };
             let idx = util::int_or(tco.get("index").filter(|x| !x.is_null()), 0);
-            if !self.tools.contains_key(&idx) {
+            let is_new = !self.tools.contains_key(&idx);
+            if is_new {
                 if let Some(ti) = self.text_idx {
                     out.push_str(&sse_frame(
                         "content_block_stop",
@@ -933,14 +903,6 @@ impl AnthropicStream {
         self.text_acc.clone()
     }
 
-    /// 上游真实 usage（含 prompt/completion tokens）：泵按真值计费
-    pub fn real_usage(&self) -> Option<(i64, i64)> {
-        let u = self.base.usage.as_ref()?;
-        let pt = util::int_or(u.get("prompt_tokens"), 0);
-        let ct = util::int_or(u.get("completion_tokens"), 0);
-        if pt > 0 || ct > 0 { Some((pt, ct)) } else { None }
-    }
-
     pub fn reasoning_acc(&self) -> String {
         self.think_acc.clone()
     }
@@ -958,5 +920,87 @@ impl AnthropicStream {
             "error",
             &json!({"type": "error", "error": {"type": "api_error", "message": message}}),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(value: Value) -> String { format!("data: {}\r\n\r\n", value) }
+    fn payloads(out: &str) -> Vec<Value> {
+        out.lines().filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str(data).unwrap()).collect()
+    }
+
+    #[test]
+    fn tool_name_is_not_duplicated_and_output_indices_match() {
+        let mut stream = ResponsesStream::new("test");
+        let mut out = String::new();
+        stream.feed(&frame(json!({"choices":[{"delta":{"tool_calls":[
+            {"index":5,"id":"call_a","function":{"name":"weather","arguments":"{}"}},
+            {"index":2,"id":"call_b","function":{"name":"time","arguments":"{}"}}
+        ]}}]})), &mut out);
+        stream.feed("data: [DONE]\r\n\r\n", &mut out);
+        let events = payloads(&out);
+        let response = &events.last().unwrap()["response"];
+        assert_eq!(response["output"][0]["name"], "weather");
+        assert_eq!(response["output"][1]["name"], "time");
+        for event in events.iter().filter(|e| e["type"] == "response.output_item.added") {
+            let index = event["output_index"].as_u64().unwrap() as usize;
+            assert_eq!(response["output"][index]["id"], event["item"]["id"]);
+        }
+    }
+
+    #[test]
+    fn both_converters_accept_split_crlf_and_ignore_post_terminal_data() {
+        let input = frame(json!({"choices":[{"delta":{"content":"你好"},"finish_reason":"stop"}]}));
+        for split in input.char_indices().map(|(i,_)| i) {
+            let mut responses = ResponsesStream::new("test");
+            let mut anthropic = AnthropicStream::new("test", 2);
+            let mut rs = String::new();
+            let mut an = String::new();
+            for part in [&input[..split], &input[split..], "data: [DONE]\n\n"] {
+                responses.feed(part, &mut rs);
+                anthropic.feed(part, &mut an);
+            }
+            assert_eq!(responses.text_acc(), "你好");
+            assert_eq!(anthropic.text_acc(), "你好");
+            let before = (rs.clone(), an.clone());
+            responses.feed(&input, &mut rs);
+            anthropic.feed(&input, &mut an);
+            assert_eq!((rs, an), before);
+        }
+    }
+
+    #[test]
+    fn length_limit_emits_incomplete_and_error_is_terminal() {
+        let mut stream = ResponsesStream::new("test");
+        let mut out = String::new();
+        stream.feed(&frame(json!({"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]})), &mut out);
+        stream.feed("data: [DONE]\n\n", &mut out);
+        assert_eq!(payloads(&out).last().unwrap()["type"], "response.incomplete");
+        assert!(!out.contains("response.completed"));
+        let mut stream = ResponsesStream::new("test");
+        out.clear();
+        stream.feed(&frame(json!({"error":{"message":"failed"}})), &mut out);
+        let before = out.clone();
+        stream.feed("data: [DONE]\n\n", &mut out);
+        stream.finalize(&mut out);
+        assert_eq!(out, before);
+        assert_eq!(payloads(&out).last().unwrap()["type"], "response.failed");
+    }
+
+    #[test]
+    fn reasoning_is_preserved_without_content_guesses() {
+        let reasoning = "!".repeat(32);
+        let chunk = frame(json!({"choices":[{"delta":{"reasoning_content":reasoning},"finish_reason":"stop"}]}));
+        let mut responses = ResponsesStream::new("test");
+        let mut anthropic = AnthropicStream::new("test", 1);
+        let mut out = String::new();
+        responses.feed(&chunk, &mut out);
+        anthropic.feed(&chunk, &mut out);
+        assert_eq!(responses.reasoning_acc(), reasoning);
+        assert_eq!(anthropic.reasoning_acc(), reasoning);
     }
 }

@@ -137,7 +137,7 @@ pub fn json_resp(v: Value) -> Response {
 pub fn tok_mask(t: &str) -> String {
     let chars: Vec<char> = t.chars().collect();
     if chars.len() <= 14 {
-        return t.to_string();
+        return if t.is_empty() { String::new() } else { "***".into() };
     }
     let head: String = chars[..10].iter().collect();
     let tail: String = chars[chars.len() - 4..].iter().collect();

@@ -11,7 +11,6 @@ use crate::webhttp::*;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use regex::bytes::Regex as BRegex;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -23,51 +22,15 @@ const REGEX_SCAN_MAX: usize = 8000;
 const HB: f64 = 10.0; // 心跳间隔：必须远小于中间代理空闲超时（nginx 默认 60s）
 const QUEUE_POLL_MAX: f64 = 3.0;
 const QUEUE_MAX_WAITING: i64 = 200;
-/// 词沙拉检测阈值：内容长度低于此值不检测（短回复误报率不可控）
-const GARBLED_MIN_LEN: usize = 120;
-/// 词沙拉判定：密集特殊 token 泄漏（模型/模板故障的特征）。只检测累积开头
-/// 32KB —— 判定要在首帧透传前做出，全量扫描太迟也太贵
-const GARBLED_SCAN_MAX: usize = 32768;
-
-/// 内容是否是「词沙拉」：上游/模型故障产出的乱码文本（特殊 token 泄漏、
-/// 多语言碎片混杂）。判据是「语言段交替密度」——把开头 32KB 切成 ASCII 段
-/// 与非 ASCII 段，正常中英混排是段落级交替（每百字符个位数切换），词沙拉是
-/// token 级交替（每百字符几十次切换）。只扫开头：判定要在首帧透传前做出。
-fn looks_garbled(text: &str) -> bool {
-    let s: Vec<char> = text.chars().take(GARBLED_SCAN_MAX).collect();
-    if s.len() < GARBLED_MIN_LEN {
-        return false;
-    }
-    let mut transitions = 0usize;
-    let mut prev: Option<bool> = None;
-    for &c in &s {
-        let ascii = c.is_ascii();
-        if prev != Some(ascii) {
-            if prev.is_some() {
-                transitions += 1;
-            }
-            prev = Some(ascii);
-        }
-    }
-    let density = transitions as f64 / s.len() as f64 * 100.0;
-    density > 18.0
-}
-
-/// 特殊 token 泄漏的密集出现（<|xxx|> / <|close|> 等控制标记）
-fn has_token_leak(text: &str) -> bool {
-    let head: String = text.chars().take(GARBLED_SCAN_MAX).collect();
-    let pat_count = head.matches("<|").count();
-    pat_count >= 3
-}
-
 static WAITING: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
 
-fn waiting_add(model: &str) -> i64 {
+fn waiting_try_add(model: &str) -> bool {
     let mut g = WAITING.lock().unwrap();
     let m = g.get_or_insert_with(HashMap::new);
-    let e = m.entry(model.to_string()).or_insert(0);
-    *e += 1;
-    *e
+    let count = m.entry(model.to_string()).or_insert(0);
+    if *count >= QUEUE_MAX_WAITING { return false; }
+    *count += 1;
+    true
 }
 
 fn waiting_dec(model: &str) {
@@ -137,7 +100,7 @@ impl Ctx {
 
     pub fn bearer(&self) -> Option<String> {
         if let Some(auth) = self.headers.get("authorization").and_then(|x| x.to_str().ok()) {
-            if auth.len() >= 7 && auth[..7].eq_ignore_ascii_case("bearer ") {
+            if auth.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer ")) {
                 return Some(auth[7..].trim().to_string());
             }
         }
@@ -390,6 +353,66 @@ fn usage_has_prompt(u: Option<&Value>) -> bool {
     u.and_then(|u| u.as_object())
         .map(|u| u.contains_key("prompt_tokens") && !u.get("prompt_tokens").map(|x| x.is_null()).unwrap_or(true))
         .unwrap_or(false)
+}
+
+fn validate_json_reply(body: &str, embeddings: bool) -> Result<(), String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|_| "上游返回无效 JSON 响应".to_string())?;
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        return Err(error.get("message").and_then(Value::as_str)
+            .unwrap_or("上游返回错误响应").to_string());
+    }
+    let field = if embeddings { "data" } else { "choices" };
+    if !value.get(field).and_then(Value::as_array).is_some_and(|rows| !rows.is_empty()) {
+        return Err(format!("上游响应缺少有效 {}", field));
+    }
+    Ok(())
+}
+
+/// 非流式回复的正文/思考是否泄漏模板特殊 token（K3 词沙拉指纹）。
+/// 只查内容字段，不碰 JSON 结构；Embeddings 无正文，直接放行。
+fn reply_token_leak(body: &str, embeddings: bool) -> Option<String> {
+    if embeddings {
+        return None;
+    }
+    let value: Value = serde_json::from_str(body).ok()?;
+    let mut text = String::new();
+    if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            let Some(msg) = choice.get("message") else { continue };
+            if let Some(content) = msg.get("content") {
+                text.push_str(&match content {
+                    Value::String(s) => s.clone(),
+                    other => convert::flatten_content(other),
+                });
+            }
+            for key in ["reasoning_content", "reasoning"] {
+                if let Some(reasoning) = msg.get(key).and_then(Value::as_str) {
+                    text.push_str(reasoning);
+                }
+            }
+        }
+    }
+    if util::has_token_leak(&text) {
+        Some("上游输出乱码（特殊 token 泄漏），已丢弃".into())
+    } else {
+        None
+    }
+}
+
+/// 从单个流式事件里取正文/思考文本（只用于特殊 token 泄漏嗅探）。
+fn frame_content_text(value: &Value) -> String {
+    let mut text = String::new();
+    if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            for pointer in ["/delta/content", "/delta/reasoning_content", "/delta/reasoning", "/text"] {
+                if let Some(part) = choice.pointer(pointer).and_then(Value::as_str) {
+                    text.push_str(part);
+                }
+            }
+        }
+    }
+    text
 }
 
 pub fn build_usage(res: &Value, req_body: &str) -> Value {
@@ -707,22 +730,8 @@ pub fn sse_response(body: String) -> Response {
     with_cors(resp)
 }
 
-pub fn protocol_keepalive(protocol: &str) -> Bytes {
-    if protocol == "messages" {
-        Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n")
-    } else {
-        Bytes::from_static(b": keepalive\n\n")
-    }
-}
-
-pub fn sse_error_event(msg: &str) -> Bytes {
-    let payload = json!({"error": {"message": msg, "type": "upstream_error"}});
-    Bytes::from(format!(
-        "data: {}\n\ndata: [DONE]\n\n",
-        py_json(&payload)
-    ))
-}
-
+/// 直通流的保活帧：必须是合法 data: 空 chunk，不能用 SSE 注释行 ——
+/// New-API 一类中转只转发 data: 行，注释行会被丢弃，下游仍会静默超时。
 pub fn keepalive_frame(ep_tag: &str, model: &str, first: bool) -> Bytes {
     let created = util::now_i();
     let obj = if ep_tag == "cmpl" {
@@ -739,6 +748,22 @@ pub fn keepalive_frame(ep_tag: &str, model: &str, first: bool) -> Bytes {
     Bytes::from(format!("data: {}\n\n", py_json(&obj)))
 }
 
+pub fn protocol_keepalive(protocol: &str) -> Bytes {
+    if protocol == "messages" {
+        Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n")
+    } else {
+        Bytes::from_static(b": keepalive\n\n")
+    }
+}
+
+pub fn sse_error_event(msg: &str) -> Bytes {
+    let payload = json!({"error": {"message": msg, "type": "upstream_error"}});
+    Bytes::from(format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        py_json(&payload)
+    ))
+}
+
 /// 合成 usage 尾帧：choices 必须显式为空数组（ZCode 的 chunk schema 硬要求）。
 fn synth_usage_frame(prompt_tokens: i64, completion_tokens: i64, created: i64) -> Bytes {
     let u = full_usage(Some(&json!({
@@ -753,81 +778,6 @@ fn synth_usage_frame(prompt_tokens: i64, completion_tokens: i64, created: i64) -
         "usage": u,
     });
     Bytes::from(format!("data: {}\n\n", py_json(&frame)))
-}
-
-/// 直通行缓冲的 usage/[DONE] 处理：扫 usage 帧、拦截行首 [DONE]（在它之前按需补
-/// usage 尾帧）。返回 (要下发的段, 是否见过 usage, 是否已见到 [DONE])。
-/// [DONE] 只认行首或上一行换行之后的（JSON 字符串里的引号必被转义，内容文本
-/// 即使出现 "data: [DONE]" 字样，前一个字节是 " 而非 \n，不会误伤）。
-fn sse_lines_tap(
-    buf: &[u8],
-    want_usage: bool,
-    saw_usage: bool,
-    est_prompt: i64,
-    out_bytes: usize,
-) -> (Vec<Vec<u8>>, bool, bool, Option<(i64, i64)>) {
-    let mut saw = saw_usage;
-    // 裸 "usage" 只可能来自帧结构（JSON 字符串内的引号会被转义为 \"）
-    // 注意 windows(N) 的 N 必须等于特征串长度：长度不等比较恒为 false（编译不报错）
-    const USAGE_KEY: &[u8] = b"\"usage\"";
-    let mut real_usage: Option<(i64, i64)> = None;
-    if !saw && buf.windows(USAGE_KEY.len()).any(|w| w == USAGE_KEY) {
-        saw = true;
-        // 顺手解析真实 token 数：计费/账号日限按上游真值走，估算只做兜底。
-        // usage 帧是完整 data: 行，按行扫描提取
-        let text = String::from_utf8_lossy(buf);
-        for line in text.split('\n') {
-            let Some(payload) = line.trim().strip_prefix("data:") else { continue };
-            let p = payload.trim();
-            if p.is_empty() || p == "[DONE]" { continue; }
-            let Ok(j) = serde_json::from_str::<serde_json::Value>(p) else { continue };
-            let Some(u) = j.get("usage").filter(|x| x.is_object()) else { continue };
-            let pt = util::int_or(u.get("prompt_tokens"), 0);
-            let ct = util::int_or(u.get("completion_tokens"), 0);
-            if pt > 0 || ct > 0 {
-                real_usage = Some((pt, ct));
-            }
-        }
-    }
-    let pat = b"data: [DONE]";
-    let mut done_at: Option<usize> = None;
-    let mut from = 0usize;
-    while from + pat.len() <= buf.len() {
-        match buf[from..].windows(pat.len()).position(|w| w == pat) {
-            None => break,
-            Some(rel) => {
-                let idx = from + rel;
-                if idx == 0 || buf[idx - 1] == b'\n' {
-                    done_at = Some(idx);
-                    break;
-                }
-                from = idx + 1;
-            }
-        }
-    }
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    match done_at {
-        Some(m) => {
-            if m > 0 {
-                out.push(buf[..m].to_vec());
-            }
-            if want_usage && !saw {
-                out.push(
-                    synth_usage_frame(est_prompt, util::estimate_output_tokens(out_bytes), util::now_i())
-                        .to_vec(),
-                );
-                saw = true;
-            }
-            out.push(buf[m..].to_vec());
-            (out, saw, true, real_usage)
-        }
-        None => {
-            if !buf.is_empty() {
-                out.push(buf.to_vec());
-            }
-            (out, saw, false, real_usage)
-        }
-    }
 }
 
 /// 构造拦截回复的响应（按客户端协议；流式输出单块内容 + 终端帧）。
@@ -1039,11 +989,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         }
         return Taken { ok: false, key: None, status: 429, message: format!("暂无可用账号：{}", acq_reason) };
     }
-    // 先占位再判满：waiting_get 与 add 分两步的话，并发请求会双双判「未满」
-    // 双双入队，排队上限被突破；占位与判定在同一个锁内原子完成
-    let after_add = waiting_add(model);
-    if after_add > QUEUE_MAX_WAITING {
-        waiting_dec(model);
+    if !waiting_try_add(model) {
         return Taken {
             ok: false,
             key: None,
@@ -1064,7 +1010,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
     let mut last_reason = acq_reason.clone();
     let mut got: Option<Value> = None;
     while Instant::now() < deadline {
-        let mut hint = 0.0f64;
+        let hint;
         if !waiting_breaker || pool::breaker_open(model).is_none() {
             waiting_breaker = false;
             let a = pool::acquire(est_tokens, model);
@@ -1086,14 +1032,14 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         let mut wait = if hint > 0.0 { hint } else { backoff }.max(poll);
         // 睡眠截断到剩余 deadline：熔断剩余秒数可能远超 queue_max_wait
         // （breaker_seconds 可配到小时级），不截断客户端会在超时上限之外干等
-        let remain = (deadline - Instant::now()).as_secs_f64();
+        let remain = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
         if remain > 0.0 {
             wait = wait.min(remain);
         }
         // 关键：加上抖动，避免大量等待者同一时刻一起重试
         use rand::Rng;
         let jitter = 0.7 + rand::thread_rng().gen_range(0.0..0.6);
-        tokio::time::sleep(Duration::from_secs_f64(wait * jitter)).await;
+        tokio::time::sleep(Duration::from_secs_f64((wait * jitter).min(remain))).await;
     }
     drop(_qguard); // 守卫统一出队；显式 drop 保证在返回值构造前完成
     if let Some(k) = got {
@@ -1188,8 +1134,8 @@ pub struct HoldGuard {
 impl HoldGuard {
     pub fn new(key: Option<Value>, ep: &str, model: &str, ip: &str, tok: &str, stream: bool) -> HoldGuard {
         HoldGuard {
+            released: key.is_none(),
             key,
-            released: true,
             ep: ep.to_string(),
             model: model.to_string(),
             ip: ip.to_string(),
@@ -1244,39 +1190,14 @@ impl Drop for HoldGuard {
 /// 奖品 Key 并发位守卫：Drop 时释放（断连/panic 也安全）。
 struct PrizeGuard {
     key: String,
-    released: bool,
 }
 impl Drop for PrizeGuard {
     fn drop(&mut self) {
-        if !self.released {
-            crate::wheel::prize_key_release(&self.key);
-        }
+        crate::wheel::prize_key_release(&self.key);
     }
 }
 
 // ---------------------------------------------------------------- 统一流式 pump
-
-/// SSE chunk 按网络帧对齐，多字节 UTF-8 字符可能被拆到两个 chunk；
-/// 逐块 lossy 转换会把半个字符变成 U+FFFD。把末尾不完整的序列留给下一块。
-fn split_incomplete_utf8(carry: &mut Vec<u8>, chunk: &[u8]) -> Vec<u8> {
-    carry.extend_from_slice(chunk);
-    let mut cut = carry.len();
-    if let Some(pos) = carry.iter().rposition(|&b| b & 0xC0 != 0x80) {
-        let need = match carry[pos] {
-            b if b < 0x80 => 0,
-            b if b >= 0xF0 => 4,
-            b if b >= 0xE0 => 3,
-            b if b >= 0xC0 => 2,
-            _ => 0,
-        };
-        if need > 0 && carry.len() - pos < need {
-            cut = pos;
-        }
-    } else {
-        cut = 0;
-    }
-    carry.drain(..cut).collect()
-}
 
 fn money_of(u: &Value) -> f64 {
     // 统一走可用总额（赠金 + 充值）：福利体系下赠金同样可用于付费模型预检，
@@ -1327,7 +1248,66 @@ pub struct StreamCtx {
     pub want_usage: bool,
 }
 
-/// 统一的流式 pump：读上游 chunk →（可选协议转换/模型改名/退化思考清理）→ 下发。
+#[derive(Default)]
+struct StreamProgress {
+    done: bool,
+    choices: HashSet<i64>,
+    completed: HashSet<i64>,
+    usage: Option<Value>,
+    output_bytes: usize,
+}
+
+impl StreamProgress {
+    fn observe(&mut self, event: &str) -> Result<Option<Value>, String> {
+        let Some(data) = crate::sse::data(event) else { return Ok(None) };
+        if data == "[DONE]" {
+            if self.choices.is_empty() { return Err("上游返回空流".into()); }
+            self.done = true;
+            return Ok(None);
+        }
+        let value: Value = serde_json::from_str(&data)
+            .map_err(|_| "上游 SSE 包含无效 JSON".to_string())?;
+        if !value.is_object() { return Err("上游 SSE 数据不是 JSON 对象".into()); }
+        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+            return Err(error.get("message").and_then(Value::as_str)
+                .unwrap_or("上游返回错误事件").to_string());
+        }
+        if usage_has_prompt(value.get("usage")) {
+            self.usage = Some(full_usage(value.get("usage")));
+        }
+        if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+            for choice in choices {
+                let index = util::int_or(choice.get("index"), 0);
+                self.choices.insert(index);
+                if choice.get("finish_reason").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+                    self.completed.insert(index);
+                }
+                // Estimate generated payload only, never SSE framing or repeated model/ID fields.
+                for text in [choice.get("text"), choice.pointer("/delta/content"),
+                    choice.pointer("/delta/reasoning_content"), choice.pointer("/delta/reasoning")] {
+                    self.output_bytes += text.and_then(Value::as_str).map(str::len).unwrap_or(0);
+                }
+                if let Some(tools) = choice.pointer("/delta/tool_calls").and_then(Value::as_array) {
+                    for tool in tools {
+                        self.output_bytes += tool.pointer("/function/arguments")
+                            .and_then(Value::as_str).map(str::len).unwrap_or(0);
+                    }
+                }
+            }
+        }
+        Ok(Some(value))
+    }
+
+    fn finished(&self) -> bool {
+        !self.choices.is_empty() && self.choices.is_subset(&self.completed)
+    }
+
+    fn estimated_output(&self) -> i64 {
+        if self.output_bytes == 0 { 0 } else { util::estimate_output_tokens(self.output_bytes) }
+    }
+}
+
+/// 统一的流式 pump：读上游 chunk →（可选协议转换/模型改名）→ 下发。
 /// 心跳保活、TTFB/空闲超时、断连回收、账号释放都在这里收口 —— 释放恰好一次。
 async fn run_pump(
     mut resp: reqwest::Response,
@@ -1336,373 +1316,164 @@ async fn run_pump(
     ctx: StreamCtx,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     prize_guard: Option<PrizeGuard>,
+    mut hold: HoldGuard,
 ) {
-    // prize_guard 在此函数持有到流结束（Drop 释放奖品并发位），函数体无需再读
-    drop(prize_guard);
-    let idle_to = util::cfg_int(&cfg_all(), "sse_idle_timeout", 0) as f64;
-    let byte_limit = if ctx.ttfb_deadline > 0.0 {
-        ctx.ttfb_deadline
-    } else if idle_to > 0.0 {
-        idle_to
-    } else {
-        300.0
-    };
-    let model_re = BRegex::new(r#""model"\s*:\s*"[^"]*""#).ok();
-    let model_to = format!("\"model\":\"{}\"", ctx.model);
-    let bang_run = BRegex::new(r"!{16,}").ok();
-    let bang_fw = BRegex::new(r"(?:\xEF\xBC\x81){16,}").ok();
-    let t0_f = util::now_f() - ctx.t0.elapsed().as_secs_f64();
-
-    let mut out_bytes: usize = 0;
-    let mut buf: Vec<u8> = Vec::new();
-    let mut first_chunk_at: f64 = 0.0;
-    let mut idle: f64 = 0.0;
-    let mut started = false;
+    // Keep both RAII guards alive until accounting has completed, including task cancellation.
+    let _prize_guard = prize_guard;
+    let idle_to = util::cfg_int(&cfg_all(), "sse_idle_timeout", 0).max(0) as f64;
+    let byte_limit = if ctx.ttfb_deadline > 0.0 { ctx.ttfb_deadline } else { 300.0 };
+    let mut decoder = crate::sse::Decoder::default();
+    let mut progress = StreamProgress::default();
+    let mut first_chunk_at = None;
+    let mut last_data = Instant::now();
     let mut client_gone = false;
     let mut truncated = String::new();
-    let mut scrubbed = false;
-    let mut bang_tail: usize = 0;
-    let mut train: Vec<u8> = Vec::new();
-    // 乱码嗅探窗：先攒原始 SSE 字节（≤4KB），提取纯内容文本后判定。
-    // 不能拿原始字节直接算密度 —— SSE 的 JSON 帧包装会把正常中文流的
-    // ASCII/非 ASCII 切换次数也抬高，纯内容才可判。判定通过后不再扫
-    let mut sniff_buf: Vec<u8> = Vec::with_capacity(4096);
-    let mut sniff_done = false;
-
+    let mut train = Vec::new();
+    let mut pending = first_chunk;
+    // K3/模板故障防御：正文里成片泄漏 <|xxx|> 控制 token 即中止（高阈值判定，
+    // 正常引用一两个 token 示例不触发）；扫描窗 32KB 后停止
+    let mut leak_buf = String::new();
+    let mut leak_next = 1024usize;
+    let mut leak_done = false;
+    let est_prompt = (ctx.body.chars().count() as i64 + 2) / 3;
+    let mut conv_resp = (ctx.protocol.as_deref() == Some("responses"))
+        .then(|| ResponsesStream::new(&ctx.model));
+    let mut conv_anth = (ctx.protocol.as_deref() == Some("messages"))
+        .then(|| AnthropicStream::new(&ctx.model, est_prompt));
     let is_convert = ctx.protocol.is_some();
-    // ZCode 0.16.x / ai-sdk 2.x：请求声明 stream_options.include_usage 时按行缓冲
-    // 直通；上游漏发 usage 帧由网关在 [DONE] 前合成（其 chunk schema 硬要求 usage
-    // 帧带 choices:[]，缺帧会在空回复判定里误杀）。判定在 StreamCtx 上：客户端
-    // 原始声明不随后续尝试剥离 stream_options 而丢失
-    let want_usage = ctx.want_usage;
-    let est_prompt = {
-        let c = ctx.body.chars().count() as i64;
-        c / 3 + ((c % 3) > 0) as i64
-    };
-    let mut saw_usage = false;
-    let mut usage_done = false;
-    // 上游 usage 帧里的真实 token 数：释放/计费优先真值，估算只做兜底
-    let mut real_usage: Option<(i64, i64)> = None;
-    // 心跳帧只能落在 SSE 行界上：否则会拼进上游未完成的 JSON 行，客户端解析必炸。
-    // 转换模式由状态机产出完整事件，恒视为行界
-    let mut at_line = is_convert;
-    let mut conv_resp: Option<ResponsesStream> = None;
-    let mut conv_anth: Option<AnthropicStream> = None;
-    if ctx.protocol.as_deref() == Some("responses") {
-        conv_resp = Some(ResponsesStream::new(&ctx.model));
-    } else if ctx.protocol.as_deref() == Some("messages") {
-        let est_input = util::estimate_request_tokens(&ctx.body, None);
-        conv_anth = Some(AnthropicStream::new(&ctx.model, est_input));
-    }
 
-    // 发送辅助：转换模式喂状态机产事件；直通模式发原始字节。返回 false = 客户端已断开。
     macro_rules! emit_bytes {
-        ($b:expr) => {{
-            if tx.send(Ok($b)).await.is_err() {
-                client_gone = true;
-            }
-        }};
+        ($bytes:expr) => {
+            if tx.send(Ok($bytes)).await.is_err() { client_gone = true; }
+        };
     }
-    macro_rules! feed_conv {
-        ($text:expr) => {{
-            let mut pend = String::new();
-            if let Some(c) = conv_resp.as_mut() {
-                c.feed($text, &mut pend);
-            }
-            if let Some(c) = conv_anth.as_mut() {
-                c.feed($text, &mut pend);
-            }
-            if !pend.is_empty() {
-                emit_bytes!(Bytes::from(pend));
-            }
-        }};
-    }
-
-    let mut utf8_carry: Vec<u8> = Vec::new();
-    if let Some(fc) = first_chunk {
-        out_bytes += fc.len();
-        first_chunk_at = util::now_f();
-        started = true;
-        // 训练语料必须包含首帧（Python 版经 _out(first_chunk) 一并累积）
-        if ctx.capture_train && train.len() < 1048576 {
-            train.extend_from_slice(&fc);
-        }
-        if is_convert {
-            let ready = split_incomplete_utf8(&mut utf8_carry, &fc);
-            feed_conv!(&String::from_utf8_lossy(&ready));
-        } else if ctx.rewrite || want_usage {
-            // 与主循环同路径：改名/usage 扫描对首帧同样生效（单帧小回复也含 DONE）
-            buf.extend_from_slice(&fc);
-            at_line = buf.is_empty();
-        } else {
-            at_line = fc.last() == Some(&b'\n');
-            emit_bytes!(fc);
-        }
-    }
-    if !client_gone && ctx.heartbeat {
-        let frame = match &ctx.protocol {
+    if ctx.heartbeat {
+        let frame = match ctx.protocol.as_deref() {
             Some(p) => protocol_keepalive(p),
             None => keepalive_frame(&ctx.ep_tag, &ctx.model, true),
         };
         emit_bytes!(frame);
     }
-    while !client_gone {
-        let chunk = match tokio::time::timeout(Duration::from_secs_f64(HB), resp.chunk()).await {
-            Err(_) => {
-                idle += HB;
-                let limit = if started { idle_to } else { byte_limit };
-                if limit > 0.0 && idle >= limit {
-                    if !started {
-                        // 上游一直无输出：与 Python 一致按错误收口
-                        truncated = format!("上游首字节超时（{}s）", limit as i64);
-                    } else {
-                        truncated = format!("上游空闲超时（{}s）", limit as i64);
+    'read: while !client_gone && !progress.done {
+        let chunk = if let Some(chunk) = pending.take() {
+            chunk
+        } else {
+            let limit = if first_chunk_at.is_some() { idle_to } else { byte_limit };
+            let remaining = if limit > 0.0 {
+                Duration::from_secs_f64(limit).saturating_sub(last_data.elapsed())
+            } else { Duration::from_secs_f64(HB) };
+            let read = tokio::select! {
+                biased;
+                _ = tx.closed() => { client_gone = true; break; }
+                read = tokio::time::timeout(remaining.min(Duration::from_secs_f64(HB)), resp.chunk()) => read,
+            };
+            match read {
+                Err(_) => {
+                    if limit > 0.0 && last_data.elapsed().as_secs_f64() >= limit {
+                        truncated = if first_chunk_at.is_some() { "上游空闲超时" } else { "上游首字节超时" }.into();
+                        break;
                     }
-                    break;
-                }
-                // 仅在行界注入；buf 残留半行时跳过本次保活（下个上游块到达后自然续上）
-                if at_line || is_convert {
-                    let frame = match &ctx.protocol {
+                    // Only complete events are forwarded, so heartbeats can never split JSON.
+                    let frame = match ctx.protocol.as_deref() {
                         Some(p) => protocol_keepalive(p),
                         None => keepalive_frame(&ctx.ep_tag, &ctx.model, false),
                     };
                     emit_bytes!(frame);
+                    continue;
                 }
-                continue;
+                Ok(Err(error)) => { truncated = format!("上游流中断：{}", error); break; }
+                Ok(Ok(None)) => break,
+                Ok(Ok(Some(chunk))) => chunk,
             }
-            Ok(Err(e)) => {
-                if started {
-                    truncated = format!("上游流中断：{}", e);
-                } else {
-                    truncated = format!("上游连接中断：{}", e);
-                }
-                break;
-            }
-            Ok(Ok(None)) => break,
-            Ok(Ok(Some(c))) => c,
         };
-        idle = 0.0;
-        started = true;
-        out_bytes += chunk.len();
-        if first_chunk_at == 0.0 {
-            first_chunk_at = util::now_f();
-        }
-        // 乱码嗅探（前 4KB 原始字节内）：命中即中止，按乱码收口释放。
-        // 已下发的前缀注定是乱码开头，但继续透传只会更糟——短乱码可容忍，
-        // 几十 KB 不可容忍；客户端会收到显式 error 事件而非静默坏回复
-        if !sniff_done {
-            if sniff_buf.len() < 4096 {
-                sniff_buf.extend_from_slice(&chunk);
-            }
-            if sniff_buf.len() >= 1024 {
-                // content 与 reasoning 一起判定：词沙拉在推理段出现得更早更密
-                let (content, reasoning) = train_sse_text(&sniff_buf);
-                let joined = format!("{}{}", content, reasoning);
-                if has_token_leak(&joined) || looks_garbled(&joined) {
-                    truncated = "上游输出乱码（特殊 token 泄漏或词沙拉），已中止".into();
-                    break;
-                }
-                if sniff_buf.len() >= 4096 {
-                    sniff_done = true; // 窗口耗尽且干净：后续不再付嗅探成本
-                }
-            }
-        }
-        if ctx.capture_train && train.len() < 1048576 {
-            train.extend_from_slice(&chunk);
-        }
-        if is_convert {
-            let ready = split_incomplete_utf8(&mut utf8_carry, &chunk);
-            feed_conv!(&String::from_utf8_lossy(&ready));
-            continue;
-        }
-        let mut b: Vec<u8> = chunk.to_vec();
-        if ctx.rewrite || want_usage {
-            buf.extend_from_slice(&b);
-            match buf.iter().rposition(|&c| c == b'\n') {
-                None => {
-                    // 整块都压在半行里：不在行界，心跳不能插进未完结的 data: 行中间
-                    at_line = false;
-                    continue;
-                }
-                Some(cut) => {
-                    let out = buf[..cut + 1].to_vec();
-                    buf = buf[cut + 1..].to_vec();
-                    let (segs, saw, done, ru) =
-                        sse_lines_tap(&out, want_usage, saw_usage, est_prompt, out_bytes);
-                    if ru.is_some() { real_usage = ru; }
-                    if saw {
-                        saw_usage = true;
-                    }
-                    if done {
-                        usage_done = true;
-                    }
-                    for seg in segs {
-                        let seg = if ctx.rewrite {
-                            model_re
-                                .as_ref()
-                                .map(|re| re.replace_all(&seg, model_to.as_bytes()).to_vec())
-                                .unwrap_or_else(|| seg.clone())
-                        } else {
-                            seg
-                        };
-                        emit_bytes!(Bytes::from(seg));
-                    }
-                    // 刷完完整行后 buf 里还剩半行的话，心跳同样不能插。
-                    // 这是跨迭代状态（下一轮超时分支读它），不是死赋值
-                    #[allow(unused_assignments)]
-                    {
-                        at_line = buf.is_empty();
-                    }
-                    continue;
-                }
-            }
-        }
-        // 退化思考清理:成片 '!'(半/全角 16+ 连发)字节级清除,跨块边界合并
-        let has_bang4 = b.windows(4).any(|w| w == b"!!!!");
-        if has_bang4 || (bang_tail >= 4 && b.first() == Some(&b'!')) {
-            if bang_tail > 0 {
-                let lead = b.iter().take_while(|&&c| c == b'!').count();
-                if lead > 0 && bang_tail + lead >= 16 {
-                    b = b[lead..].to_vec();
-                    scrubbed = true;
-                    #[allow(unused_assignments)]
-                    {
-                        bang_tail = b.iter().rev().take_while(|&&c| c == b'!').count();
-                    }
-                    emit_bytes!(Bytes::from(b));
-                    continue;
-                }
-                // 跨块 ! 串不足 16：丢弃累积状态。这是真实语义而非死赋值——
-                // 块尾重算会重新统计本块尾部，若不显式清零，下面 has_bang4 分支
-                // 内的正则清洗路径会带着旧计数进下一块。流分析看不见下一轮迭代
-                // 的读取点才误报 dead-assign
-                #[allow(unused_assignments)]
-                {
-                    bang_tail = 0;
-                }
-            }
-            let mut nb = b.clone();
-            if let Some(re) = &bang_run {
-                nb = re.replace_all(&nb, &b""[..]).to_vec();
-            }
-            if let Some(re) = &bang_fw {
-                nb = re.replace_all(&nb, &b""[..]).to_vec();
-            }
-            if nb != b {
-                scrubbed = true;
-                b = nb;
-            }
-        }
-        bang_tail = if b.last() == Some(&b'!') {
-            b.iter().rev().take_while(|&&c| c == b'!').count()
-        } else {
-            0
+        if chunk.is_empty() { continue; }
+        last_data = Instant::now();
+        first_chunk_at.get_or_insert(ctx.t0.elapsed().as_millis() as i64);
+        let events = match decoder.feed(&chunk) {
+            Ok(events) => events,
+            Err(error) => { truncated = error; break; }
         };
-        at_line = b.last() == Some(&b'\n');
-        emit_bytes!(Bytes::from(b));
-    }
-    let _ = (at_line, bang_tail);
-    // 收尾：先把残留在 carry 里的最后几字节（跨块截断的字符）喂给状态机，再做终端事件
-    if is_convert && !utf8_carry.is_empty() {
-        let rest = std::mem::take(&mut utf8_carry);
-        feed_conv!(&String::from_utf8_lossy(&rest));
-    }
-    // 截断要显式告知下游，不能把半截内容当完整回复（静默截断比显式报错危险）
-    if !client_gone && !truncated.is_empty() {
-        if is_convert {
-            let mut pend = String::new();
-            if let Some(c) = conv_resp.as_mut() {
-                c.fail(&truncated, &mut pend);
-            }
-            if let Some(c) = conv_anth.as_mut() {
-                c.fail(&truncated, &mut pend);
-            }
-            if !pend.is_empty() {
-                emit_bytes!(Bytes::from(pend));
-            }
-        } else {
-            // 无论是否已出首帧：200 已发出 + 心跳已下发的情况下，客户端手里只有
-            // 一条空流（无错误事件、无 [DONE]）会被严格客户端判成"空回复"而非
-            // "上游故障"——显式报错才是可诊断的收口
-            emit_bytes!(sse_error_event(&truncated));
-        }
-    } else if !client_gone && is_convert {
-        // 上游正常结束（无论发没发 [DONE]）都必须产出终端事件，
-        // 否则严格 SDK 会一直等 message_stop / response.completed 而挂起
-        let mut pend = String::new();
-        if let Some(c) = conv_resp.as_mut() {
-            c.finalize(&mut pend);
-        }
-        if let Some(c) = conv_anth.as_mut() {
-            c.finalize(&mut pend);
-        }
-        if !pend.is_empty() {
-            emit_bytes!(Bytes::from(pend));
-        }
-    }
-    if !client_gone && (ctx.rewrite || want_usage) && !buf.is_empty() {
-        let out = std::mem::take(&mut buf);
-        let (segs, saw, done, ru) = sse_lines_tap(&out, want_usage, saw_usage, est_prompt, out_bytes);
-        if ru.is_some() { real_usage = ru; }
-        if saw {
-            saw_usage = true;
-        }
-        if done {
-            usage_done = true;
-        }
-        for seg in segs {
-            let seg = if ctx.rewrite {
-                model_re
-                    .as_ref()
-                    .map(|re| re.replace_all(&seg, model_to.as_bytes()).to_vec())
-                    .unwrap_or_else(|| seg.clone())
-            } else {
-                seg
+        for raw in events {
+            let parsed = match progress.observe(&raw) {
+                Ok(value) => value,
+                Err(error) => { truncated = error; break 'read; }
             };
-            emit_bytes!(Bytes::from(seg));
+            if ctx.capture_train && train.len() + raw.len() <= 1048576 {
+                train.extend_from_slice(raw.as_bytes());
+            }
+            if !leak_done {
+                if let Some(value) = parsed.as_ref() {
+                    let text = frame_content_text(value);
+                    if !text.is_empty() && leak_buf.len() < 32768 {
+                        let room = 32768 - leak_buf.len();
+                        leak_buf.extend(text.chars().take(room));
+                    }
+                }
+                if leak_buf.len() >= leak_next {
+                    if util::has_token_leak(&leak_buf) {
+                        truncated = "上游输出乱码（特殊 token 泄漏），已中止".into();
+                        break 'read;
+                    }
+                    if leak_next >= 32768 {
+                        leak_done = true;
+                    } else {
+                        leak_next = (leak_next * 2).min(32768);
+                    }
+                }
+            }
+            if is_convert {
+                let mut out = String::new();
+                if let Some(c) = conv_resp.as_mut() { c.feed(&raw, &mut out); }
+                if let Some(c) = conv_anth.as_mut() { c.feed(&raw, &mut out); }
+                if !out.is_empty() { emit_bytes!(Bytes::from(out)); }
+            } else {
+                if progress.done && ctx.want_usage && progress.usage.is_none() {
+                    emit_bytes!(synth_usage_frame(est_prompt, progress.estimated_output(), util::now_i()));
+                }
+                let out = match parsed {
+                    Some(mut value) if ctx.rewrite && value.get("model").is_some() => {
+                        value["model"] = Value::from(ctx.model.clone());
+                        // JSON serialization escapes model aliases; only the top-level field changes.
+                        crate::sse::replace_data(&raw, &py_json(&value))
+                    }
+                    _ => raw,
+                };
+                emit_bytes!(Bytes::from(out));
+            }
+            if client_gone || progress.done { break; }
         }
     }
-    // 上游没发 [DONE] 或声明了 include_usage 却漏发 usage 帧：正常收尾时补齐，
-    // 否则严格客户端的空回复判定（零文本/零工具/零 usage）会误杀可用回复
-    if !client_gone && want_usage && !usage_done && started && truncated.is_empty() {
-        if !saw_usage {
-            emit_bytes!(synth_usage_frame(
-                est_prompt,
-                util::estimate_output_tokens(out_bytes),
-                util::now_i(),
-            ));
+    if !client_gone && truncated.is_empty() && !progress.done
+        && (decoder.has_pending() || !progress.finished()) {
+        truncated = "上游流提前结束，未收到完整结束标记".into();
+    }
+    if !client_gone && !truncated.is_empty() {
+        let mut out = String::new();
+        if let Some(c) = conv_resp.as_mut() { c.fail(&truncated, &mut out); }
+        if let Some(c) = conv_anth.as_mut() { c.fail(&truncated, &mut out); }
+        if is_convert { emit_bytes!(Bytes::from(out)); }
+        else { emit_bytes!(sse_error_event(&truncated)); }
+    } else if !client_gone && !progress.done {
+        // Some upstreams close after finish_reason instead of sending [DONE].
+        let mut out = String::new();
+        if let Some(c) = conv_resp.as_mut() { c.finalize(&mut out); }
+        if let Some(c) = conv_anth.as_mut() { c.finalize(&mut out); }
+        if is_convert { emit_bytes!(Bytes::from(out)); }
+        else {
+            if ctx.want_usage && progress.usage.is_none() {
+                emit_bytes!(synth_usage_frame(est_prompt, progress.estimated_output(), util::now_i()));
+            }
+            emit_bytes!(Bytes::from_static(b"data: [DONE]\n\n"));
         }
-        emit_bytes!(Bytes::from_static(b"data: [DONE]\n\n"));
     }
     // 统计与释放（恰好一次）
     let ms = ctx.t0.elapsed().as_millis() as i64;
-    let ttfb = if first_chunk_at > 0.0 {
-        ((first_chunk_at - t0_f) * 1000.0) as i64
-    } else {
-        ms
-    };
-    let est_in = ctx.body.chars().count() as i64;
-    let est_in = est_in / 3 + ((est_in % 3) > 0) as i64;
-    // 真实 usage 优先：上游报了就按真值入账（计费/日限/TPM），没报才估算。
-    // 转换模式（Responses/Anthropic）由状态机解析帧，直通模式由 sse_lines_tap 扫描
-    let real_usage = real_usage.or_else(|| {
-        match (&conv_resp, &conv_anth) {
-            (Some(c), _) => c.real_usage(),
-            (_, Some(c)) => c.real_usage(),
-            _ => None,
-        }
-    });
-    let usage = match real_usage {
-        Some((pt, ct)) => json!({
-            "prompt_tokens": pt,
-            "completion_tokens": ct,
-        }),
-        None => json!({
-            "prompt_tokens": est_in,
-            "completion_tokens": util::estimate_output_tokens(out_bytes),
-        }),
-    };
-    let st = if client_gone { 499 } else { ctx.status };
+    let ttfb = first_chunk_at.unwrap_or(ms);
+    let usage = progress.usage.clone().unwrap_or_else(|| full_usage(Some(&json!({
+        "prompt_tokens": est_prompt,
+        "completion_tokens": progress.estimated_output(),
+    }))));
+    let st = if client_gone { 499 } else if !truncated.is_empty() { 502 } else { ctx.status };
     // 账号成败口径：上游故障（首字节/空闲超时、流中断）必须记失败——否则假死上游
     // 永远"成功"被立即重排，冷却/封禁/熔断全部失灵；客户端断开不算上游的错
     let success = client_gone || truncated.is_empty();
@@ -1710,11 +1481,10 @@ async fn run_pump(
         "客户端已断开".to_string()
     } else if !truncated.is_empty() {
         truncated.clone()
-    } else if scrubbed {
-        "思考退化已清理".to_string()
     } else {
         String::new()
     };
+    hold.clear();
     pool::arelease(
         util::str_or(key.get("id"), ""),
         success,
@@ -1769,6 +1539,7 @@ async fn run_pump(
     // 响应体在「释放 + 记录」全部完成之后才关闭：客户端一收到流结束，
     // 训练记录/释放日志就必须已经在库里（与 Python 生成器 finally 的语义一致），
     // 否则紧接着的查询会看不到刚结束的对话（实测套件就因此失败）
+    drop(_prize_guard);
     drop(tx);
 }
 
@@ -1781,7 +1552,8 @@ fn spawn_pump(
     prize_guard: Option<PrizeGuard>,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
-    tokio::spawn(run_pump(resp, key, first_chunk, ctx, tx, prize_guard));
+    let hold = HoldGuard::new(Some(key.clone()), &ctx.ep, &ctx.model, &ctx.ip, &ctx.tok, true);
+    tokio::spawn(run_pump(resp, key, first_chunk, ctx, tx, prize_guard, hold));
     sse_body_response(rx)
 }
 
@@ -1908,7 +1680,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 false,
             );
         }
-        prize_guard = Some(PrizeGuard { key: pc.key.clone(), released: false });
+        prize_guard = Some(PrizeGuard { key: pc.key.clone() });
     }
     // 多用户链路：Key 类型限制（免费/付费专用 Key）+ 余额预检 + 用户级每分钟限速
     if let Some(uc) = &user_ctx {
@@ -1974,7 +1746,6 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     let mut reuse_key: Option<Value> = None;
     let mut same_key_tried: HashSet<String> = HashSet::new();
     let mut rl_left = util::cfg_int(&cfg, "max_retries", 2).max(1);
-    let mut up_model = model.clone();
     let mut hold = HoldGuard::new(None, ep_tag, &model, &ctx.ip, &tok, stream);
 
     let out = 'attempts: loop {
@@ -2011,7 +1782,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         max_attempts = attempt.max(
             upstreams::override_for(&key, "max_retries", util::cfg_int(&cfg, "max_retries", 3)).max(1) + 1,
         );
-        up_model = upstreams::map_model_for(&key, &model);
+        let up_model = upstreams::map_model_for(&key, &model);
         req["model"] = Value::from(up_model.clone());
         upstreams::apply_param_overrides(&key, &model, &mut req);
         convert::normalize_body_types(&mut req);
@@ -2173,6 +1944,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     }
                     Ok(Ok(None)) => break,
                     Ok(Ok(Some(c))) => {
+                        if c.is_empty() { continue; }
                         first_chunk = Some(c);
                         break;
                     }
@@ -2229,14 +2001,14 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         serde_json::from_str::<serde_json::Value>(payload)
                             .ok()?
                             .get("error")
+                            .filter(|error| !error.is_null())
                             .map(|_| true)
                     })
                     .next()
                     .unwrap_or(false);
                 let is_sse_error = text.trim_start().starts_with("event: error")
-                    || text.trim_start().starts_with("data: {\"error\"")
                     || sse_err_payload;
-                let is_empty = text.trim().is_empty();
+                let is_empty = first_chunk.is_none();
                 if is_sse_error && !downgraded && attempt < max_attempts {
                     downgraded = true;
                     rstatus = 400;
@@ -2331,28 +2103,26 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 }
             }
         }
+        // WAF/CDN 拦截页（HTML 401/403）不是上游鉴权响应：改判 502 走
+        // 基础设施重试路径。不改判的话，一波 WAF 抖动会把全池账号刷成
+        // invalid_key（网络波动全池封禁的放大器）
+        if (rstatus == 401 || rstatus == 403) && util::looks_like_html(&rbody) {
+            rstatus = 502;
+            rerr = "上游被 WAF/CDN 拦截(HTML 响应)".into();
+        }
         let ms = t0.elapsed().as_millis() as i64;
         let mut success = (200..400).contains(&rstatus) && rstatus != 0;
         if success {
-            let st = rbody.trim();
-            if st.is_empty() || st == "{}" {
+            if let Err(error) = validate_json_reply(&rbody, ep_tag == "emb") {
                 success = false;
-                rerr = "上游返回空响应".into();
+                rerr = error;
                 rstatus = 502;
-            } else if has_token_leak(st) || looks_garbled(st) {
-                // 词沙拉/特殊 token 泄漏：模型或推理模板故障的乱码输出（K3 实例）。
-                // 按上游侧失败收口（冷却/熔断接管），换号重试；不把乱码透传给用户
+            } else if let Some(error) = reply_token_leak(&rbody, ep_tag == "emb") {
+                // K3 词沙拉指纹：正文/思考成片泄漏模板特殊 token。按上游故障
+                // 收口（冷却/熔断接管），不把乱码透传给用户、也不计费
                 success = false;
-                rerr = "上游输出乱码（特殊 token 泄漏或词沙拉），已丢弃".into();
+                rerr = error;
                 rstatus = 502;
-            } else if st.starts_with('{') && util::char_prefix(st, 200).contains("\"error\"") {
-                if let Ok(j) = serde_json::from_str::<Value>(st) {
-                    if j.get("error").map(|e| util::truthy(e)).unwrap_or(false) {
-                        success = false;
-                        rerr = util::upstream_snippet(&json!({"status": 200, "body": st, "error": ""}));
-                        rstatus = 502;
-                    }
-                }
             }
         }
         let err = if success {
@@ -2360,10 +2130,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         } else {
             util::upstream_snippet(&json!({"status": rstatus, "body": rbody, "error": rerr}))
         };
-        // 瞬态错误（连接失败/超时/5xx/空响应/乱码）先同号快速重试一次（不惩罚账号）
+        // 瞬态错误（连接失败/超时/5xx/空响应）先同号快速重试一次（不惩罚账号）
         if !success
             && !same_key_tried.contains(&util::str_or(key.get("id"), ""))
-            && (rstatus == 0 || rstatus >= 500 || rerr.contains("乱码"))
+            && (rstatus == 0 || rstatus >= 500)
             && attempt < max_attempts
         {
             same_key_tried.insert(util::str_or(key.get("id"), ""));
@@ -2492,23 +2262,6 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         }
                     }
                 }
-                // 退化思考清理:成片重复感叹号(推理栈故障)不透传给下游
-                if let Some(ch0) = j
-                    .get_mut("choices")
-                    .and_then(|c| c.as_array_mut())
-                    .and_then(|a| a.first_mut())
-                    .and_then(|c| c.as_object_mut())
-                {
-                    if let Some(msg) = ch0.get_mut("message").and_then(|m| m.as_object_mut()) {
-                        for rk in ["reasoning_content", "reasoning"] {
-                            if let Some(rv) = msg.get(rk) {
-                                if util::degenerate_reasoning(rv) {
-                                    msg.insert(rk.to_string(), Value::from(""));
-                                }
-                            }
-                        }
-                    }
-                }
                 // 统一补全 usage：部分上游不返回 usage，严格客户端会因缺字段判定失败
                 if !j.get("usage").map(|u| u.is_object()).unwrap_or(false) {
                     j["usage"] = full_usage(Some(&usage));
@@ -2582,7 +2335,6 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
         }
     };
-    let _ = &up_model; // 循环终值：退出后不再读
     hold.clear();
     match out {
         Some(resp) => resp,
@@ -2620,8 +2372,8 @@ fn slow_start_response(
     let model2 = model.to_string();
     let up_model2 = up_model.to_string();
     let ip2 = ctx.ip.clone();
+    let mut hold = HoldGuard::new(Some(key.clone()), &ep2, &model2, &ip2, &tok, true);
     tokio::spawn(async move {
-        let mut hold = HoldGuard::new(Some(key.clone()), &ep2, &model2, &ip2, &tok, true);
         let mut send_fut = send_fut;
         let deadline = 300.0f64;
         let est_in = body.chars().count() as i64;
@@ -2649,7 +2401,15 @@ fn slow_start_response(
         let mut r: Option<reqwest::Response> = None;
         let mut outcome = String::new();
         while r.is_none() {
-            match tokio::time::timeout(Duration::from_secs_f64(HB), send_fut.as_mut()).await {
+            let result = tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    release_slow(&mut hold, &key, &ep2, &model2, &ip2, &tok, &up_model2, attempt, t0, 499, "客户端已断开", &est_usage).await;
+                    return;
+                }
+                result = tokio::time::timeout(Duration::from_secs_f64(HB), send_fut.as_mut()) => result,
+            };
+            match result {
                 Err(_) => {
                     waited += HB;
                     if waited >= deadline {
@@ -2688,9 +2448,19 @@ fn slow_start_response(
         let status = resp.status().as_u16() as i64;
         if !(200..400).contains(&status) {
             // 上游报错：读错误体 → 流内报错，并按真实状态码释放（仍触发冷却/封禁）
-            let err = match resp.text().await {
-                Ok(raw) => util::upstream_snippet(&json!({"status": status, "body": raw, "error": ""})),
-                Err(e) => e.to_string(),
+            let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg_all(), "request_timeout", 120));
+            let result = tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    release_slow(&mut hold, &key, &ep2, &model2, &ip2, &tok, &up_model2, attempt, t0, 499, "客户端已断开", &est_usage).await;
+                    return;
+                }
+                result = tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), resp.text()) => result,
+            };
+            let err = match result {
+                Ok(Ok(raw)) => util::upstream_snippet(&json!({"status": status, "body": raw, "error": ""})),
+                Ok(Err(e)) => e.to_string(),
+                Err(_) => "上游错误响应体读取超时".into(),
             };
             let msg = if err.is_empty() { format!("上游返回 HTTP {}", status) } else { err.clone() };
             if protocol.is_none() {
@@ -2702,7 +2472,6 @@ fn slow_start_response(
             return;
         }
         // 2xx：交给统一的流式 pump 正常透传（复用改名/心跳/统计/释放逻辑）
-        hold.clear();
         let capture_train = !no_training(&ctx.headers);
         let sctx = StreamCtx {
             ep: ep2.clone(),
@@ -2725,7 +2494,7 @@ fn slow_start_response(
             want_usage,
             prize_metered,
         };
-        run_pump(resp, key, None, sctx, tx, prize_guard).await;
+        run_pump(resp, key, None, sctx, tx, prize_guard, hold).await;
     });
     sse_body_response(rx)
 }
@@ -2748,10 +2517,10 @@ async fn release_slow(
     let ms = t0.elapsed().as_millis() as i64;
     pool::release(
         &util::str_or(key.get("id"), ""),
-        false,
+        status == 499,
         status,
         err,
-        Some(&usage.clone()),
+        Some(usage),
         Some(&release_log(ep, model, status, ms, err, attempt, Some(key), ip, up_model, true, ms, 0, 0, tok)),
         0,
     );
@@ -2924,7 +2693,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 anthropic,
             );
         }
-        prize_guard = Some(PrizeGuard { key: pc.key.clone(), released: false });
+        prize_guard = Some(PrizeGuard { key: pc.key.clone() });
     }
     if let Some(uc) = &user_ctx {
         let Some(u) = crate::users::auth_user(&uc.id) else {
@@ -2990,7 +2759,6 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     let mut reuse_key: Option<Value> = None;
     let mut same_key_tried: HashSet<String> = HashSet::new();
     let mut rl_left = util::cfg_int(&cfg, "max_retries", 2).max(1);
-    let mut up_model = model.clone();
     let tok = util::str_or(entry.as_ref().and_then(|e| e.get("t")), "");
     let mut hold = HoldGuard::new(None, ep, &model, &ctx.ip, &tok, stream);
 
@@ -3022,7 +2790,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         max_attempts = attempt.max(
             upstreams::override_for(&key, "max_retries", util::cfg_int(&cfg, "max_retries", 3)).max(1) + 1,
         );
-        up_model = upstreams::map_model_for(&key, &model);
+        let up_model = upstreams::map_model_for(&key, &model);
         chat_req["model"] = Value::from(up_model.clone());
         upstreams::apply_param_overrides(&key, &model, &mut chat_req);
         convert::normalize_body_types(&mut chat_req);
@@ -3175,6 +2943,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     }
                     Ok(Ok(None)) => break,
                     Ok(Ok(Some(c))) => {
+                        if c.is_empty() { continue; }
                         first_chunk = Some(c);
                         break;
                     }
@@ -3230,12 +2999,12 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         serde_json::from_str::<serde_json::Value>(payload)
                             .ok()?
                             .get("error")
+                            .filter(|error| !error.is_null())
                             .map(|_| true)
                     })
                     .next()
                     .unwrap_or(false);
                 let is_sse_error = text.trim_start().starts_with("event: error")
-                    || text.trim_start().starts_with("data: {\"error\"")
                     || sse_err_payload;
                 if is_sse_error && !downgraded && attempt < max_attempts {
                     downgraded = true;
@@ -3254,7 +3023,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         reuse_key = Some(key);
                         continue 'attempts;
                     }
-                } else if text.trim().is_empty() {
+                } else if first_chunk.is_none() {
                     // 空流保护：上游 200 但流为空 → 标错误走重试，不透传空流
                     rstatus = 502;
                     rerr = "上游返回空流".into();
@@ -3329,28 +3098,24 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 }
             }
         }
+        // WAF/CDN 拦截页（HTML 401/403）不是上游鉴权响应：改判 502 走
+        // 基础设施重试路径。不改判的话，一波 WAF 抖动会把全池账号刷成
+        // invalid_key（网络波动全池封禁的放大器）
+        if (rstatus == 401 || rstatus == 403) && util::looks_like_html(&rbody) {
+            rstatus = 502;
+            rerr = "上游被 WAF/CDN 拦截(HTML 响应)".into();
+        }
         let ms = t0.elapsed().as_millis() as i64;
         let mut success = (200..400).contains(&rstatus) && rstatus != 0;
         if success {
-            let st = rbody.trim();
-            if st.is_empty() || st == "{}" {
+            if let Err(error) = validate_json_reply(&rbody, false) {
                 success = false;
-                rerr = "上游返回空响应".into();
+                rerr = error;
                 rstatus = 502;
-            } else if has_token_leak(st) || looks_garbled(st) {
-                // 词沙拉/特殊 token 泄漏：模型或推理模板故障的乱码输出（K3 实例）。
-                // 按上游侧失败收口（冷却/熔断接管），换号重试；不把乱码透传给用户
+            } else if let Some(error) = reply_token_leak(&rbody, false) {
                 success = false;
-                rerr = "上游输出乱码（特殊 token 泄漏或词沙拉），已丢弃".into();
+                rerr = error;
                 rstatus = 502;
-            } else if st.starts_with('{') && util::char_prefix(st, 200).contains("\"error\"") {
-                if let Ok(j) = serde_json::from_str::<Value>(st) {
-                    if j.get("error").map(|e| util::truthy(e)).unwrap_or(false) {
-                        success = false;
-                        rerr = util::upstream_snippet(&json!({"status": 200, "body": st, "error": ""}));
-                        rstatus = 502;
-                    }
-                }
             }
         }
         let err = if success {
@@ -3360,7 +3125,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         };
         if !success
             && !same_key_tried.contains(&util::str_or(key.get("id"), ""))
-            && (rstatus == 0 || rstatus >= 500 || rerr.contains("乱码"))
+            && (rstatus == 0 || rstatus >= 500)
             && attempt < max_attempts
         {
             same_key_tried.insert(util::str_or(key.get("id"), ""));
@@ -3515,7 +3280,6 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
         }
     };
-    let _ = &up_model; // 循环终值：退出后不再读
     hold.clear();
     match out {
         Some(resp) => resp,
@@ -3666,3 +3430,224 @@ pub async fn v1_model_retrieve(ctx: Ctx, model_id: String) -> Response {
     json_resp(json!({"id": model_id, "object": "model", "created": 0, "owned_by": "gateway"}))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(value: Value) -> String { format!("data: {}\n\n", value) }
+
+    #[test]
+    fn progress_requires_all_choices_and_uses_real_usage() {
+        let mut progress = StreamProgress::default();
+        progress.observe(&frame(json!({"choices":[
+            {"index":0,"delta":{"content":"你好 A 你好 B"},"finish_reason":"stop"},
+            {"index":1,"delta":{"content":"pending"},"finish_reason":null}
+        ],"usage":null}))).unwrap();
+        assert!(!progress.finished());
+        assert!(progress.usage.is_none());
+        progress.observe(&frame(json!({"choices":[{"index":1,"delta":{},"finish_reason":"stop"}]}))).unwrap();
+        progress.observe(&frame(json!({"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}))).unwrap();
+        assert!(progress.finished());
+        assert_eq!(progress.usage.unwrap()["total_tokens"], 49);
+    }
+
+    #[test]
+    fn empty_stream_and_error_events_are_failures() {
+        let mut progress = StreamProgress::default();
+        assert!(progress.observe("data: [DONE]\n\n").is_err());
+        assert!(progress.observe("data: {\"error\":{\"message\":\"overloaded\"}}\n\n").unwrap_err().contains("overloaded"));
+        assert!(progress.observe("data: invalid json\n\n").is_err());
+    }
+
+    #[test]
+    fn nonstream_errors_and_invalid_bodies_cannot_be_billed_as_success() {
+        for body in ["<html>proxy error</html>", "null", "{}", "{\"choices\":[]}"] {
+            assert!(validate_json_reply(body, false).is_err());
+        }
+        let body = json!({"padding":"x".repeat(300),"error":{"message":"failed"}}).to_string();
+        assert_eq!(validate_json_reply(&body, false).unwrap_err(), "failed");
+        assert!(validate_json_reply(r#"{"choices":[{"message":{"content":"<|a|> <|b|> <|c|>"}}]}"#, false).is_ok());
+        assert!(validate_json_reply(r#"{"data":[{"embedding":[0.1]}]}"#, true).is_ok());
+    }
+
+    #[test]
+    fn queue_reservation_is_atomic_under_contention() {
+        let model = "concurrent-queue-test";
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16).map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                (0..30).filter(|_| waiting_try_add(model)).count()
+            })
+        }).collect();
+        let accepted: usize = threads.into_iter().map(|thread| thread.join().unwrap()).sum();
+        assert_eq!(accepted, QUEUE_MAX_WAITING as usize);
+        for _ in 0..accepted { waiting_dec(model); }
+        assert_eq!(waiting_get(model), 0);
+    }
+
+    #[tokio::test]
+    async fn pump_regression_with_real_http_accounting_and_cancellation() {
+        let dir = std::env::temp_dir().join(format!("nim-gateway-test-{}", util::rand_hex(8)));
+        std::env::set_var("NGW_DATA_DIR", &dir);
+        store().update(|db| {
+            db["config"]["sse_idle_timeout"] = json!(1);
+            db["upstreams"] = json!([{"id":"test", "enabled":true, "prices":{"public":1.0}}]);
+            db["users"] = json!([{"id":"user", "username":"test", "enabled":true, "balance":100.0,"grant":0.0}]);
+        });
+        let content = "你好 A ".repeat(40) + "<|example|> <|example|> <|example|> !!!!!!!!!!!!!!!!";
+        let delta = frame(json!({"model":"private", "choices":[{"index":0,"delta":{"content":content},"finish_reason":null}],"usage":null}));
+        let finish = frame(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}));
+        let usage = frame(json!({"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}));
+        let cases = [
+            (format!("{}{}{}data: [DONE]\n\n", delta, finish, usage), true),
+            (delta.clone(), false),
+            (format!("{}data: {{\"error\":{{\"message\":\"overloaded\"}}}}\n\n", delta), false),
+            (format!("{}{}data: {{\"choices\":", delta, finish), false),
+            (format!("{}{}{}", delta, finish, usage), true),
+        ];
+        let mut successes = 0;
+        let odd_before = pool::inflight_odd_releases();
+        for protocol in [None, Some("responses"), Some("messages")] {
+            for (i, (wire, success)) in cases.iter().enumerate() {
+                let wire = wire.replace('\n', "\r\n");
+                let app = axum::Router::new().route("/", axum::routing::get(move || {
+                    let wire = wire.clone();
+                    async move {
+                        let chunks: Vec<Result<Bytes, std::io::Error>> = wire.as_bytes().chunks(1)
+                            .map(Bytes::copy_from_slice).map(Ok).collect();
+                        Response::new(Body::from_stream(futures::stream::iter(chunks)))
+                    }
+                }));
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let mut response = reqwest::Client::new().get(format!("http://{address}/")).send().await.unwrap();
+                let first = if i % 2 == 0 { response.chunk().await.unwrap() } else { None };
+                let key = pool::new_key("test", "", "test-key", "test");
+                let key_id = util::str_or(key.get("id"), "");
+                store().update(|db| db["keys"] = json!([key.clone()]));
+                pool::inc_inflight(&key_id);
+                let ctx = StreamCtx {
+                    ep:"chat".into(), ep_tag:"chat".into(), model:"public".into(), up_model:"private".into(),
+                    body:"{}".into(), ip:"test".into(), tok:"test".into(), status:200, attempt:1,
+                    t0:Instant::now(), rewrite:true, heartbeat:true, ttfb_deadline:1.0,
+                    protocol:protocol.map(str::to_string), capture_train:false,
+                    user:Some(("user".into(), "key".into())), prize_key:None, prize_metered:false, want_usage:protocol.is_none(),
+                };
+                let output = spawn_pump(response, key, first, ctx, None);
+                let bytes = tokio::time::timeout(Duration::from_secs(5), axum::body::to_bytes(output.into_body(), 1024*1024))
+                    .await.unwrap().unwrap();
+                let text = String::from_utf8(bytes.to_vec()).unwrap();
+                assert_eq!(pool::inflight_of(&key_id), 0);
+                if *success {
+                    successes += 1;
+                    assert!(text.contains(&content), "normal bilingual content was changed: {text}");
+                    let db = store().load();
+                    assert_eq!(db["user_logs_paid"][0]["in_tok"], 42);
+                    assert_eq!(db["user_logs_paid"][0]["out_tok"], 7);
+                    assert_eq!(db["keys"][0]["total_success"], 1);
+                } else {
+                    assert!(text.contains("error") || text.contains("response.failed"), "{text}");
+                    assert!(!text.contains("response.completed"));
+                    assert!(!text.contains("message_stop"));
+                    assert_eq!(store().load()["keys"][0]["total_fail"], 1);
+                }
+                assert_eq!(crate::users::balance_of(&store().load()["users"][0]), 100.0 - successes as f64);
+                server.abort();
+            }
+        }
+        // Dropping an unpolled pump task must still release its account.
+        let key = pool::new_key("abort", "", "abort-key", "test");
+        let id = util::str_or(key.get("id"), "");
+        pool::inc_inflight(&id);
+        let guard = HoldGuard::new(Some(key), "chat", "public", "test", "test", true);
+        let task = tokio::spawn(async move { let _guard = guard; futures::future::pending::<()>().await; });
+        task.abort();
+        let _ = task.await;
+        assert_eq!(pool::inflight_of(&id), 0);
+
+        // A silent upstream must be cancelled promptly when the downstream closes,
+        // even when no complete event has arrived and heartbeats cannot detect it yet.
+        let app = axum::Router::new().route("/", axum::routing::get(|| async {
+            Response::new(Body::from_stream(futures::stream::pending::<Result<Bytes, std::io::Error>>()))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = reqwest::Client::new().get(format!("http://{addr}/")).send().await.unwrap();
+        let key = pool::new_key("silent", "", "silent-key", "test");
+        let id = util::str_or(key.get("id"), "");
+        pool::inc_inflight(&id);
+        let ctx = StreamCtx {
+            ep:"chat".into(), ep_tag:"chat".into(), model:"public".into(), up_model:"private".into(),
+            body:"{}".into(), ip:"test".into(), tok:"test".into(), status:200, attempt:1,
+            t0:Instant::now(), rewrite:false, heartbeat:false, ttfb_deadline:300.0,
+            protocol:None, capture_train:false, user:None, prize_key:None, prize_metered:false, want_usage:false,
+        };
+        let hold = HoldGuard::new(Some(key.clone()), "chat", "public", "test", "test", true);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), run_pump(response, key, None, ctx, tx, None, hold)).await.unwrap();
+        assert_eq!(pool::inflight_of(&id), 0);
+        server.abort();
+
+        // Exercise the public router, authentication, account acquisition and all
+        // three protocol entry points, not just the pump in isolation.
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let app = axum::Router::new().route("/chat/completions", axum::routing::post(move |axum::Json(request): axum::Json<Value>| {
+            captured.lock().unwrap().push(request);
+            async move {
+                let wire = frame(json!({"error":null,"model":"private","choices":[{"index":0,"delta":{"content":"route ok"},"finish_reason":"stop"}]}))
+                    + "data: [DONE]\n\n";
+                ([("content-type", "text/event-stream")], wire)
+            }
+        }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream_server = tokio::spawn(async move { axum::serve(upstream_listener, app).await.unwrap() });
+        let key = pool::new_key("route", "", "route-key", "test");
+        store().update(|db| {
+            db["config"]["gateway_tokens"] = json!(["gateway-test"]);
+            db["config"]["account_cooldown_ms"] = json!(0);
+            db["config"]["training_log_max"] = json!(0);
+            db["upstreams"] = json!([{"id":"test","base":format!("http://{upstream_addr}"),"enabled":true,
+                "models":["public"],"model_map":{"public":"private"}}]);
+            db["keys"] = json!([key]);
+            db["model_breaker"] = json!({});
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_addr = listener.local_addr().unwrap();
+        let router = crate::build_router();
+        let gateway = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap()
+        });
+        let client = reqwest::Client::new();
+        let unauthenticated = client.post(format!("http://{gateway_addr}/v1/chat/completions"))
+            .json(&json!({"model":"public","messages":[]})).send().await.unwrap();
+        assert_eq!(unauthenticated.status(), 401);
+        for (endpoint, request, terminal) in [
+            ("chat/completions", json!({"messages":[{"role":"user","content":"hi"}]}), "[DONE]"),
+            ("responses", json!({"input":"hi"}), "response.completed"),
+            ("messages", json!({"messages":[{"role":"user","content":"hi"}],"max_tokens":16}), "message_stop"),
+        ] {
+            let mut request = request;
+            request["model"] = json!("public");
+            request["stream"] = json!(true);
+            let response = client.post(format!("http://{gateway_addr}/v1/{endpoint}"))
+                .bearer_auth("gateway-test").json(&request).send().await.unwrap();
+            assert_eq!(response.status(), 200);
+            let text = response.text().await.unwrap();
+            assert!(text.contains("route ok") && text.contains(terminal), "{endpoint}: {text}");
+            assert!(!text.contains("private"), "upstream model name leaked: {text}");
+        }
+        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert!(seen.lock().unwrap().iter().all(|request| request["model"] == "private"));
+        gateway.abort();
+        upstream_server.abort();
+        assert_eq!(pool::inflight_odd_releases(), odd_before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

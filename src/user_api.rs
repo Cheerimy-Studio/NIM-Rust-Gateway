@@ -747,7 +747,6 @@ pub async fn refresh_login(headers: &HeaderMap) -> Response {
     }
 }
 
-
 /// 用户面板概览统计：总调用次数、总消费、Key 数、最近 5 条日志。
 pub async fn stats(headers: &HeaderMap) -> Response {
     let Ok(uid) = user_require(headers, false) else { return user_require_err() };

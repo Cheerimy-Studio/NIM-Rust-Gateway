@@ -1121,16 +1121,15 @@ fn split_legacy_user_logs(db: &mut Value, caps: (usize, usize)) {
             free.push(r);
         }
     }
-    // 旧表本就时间倒序，截断即保留最近
-    paid.truncate(paid_cap);
-    free.truncate(free_cap);
+    // 先合并再按用户保留最新日志：全表 truncate 会把其他用户的历史丢掉。
     obj.entry("user_logs_paid")
         .or_insert_with(|| Value::Array(vec![]))
         .as_array_mut()
         .map(|a| {
             let mut merged = paid;
             merged.extend(a.iter().cloned());
-            merged.sort_by_key(|r| -util::int_or(r.get("t"), 0));
+            merged.sort_by_key(|r| std::cmp::Reverse(util::int_or(r.get("t"), 0)));
+            retain_user_logs(&mut merged, paid_cap);
             *a = merged;
         });
     obj.entry("user_logs_free")
@@ -1139,9 +1138,19 @@ fn split_legacy_user_logs(db: &mut Value, caps: (usize, usize)) {
         .map(|a| {
             let mut merged = free;
             merged.extend(a.iter().cloned());
-            merged.sort_by_key(|r| -util::int_or(r.get("t"), 0));
+            merged.sort_by_key(|r| std::cmp::Reverse(util::int_or(r.get("t"), 0)));
+            retain_user_logs(&mut merged, free_cap);
             *a = merged;
         });
+}
+
+fn retain_user_logs(rows: &mut Vec<Value>, cap: usize) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    rows.retain(|row| {
+        let count = counts.entry(util::str_or(row.get("user_id"), "")).or_default();
+        *count += 1;
+        *count <= cap
+    });
 }
 
 /// 启动期数据迁移（幂等，写盘一次）：
@@ -1361,3 +1370,42 @@ pub fn model_square() -> Vec<Value> {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_log_migration_keeps_each_users_latest_rows() {
+        let mut db = json!({
+            "user_logs": [
+                {"user_id":"a","t":4,"cost":1},
+                {"user_id":"a","t":3,"cost":1},
+                {"user_id":"b","t":2,"cost":1},
+                {"user_id":"a","t":4,"cost":0},
+                {"user_id":"b","t":3,"cost":0}
+            ],
+            "user_logs_paid": [{"user_id":"b","t":5,"cost":1}],
+            "user_logs_free": [{"user_id":"a","t":5,"cost":0}]
+        });
+        split_legacy_user_logs(&mut db, (1, 1));
+        assert!(db.get("user_logs").is_none());
+        assert_eq!(db["user_logs_paid"], json!([
+            {"user_id":"b","t":5,"cost":1},
+            {"user_id":"a","t":4,"cost":1}
+        ]));
+        assert_eq!(db["user_logs_free"], json!([
+            {"user_id":"a","t":5,"cost":0},
+            {"user_id":"b","t":3,"cost":0}
+        ]));
+        let before = db.clone();
+        split_legacy_user_logs(&mut db, (1, 1));
+        assert_eq!(db, before);
+    }
+
+    #[test]
+    fn legacy_log_migration_honors_zero_retention_and_extreme_timestamps() {
+        let mut db = json!({"user_logs":[{"user_id":"a","t":i64::MIN,"cost":0}]});
+        split_legacy_user_logs(&mut db, (0, 0));
+        assert_eq!(db["user_logs_free"], json!([]));
+    }
+}

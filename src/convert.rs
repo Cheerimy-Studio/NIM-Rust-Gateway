@@ -368,7 +368,7 @@ pub fn chat_to_responses(chat: &Value, meta: &Value) -> Value {
         }
     };
     if let Some(r) = &reasoning {
-        if r.is_string() && !util::degenerate_reasoning(r) {
+        if r.is_string() {
             output.push(json!({
                 "id": rand_id_value("rs_"),
                 "type": "reasoning",
@@ -676,7 +676,7 @@ pub fn chat_to_anthropic(chat: &Value) -> Value {
     };
     if let Some(r) = &reasoning {
         if let Some(rs) = r.as_str() {
-            if !rs.is_empty() && !util::degenerate_reasoning(r) {
+            if !rs.is_empty() {
             // signature 是 ThinkingBlock 的必填字段：给空串即可
                 content.push(json!({"type": "thinking", "thinking": rs, "signature": ""}));
             }

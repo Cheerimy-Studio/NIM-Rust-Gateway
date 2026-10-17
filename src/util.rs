@@ -32,17 +32,6 @@ pub fn token_urlsafe(n: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
-/// 判断思考内容是否退化：感叹号族（! / ！）占 90% 以上且 strip 后长度 ≥16。
-pub fn degenerate_reasoning(text: &Value) -> bool {
-    let Some(s) = text.as_str() else { return false };
-    let s = s.trim();
-    if s.chars().count() < 16 {
-        return false;
-    }
-    let ex = s.matches('!').count() + s.matches('！').count();
-    ex >= (s.chars().count() as f64 * 0.9) as usize
-}
-
 pub fn str_cut(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -353,6 +342,44 @@ pub fn match_text(mode: &str, pattern: &str, text: &str, scan_max: usize) -> boo
         }
         _ => false,
     }
+}
+
+/// 未渲染的模板特殊 token（<|close|> / <|im_end|> / <|endoftext|> 一类）
+/// 是否成片泄漏。这是上游 chat template / 采样栈故障的确定性指纹（K3 词沙拉）。
+/// 阈值刻意定得很高：正常回复引用一两个 token 示例（<|im_start|> 等）不触发，
+/// 只有同一 token 反复刷屏（≥8 次）或 ≥3 种不同控制 token 同时出现才判泄漏。
+pub fn has_token_leak(text: &str) -> bool {
+    if !text.contains("<|") {
+        return false;
+    }
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"<\|[^<>|\s]{1,40}\|>").unwrap());
+    let mut total = 0usize;
+    let mut distinct: Vec<&str> = Vec::new();
+    for hit in re.find_iter(text) {
+        total += 1;
+        let token = hit.as_str();
+        if !distinct.contains(&token) {
+            distinct.push(token);
+            if distinct.len() >= 3 && total >= 3 {
+                return true;
+            }
+        }
+        if total >= 8 {
+            return true;
+        }
+    }
+    false
+}
+
+/// 是否像 WAF/CDN/反代的 HTML 拦截页（而非上游 API 的 JSON 响应）。
+/// 401/403 带回这种页面时按基础设施抖动处理，绝不能当鉴权失败惩罚账号。
+pub fn looks_like_html(body: &str) -> bool {
+    let head = char_prefix(body.trim_start(), 300).to_lowercase();
+    if head.starts_with('{') || head.starts_with('[') {
+        return false;
+    }
+    head.contains("<html") || head.contains("<!doctype") || head.contains("<head")
 }
 
 pub fn now_i() -> i64 {
