@@ -143,7 +143,11 @@ impl ResponsesStream {
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut String) {
-        self.base.buffer.push_str(&chunk.replace("\r\n", "\n"));
+        // CRLF 归一化在拼接后的完整 buffer 上做：
+        // \r 在块尾、\n 在下一块头时，
+        // 按块独立 replace 会漏归一，残留 \r 让事件解析悄悄丢帧
+        self.base.buffer.push_str(chunk);
+        self.base.buffer = self.base.buffer.replace("\r\n", "\n");
         loop {
             let Some(pos) = self.base.buffer.find("\n\n") else { return };
             let raw: String = self.base.buffer[..pos].to_string();
@@ -481,13 +485,17 @@ impl ResponsesStream {
             if let Some(id) = tco.get("id").filter(|x| util::truthy(x)) {
                 t.call_id = util::py_str(id);
             }
-            if let Some(fname) = tco
-                .get("function")
-                .and_then(|f| f.as_object())
-                .and_then(|f| f.get("name"))
-                .filter(|x| util::truthy(x))
-            {
-                t.name.push_str(&util::py_str(fname));
+            // name 按 OpenAI 语义是首帧全量：只在为空时补填。逐帧 push_str
+            // 会把「每帧都带 name」的上游拼成 get_weatherget_weather
+            if t.name.is_empty() {
+                if let Some(fname) = tco
+                    .get("function")
+                    .and_then(|f| f.as_object())
+                    .and_then(|f| f.get("name"))
+                    .filter(|x| util::truthy(x))
+                {
+                    t.name = util::py_str(fname);
+                }
             }
             let frag = util::str_or(
                 tco.get("function")
@@ -545,6 +553,14 @@ impl ResponsesStream {
     /// 训练资料取全文用。
     pub fn text_acc(&self) -> String {
         self.text_acc.clone()
+    }
+
+    /// 上游真实 usage（含 prompt/completion tokens）：泵按真值计费
+    pub fn real_usage(&self) -> Option<(i64, i64)> {
+        let u = self.base.usage.as_ref()?;
+        let pt = util::int_or(u.get("prompt_tokens"), 0);
+        let ct = util::int_or(u.get("completion_tokens"), 0);
+        if pt > 0 || ct > 0 { Some((pt, ct)) } else { None }
     }
 
     pub fn reasoning_acc(&self) -> String {
@@ -608,7 +624,11 @@ impl AnthropicStream {
     }
 
     pub fn feed(&mut self, chunk: &str, out: &mut String) {
-        self.base.buffer.push_str(&chunk.replace("\r\n", "\n"));
+        // CRLF 归一化在拼接后的完整 buffer 上做：
+        // \r 在块尾、\n 在下一块头时，
+        // 按块独立 replace 会漏归一，残留 \r 让事件解析悄悄丢帧
+        self.base.buffer.push_str(chunk);
+        self.base.buffer = self.base.buffer.replace("\r\n", "\n");
         loop {
             let Some(pos) = self.base.buffer.find("\n\n") else { return };
             let raw: String = self.base.buffer[..pos].to_string();
@@ -816,13 +836,16 @@ impl AnthropicStream {
             if let Some(id) = tco.get("id").filter(|x| util::truthy(x)) {
                 t.id = util::py_str(id);
             }
-            if let Some(fname) = tco
-                .get("function")
-                .and_then(|f| f.as_object())
-                .and_then(|f| f.get("name"))
-                .filter(|x| util::truthy(x))
-            {
-                t.name.push_str(&util::py_str(fname));
+            // name 按 OpenAI 语义是首帧全量：只在为空时补填（同上，防重复拼接）
+            if t.name.is_empty() {
+                if let Some(fname) = tco
+                    .get("function")
+                    .and_then(|f| f.as_object())
+                    .and_then(|f| f.get("name"))
+                    .filter(|x| util::truthy(x))
+                {
+                    t.name = util::py_str(fname);
+                }
             }
             let frag = util::str_or(
                 tco.get("function")
@@ -908,6 +931,14 @@ impl AnthropicStream {
 
     pub fn text_acc(&self) -> String {
         self.text_acc.clone()
+    }
+
+    /// 上游真实 usage（含 prompt/completion tokens）：泵按真值计费
+    pub fn real_usage(&self) -> Option<(i64, i64)> {
+        let u = self.base.usage.as_ref()?;
+        let pt = util::int_or(u.get("prompt_tokens"), 0);
+        let ct = util::int_or(u.get("completion_tokens"), 0);
+        if pt > 0 || ct > 0 { Some((pt, ct)) } else { None }
     }
 
     pub fn reasoning_acc(&self) -> String {

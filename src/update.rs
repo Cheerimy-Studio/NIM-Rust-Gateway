@@ -535,6 +535,13 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> 
     let rd = std::fs::read_dir(src).map_err(|e| format!("读取目录失败: {}", e))?;
     for e in rd.flatten() {
         let p = e.path();
+        // 子目录递归拷贝：db/signs/（按天分片的签到数据）在 db/ 之下，
+        // 只拷顶层文件的话整个 signs 目录被静默跳过——回滚后签到记录全丢
+        if p.is_dir() {
+            let name = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+            copy_dir(&p, &dst.join(&name))?;
+            continue;
+        }
         if p.is_file() {
             let name = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
             if name.ends_with(".tmp") || name.contains(".corrupt-") || name.contains(".rollback") {

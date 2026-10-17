@@ -62,10 +62,12 @@ fn has_token_leak(text: &str) -> bool {
 
 static WAITING: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
 
-fn waiting_add(model: &str) {
+fn waiting_add(model: &str) -> i64 {
     let mut g = WAITING.lock().unwrap();
     let m = g.get_or_insert_with(HashMap::new);
-    *m.entry(model.to_string()).or_insert(0) += 1;
+    let e = m.entry(model.to_string()).or_insert(0);
+    *e += 1;
+    *e
 }
 
 fn waiting_dec(model: &str) {
@@ -763,13 +765,29 @@ fn sse_lines_tap(
     saw_usage: bool,
     est_prompt: i64,
     out_bytes: usize,
-) -> (Vec<Vec<u8>>, bool, bool) {
+) -> (Vec<Vec<u8>>, bool, bool, Option<(i64, i64)>) {
     let mut saw = saw_usage;
     // 裸 "usage" 只可能来自帧结构（JSON 字符串内的引号会被转义为 \"）
     // 注意 windows(N) 的 N 必须等于特征串长度：长度不等比较恒为 false（编译不报错）
     const USAGE_KEY: &[u8] = b"\"usage\"";
+    let mut real_usage: Option<(i64, i64)> = None;
     if !saw && buf.windows(USAGE_KEY.len()).any(|w| w == USAGE_KEY) {
         saw = true;
+        // 顺手解析真实 token 数：计费/账号日限按上游真值走，估算只做兜底。
+        // usage 帧是完整 data: 行，按行扫描提取
+        let text = String::from_utf8_lossy(buf);
+        for line in text.split('\n') {
+            let Some(payload) = line.trim().strip_prefix("data:") else { continue };
+            let p = payload.trim();
+            if p.is_empty() || p == "[DONE]" { continue; }
+            let Ok(j) = serde_json::from_str::<serde_json::Value>(p) else { continue };
+            let Some(u) = j.get("usage").filter(|x| x.is_object()) else { continue };
+            let pt = util::int_or(u.get("prompt_tokens"), 0);
+            let ct = util::int_or(u.get("completion_tokens"), 0);
+            if pt > 0 || ct > 0 {
+                real_usage = Some((pt, ct));
+            }
+        }
     }
     let pat = b"data: [DONE]";
     let mut done_at: Option<usize> = None;
@@ -801,13 +819,13 @@ fn sse_lines_tap(
                 saw = true;
             }
             out.push(buf[m..].to_vec());
-            (out, saw, true)
+            (out, saw, true, real_usage)
         }
         None => {
             if !buf.is_empty() {
                 out.push(buf.to_vec());
             }
-            (out, saw, false)
+            (out, saw, false, real_usage)
         }
     }
 }
@@ -1021,12 +1039,16 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         }
         return Taken { ok: false, key: None, status: 429, message: format!("暂无可用账号：{}", acq_reason) };
     }
-    if waiting_get(model) >= QUEUE_MAX_WAITING {
+    // 先占位再判满：waiting_get 与 add 分两步的话，并发请求会双双判「未满」
+    // 双双入队，排队上限被突破；占位与判定在同一个锁内原子完成
+    let after_add = waiting_add(model);
+    if after_add > QUEUE_MAX_WAITING {
+        waiting_dec(model);
         return Taken {
             ok: false,
             key: None,
             status: 503,
-            message: format!("排队已满（{} 个请求在等账号），请稍后重试", waiting_get(model)),
+            message: format!("排队已满（{} 个请求在等账号），请稍后重试", QUEUE_MAX_WAITING),
         };
     }
     let mut q_reason = acq_reason.clone();
@@ -1034,7 +1056,6 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         q_reason = breaker_queue_reason(b);
     }
     let qid = queue::add(ep, model, ip, &tok_mask(tok), &q_reason);
-    waiting_add(model);
     let _qguard = QueueGuard { qid: qid.clone(), model: model.to_string() };
     let deadline = Instant::now() + Duration::from_secs_f64(max_wait as f64);
     let poll = (util::cfg_int(cfg, "queue_poll_ms", 400) as f64 / 1000.0).max(0.05);
@@ -1360,6 +1381,8 @@ async fn run_pump(
     };
     let mut saw_usage = false;
     let mut usage_done = false;
+    // 上游 usage 帧里的真实 token 数：释放/计费优先真值，估算只做兜底
+    let mut real_usage: Option<(i64, i64)> = None;
     // 心跳帧只能落在 SSE 行界上：否则会拼进上游未完成的 JSON 行，客户端解析必炸。
     // 转换模式由状态机产出完整事件，恒视为行界
     let mut at_line = is_convert;
@@ -1504,8 +1527,9 @@ async fn run_pump(
                 Some(cut) => {
                     let out = buf[..cut + 1].to_vec();
                     buf = buf[cut + 1..].to_vec();
-                    let (segs, saw, done) =
+                    let (segs, saw, done, ru) =
                         sse_lines_tap(&out, want_usage, saw_usage, est_prompt, out_bytes);
+                    if ru.is_some() { real_usage = ru; }
                     if saw {
                         saw_usage = true;
                     }
@@ -1523,7 +1547,12 @@ async fn run_pump(
                         };
                         emit_bytes!(Bytes::from(seg));
                     }
-                    // 刷完完整行后 buf 里还剩半行的话，心跳同样不能插
+                    // 刷完完整行后 buf 里还剩半行的话，心跳同样不能插。
+                    // 这是跨迭代状态（下一轮超时分支读它），不是死赋值
+                    #[allow(unused_assignments)]
+                    {
+                        at_line = buf.is_empty();
+                    }
                     continue;
                 }
             }
@@ -1536,6 +1565,10 @@ async fn run_pump(
                 if lead > 0 && bang_tail + lead >= 16 {
                     b = b[lead..].to_vec();
                     scrubbed = true;
+                    #[allow(unused_assignments)]
+                    {
+                        bang_tail = b.iter().rev().take_while(|&&c| c == b'!').count();
+                    }
                     emit_bytes!(Bytes::from(b));
                     continue;
                 }
@@ -1609,7 +1642,8 @@ async fn run_pump(
     }
     if !client_gone && (ctx.rewrite || want_usage) && !buf.is_empty() {
         let out = std::mem::take(&mut buf);
-        let (segs, saw, done) = sse_lines_tap(&out, want_usage, saw_usage, est_prompt, out_bytes);
+        let (segs, saw, done, ru) = sse_lines_tap(&out, want_usage, saw_usage, est_prompt, out_bytes);
+        if ru.is_some() { real_usage = ru; }
         if saw {
             saw_usage = true;
         }
@@ -1649,10 +1683,25 @@ async fn run_pump(
     };
     let est_in = ctx.body.chars().count() as i64;
     let est_in = est_in / 3 + ((est_in % 3) > 0) as i64;
-    let usage = json!({
-        "prompt_tokens": est_in,
-        "completion_tokens": util::estimate_output_tokens(out_bytes),
+    // 真实 usage 优先：上游报了就按真值入账（计费/日限/TPM），没报才估算。
+    // 转换模式（Responses/Anthropic）由状态机解析帧，直通模式由 sse_lines_tap 扫描
+    let real_usage = real_usage.or_else(|| {
+        match (&conv_resp, &conv_anth) {
+            (Some(c), _) => c.real_usage(),
+            (_, Some(c)) => c.real_usage(),
+            _ => None,
+        }
     });
+    let usage = match real_usage {
+        Some((pt, ct)) => json!({
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
+        }),
+        None => json!({
+            "prompt_tokens": est_in,
+            "completion_tokens": util::estimate_output_tokens(out_bytes),
+        }),
+    };
     let st = if client_gone { 499 } else { ctx.status };
     // 账号成败口径：上游故障（首字节/空闲超时、流中断）必须记失败——否则假死上游
     // 永远"成功"被立即重排，冷却/封禁/熔断全部失灵；客户端断开不算上游的错

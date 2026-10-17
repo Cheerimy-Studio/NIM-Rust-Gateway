@@ -37,7 +37,10 @@ pub fn add(ep: &str, model: &str, ip: &str, tok: &str, reason: &str) -> String {
             "reason": util::str_cut(reason, 90),
         }));
         if arr.len() > QUEUE_MAX_ENTRIES {
-            let keep: Vec<Value> = arr[arr.len() - QUEUE_MAX_ENTRIES..].to_vec();
+            // 截尾不截头：队头是最早入队的（大概率已取到号、即将出队），
+            // 截掉它们会让守卫的 remove 失配、面板排队数虚高；
+            // 新来的这个挤不进容量时直接丢弃本条（qid 照常返回，守卫会出队）
+            let keep: Vec<Value> = arr[..QUEUE_MAX_ENTRIES].to_vec();
             *arr = keep;
         }
     });
