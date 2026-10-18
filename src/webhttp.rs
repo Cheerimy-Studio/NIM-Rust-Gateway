@@ -1,6 +1,6 @@
 //! HTTP 公共层：CORS、错误响应、静态页面、上游客户端注册表。
 
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -9,6 +9,14 @@ use std::sync::RwLock;
 pub const MAX_BODY: usize = 20 * 1024 * 1024;
 // 跟随 Cargo.toml：历史硬编码导致 1.7.x 各版资源 URL 不变，浏览器一直用旧缓存的 admin.js
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A browser-supplied Cookie is not a CSRF proof. Require a separate token header.
+pub fn csrf_header_matches(headers: &HeaderMap, expected: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    headers.get("x-csrf").and_then(|value| value.to_str().ok())
+        .map(str::trim).filter(|value| !value.is_empty())
+        .is_some_and(|value| !expected.is_empty() && bool::from(value.as_bytes().ct_eq(expected.as_bytes())))
+}
 
 pub const FALLBACK_MODELS: &[&str] = &[
     "deepseek-ai/deepseek-r1",
@@ -177,6 +185,8 @@ fn build_client(verify_tls: bool, connect_to: i64) -> reqwest::Client {
     // 下一个请求复用死连接时 hyper 不会重试（请求带 body），结果就是 200s 超时。
     // 短空闲超时 + TCP keepalive 确保死连接被及时清理。
     let mut b = reqwest::Client::builder()
+        // Never forward configured upstream credentials through a redirect.
+        .redirect(reqwest::redirect::Policy::none())
         .pool_idle_timeout(std::time::Duration::from_secs(15))
         .pool_max_idle_per_host(10)
         .tcp_keepalive(std::time::Duration::from_secs(15))
@@ -251,4 +261,19 @@ pub fn refresh_pool_cap() {
         .unwrap_or(0);
     let cap = pool_size(&cfg, accounts);
     POOL_CAP.store(cap, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod csrf_tests {
+    use super::*;
+    #[test]
+    fn automatic_cookies_are_not_a_csrf_proof() {
+        let mut headers=HeaderMap::new();
+        headers.insert("cookie","ngw_session=session; ngw_csrf=expected; ngw_ucsrfs=expected".parse().unwrap());
+        assert!(!csrf_header_matches(&headers,"expected"));
+        for bad in ["","wrong"] {headers.insert("x-csrf",bad.parse().unwrap());assert!(!csrf_header_matches(&headers,"expected"));}
+        headers.insert("x-csrf","expected".parse().unwrap());
+        assert!(csrf_header_matches(&headers,"expected"));
+        assert!(!csrf_header_matches(&headers,""));
+    }
 }

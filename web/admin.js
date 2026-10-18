@@ -594,7 +594,7 @@ async function loadUpstreams() {
   const tb = $('#up-rows'); tb.innerHTML = '';
   if (!d.rows.length) {
     const tr = el('tr'); const td = el('td', 'text-muted text-center py-4', '—');
-    td.colSpan = 13; tr.appendChild(td); tb.appendChild(tr);
+    td.colSpan = 14; tr.appendChild(td); tb.appendChild(tr);
   }
   for (const u of d.rows) {
     const tr = el('tr');
@@ -614,6 +614,7 @@ async function loadUpstreams() {
     tr.append(
       el('td', 'fw-semibold', u.name),
       (() => { const td = el('td'); const c = el('code', 'key-mono small', u.base); td.appendChild(c); return td; })(),
+      el('td', 'small', ({auto: '自动', 'chat/completions': 'Chat Completions', responses: 'Responses', messages: 'Messages', completions: 'Completions'})[u.api_endpoint || 'auto'] || '未识别'),
       (() => { const td = el('td'); td.appendChild(el('span', scoreCls, u.feasibility + '%'));
         td.title = '近 20 次成功率' + (u.recent ? `，样本 ${u.recent}` : '，暂无样本'); return td; })(),
       el('td', 'text-end', String(u.weight)),
@@ -636,6 +637,8 @@ async function loadUpstreams() {
       $('#up-id').value = u.id;
       $('#up-name').value = u.name;
       $('#up-base').value = u.base;
+      $('#up-endpoint').value = u.api_endpoint || 'auto';
+      $('#up-auth-mode').value = u.auth_mode || 'auto';
       $('#up-weight').value = u.weight;
       $('#up-rpm').value = u.rpm_cap;
       $('#up-daily').value = u.daily_cap;
@@ -850,29 +853,12 @@ async function fillModelSelects() {
   }
 }
 
-function bindUpstreams() {
-  $('#up-save').onclick = guard(async () => {
-    const payload = {
-      id: $('#up-id').value || undefined,
-      name: $('#up-name').value.trim(),
-      base: $('#up-base').value.trim(),
-      weight: $('#up-weight').value,
-      rpm_cap: $('#up-rpm').value,
-      daily_cap: $('#up-daily').value,
-      models: $('#up-models').value,
-      model_map: $('#up-map').value,
-      pass_client_ua: $('#up-pua').checked,
-      hide_errors: $('#up-herr').value,
-      hide_mapped: $('#up-hname').value,
-      thinking_defaults: tdefDump(),
-      param_overrides: poverDump(),
-      enabled: $('#up-enabled').checked,
-    };
-    for (const [id, key] of UP_FIELDS) payload[key] = $('#' + id).value;
-    await api('upstreams', {method: 'POST', json: payload});
+function resetUpstreamForm() {
     $('#up-id').value = '';
     $('#up-name').value = '';
     $('#up-base').value = '';
+    $('#up-endpoint').value = 'auto';
+    $('#up-auth-mode').value = 'auto';
     $('#up-weight').value = '10';
     $('#up-rpm').value = '0';
     $('#up-daily').value = '0';
@@ -887,14 +873,35 @@ function bindUpstreams() {
     $('#up-enabled').checked = true;
     $('#up-form-title').textContent = '添加上游';
     $('#up-cancel').classList.add('d-none');
+}
+
+function bindUpstreams() {
+  $('#up-save').onclick = guard(async () => {
+    const payload = {
+      id: $('#up-id').value || undefined,
+      name: $('#up-name').value.trim(),
+      base: $('#up-base').value.trim(),
+      api_endpoint: $('#up-endpoint').value,
+      auth_mode: $('#up-auth-mode').value,
+      weight: $('#up-weight').value,
+      rpm_cap: $('#up-rpm').value,
+      daily_cap: $('#up-daily').value,
+      models: $('#up-models').value,
+      model_map: $('#up-map').value,
+      pass_client_ua: $('#up-pua').checked,
+      hide_errors: $('#up-herr').value,
+      hide_mapped: $('#up-hname').value,
+      thinking_defaults: tdefDump(),
+      param_overrides: poverDump(),
+      enabled: $('#up-enabled').checked,
+    };
+    for (const [id, key] of UP_FIELDS) payload[key] = $('#' + id).value;
+    await api('upstreams', {method: 'POST', json: payload});
+    resetUpstreamForm();
     toast('已保存');
     loadUpstreams(); refreshBatchUps(); loadPresets();
   });
-  $('#up-cancel').onclick = () => {
-    $('#up-id').value = '';
-    $('#up-form-title').textContent = '添加上游';
-    $('#up-cancel').classList.add('d-none');
-  };
+  $('#up-cancel').onclick = resetUpstreamForm;
   
   const poverBtn = $('#pover-add');
   if (poverBtn) poverBtn.onclick = () => { poverAdd(); };
@@ -919,6 +926,8 @@ async function loadPresets() {
     sel.onchange = () => {
       const p = d.presets[sel.value];
       if (!p) return;
+      if (p.api_endpoint) $('#up-endpoint').value = p.api_endpoint;
+      if (p.auth_mode) $('#up-auth-mode').value = p.auth_mode;
       for (const [id, key] of UP_FIELDS) { $('#' + id).value = p[key] != null ? p[key] : 0; }
     };
   } catch(e) {}

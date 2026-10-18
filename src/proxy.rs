@@ -339,12 +339,12 @@ pub fn full_usage(u: Option<&Value>) -> Value {
         Some(v) if v.is_object() => v.clone(),
         _ => json!({}),
     };
-    let p = util::int_or(out.get("prompt_tokens"), 0);
-    let c = util::int_or(out.get("completion_tokens"), 0);
+    let p = util::int_or(out.get("prompt_tokens"), 0).max(0);
+    let c = util::int_or(out.get("completion_tokens"), 0).max(0);
     out["prompt_tokens"] = Value::from(p);
     out["completion_tokens"] = Value::from(c);
     if out.get("total_tokens").map(|x| x.is_null()).unwrap_or(true) {
-        out["total_tokens"] = Value::from(p + c);
+        out["total_tokens"] = Value::from(p.saturating_add(c));
     }
     out
 }
@@ -353,6 +353,19 @@ fn usage_has_prompt(u: Option<&Value>) -> bool {
     u.and_then(|u| u.as_object())
         .map(|u| u.contains_key("prompt_tokens") && !u.get("prompt_tokens").map(|x| x.is_null()).unwrap_or(true))
         .unwrap_or(false)
+}
+
+fn stream_value(value: Option<&Value>) -> Result<bool, String> {
+    match value {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => Err("stream 必须为布尔值".into()),
+        },
+        _ => Err("stream 必须为布尔值".into()),
+    }
 }
 
 fn validate_json_reply(body: &str, embeddings: bool) -> Result<(), String> {
@@ -365,6 +378,14 @@ fn validate_json_reply(body: &str, embeddings: bool) -> Result<(), String> {
     let field = if embeddings { "data" } else { "choices" };
     if !value.get(field).and_then(Value::as_array).is_some_and(|rows| !rows.is_empty()) {
         return Err(format!("上游响应缺少有效 {}", field));
+    }
+    let rows = value[field].as_array().unwrap();
+    if !embeddings && rows.iter().any(|choice| {
+        !choice.is_object() || !(choice.get("text").is_some_and(Value::is_string)
+            || choice.get("message").is_some_and(|message| message.is_object()
+                && (message.get("content").is_some() || message.get("tool_calls").is_some())))
+    }) {
+        return Err("上游 choices 缺少有效的 message 或 text".into());
     }
     Ok(())
 }
@@ -891,7 +912,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
     if max_wait > 0 && cool429 > 0 {
         max_wait = max_wait.max((cool429 + 2).min(600));
     }
-    let br = pool::breaker_open(model);
+    let br = pool::breaker_open(&pool::capability_key(model, ep));
     if let Some(b) = &br {
         let queue_on = cfg.get("queue_enabled").map(util::truthy).unwrap_or(true);
         if !queue_on || max_wait <= 0 {
@@ -914,7 +935,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
     let mut acq_total: i64 = 0;
     let mut acquired: Option<Value> = None;
     if br.is_none() {
-        let a = pool::acquire(est_tokens, model);
+        let a = pool::acquire(est_tokens, model, ep);
         acq_reason = a.reason;
         acq_total = a.total;
         if a.result == "ok" {
@@ -969,7 +990,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
                         continue;
                     }
                 }
-                if pool::model_missing_fresh(&db, &uid, model) {
+                if pool::model_missing_fresh(&db, &uid, &pool::capability_key(model, ep)) {
                     continue;
                 }
                 model_ok += 1;
@@ -1013,7 +1034,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
         let hint;
         if !waiting_breaker || pool::breaker_open(model).is_none() {
             waiting_breaker = false;
-            let a = pool::acquire(est_tokens, model);
+            let a = pool::acquire(est_tokens, model, ep);
             if a.result == "ok" {
                 let _ = hint; // 命中即出队：本迭代的等待提示不再被消费
                 got = a.key;
@@ -1025,7 +1046,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
             let crowded = waiting_get(model) > 4;
             backoff = if hint > 0.0 || !crowded { poll } else { (backoff * 2.0).min(QUEUE_POLL_MAX) };
         } else {
-            let b = pool::breaker_open(model).unwrap_or(json!({}));
+            let b = pool::breaker_open(&pool::capability_key(model, ep)).unwrap_or(json!({}));
             hint = util::f64_or(b.get("left"), 0.0);
             queue::set_reason(&qid, &breaker_queue_reason(&b));
         }
@@ -1622,7 +1643,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             false,
         );
     }
-    let body_text = String::from_utf8_lossy(&body_bytes).trim_start_matches('\u{feff}').to_string();
+    let body_text = match std::str::from_utf8(&body_bytes) {
+        Ok(text) => text.trim_start_matches('\u{feff}').to_string(),
+        Err(_) => return error_resp(400, "请求体不是有效 UTF-8", "invalid_request_error", None, false),
+    };
     // 客户端是否声明 include_usage（从原始客户端请求判定一次；后续尝试剥离
     // stream_options 时该判定不受影响 —— 合成 usage 尾帧是给客户端的）。
     // 用 JSON 解析判定，不靠子串匹配（手写客户端的空格/换行序列化会漏判）
@@ -1644,7 +1668,13 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     }
     let mut req = req0;
     let mut model = util::str_or(req.get("model"), "");
-    let stream = req.get("stream").map(util::truthy).unwrap_or(false);
+    if req.get("model").and_then(Value::as_str).is_none_or(|model| model.trim().is_empty() || model.len() > 1024 || model.chars().any(char::is_control)) {
+        return error_resp(400, "model 必须为非空字符串，不超过 1024 字节且不含控制字符", "invalid_request_error", None, false);
+    }
+    let stream = match stream_value(req.get("stream")) {
+        Ok(stream) => stream,
+        Err(message) => return error_resp(400, &message, "invalid_request_error", None, false),
+    };
     let est = util::estimate_request_tokens(&body_text, Some(&req));
     let tok = util::str_or(entry.as_ref().and_then(|e| e.get("t")), "");
     // 奖品 Key：模型范围由奖品自身锁定。请求名与锁定名经别名互通即可放行，
@@ -1783,11 +1813,27 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             upstreams::override_for(&key, "max_retries", util::cfg_int(&cfg, "max_retries", 3)).max(1) + 1,
         );
         let up_model = upstreams::map_model_for(&key, &model);
-        req["model"] = Value::from(up_model.clone());
-        upstreams::apply_param_overrides(&key, &model, &mut req);
-        convert::normalize_body_types(&mut req);
-        convert::sanitize_request(&mut req);
-        let body = serde_json::to_string(&req).unwrap_or_default();
+        let mut routed_req = req.clone();
+        routed_req["model"] = Value::from(up_model.clone());
+        routed_req["stream"] = Value::Bool(stream);
+        convert::normalize_body_types(&mut routed_req);
+        convert::sanitize_request(&mut routed_req);
+        let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
+            endpoint, &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
+        ) {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                hold.clear();
+                pool::dec_inflight(&util::str_or(key.get("id"), ""));
+                break 'attempts Some(error_resp(400, &message, "invalid_request_error", None, false));
+            }
+        };
+        // Fixed parameters belong to the selected upstream schema, never another retry channel.
+        upstreams::apply_param_overrides(&key, &model, &mut wire_body);
+        convert::normalize_body_types(&mut wire_body);
+        wire_body["model"] = Value::from(up_model.clone());
+        wire_body["stream"] = Value::Bool(stream);
+        let body = serde_json::to_string(&wire_body).unwrap_or_default();
         let t0 = Instant::now();
         let mut rerr = String::new();
         let mut rstatus: i64 = 0;
@@ -1799,7 +1845,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             let connect_to = upstreams::override_for(&key, "connect_timeout", util::cfg_int(&cfg, "connect_timeout", 10));
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
             let client = get_http(verify_tls, connect_to);
-            let url = format!("{}/{}", upstreams::base_for(&key), endpoint);
+            let url = format!("{}/{}", upstreams::base_for(&key), wire_plan.upstream.path());
             // 渠道开关「透传调用方 User-Agent」：开启时把下游客户端的 UA 原样
             // 带给上游（默认关；关=不带 UA，保持既有行为）
             // 开关挂在渠道（upstreams 行）上，pool key 行不携带该字段
@@ -1815,9 +1861,9 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             let fut = client
                 .post(&url)
                 .header("Accept", if stream { "text/event-stream" } else { "application/json" })
-                .header("Authorization", format!("Bearer {}", util::str_or(key.get("apikey"), "")))
                 .header("Content-Type", "application/json")
-                .body(body.clone());
+                .json(&wire_body);
+            let fut = wire_plan.auth(fut, &util::str_or(key.get("apikey"), ""), &upstreams::upstream_value(&key, "auth_mode", "auto"));
             let fut = match client_ua {
                 Some(ua) => fut.header("User-Agent", ua),
                 None => fut,
@@ -1884,7 +1930,8 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 prize_ctx.as_ref().map(|p| p.key.clone()),
                 client_wants_usage,
                 prize_guard.take(),
-                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),            ));
+                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false), wire_plan,
+            ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
             // 连接层异常，走统一的失败处理
@@ -1919,7 +1966,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, last_key.as_ref()) as u64)).await;
             continue;
         }
-        let mut r = got_resp.unwrap();
+        let mut r = if stream { wire_plan.stream(got_resp.unwrap()) } else { got_resp.unwrap() };
         rstatus = r.status().as_u16() as i64;
         if stream && (200..400).contains(&rstatus) {
             // 预读首帧：只为识别立即返回的 SSE 错误事件以便换号/降级重试。
@@ -2074,10 +2121,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 // ZCode 等客户端恒走流式，这里漏读会让 400 自愈对流式完全失效。
                 // 空流（预读已判定）除外：读下去会阻塞到整段生成结束
                 let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
-                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), crate::bridge::read_text(r)).await {
                     Ok(Ok(t)) => rbody = t,
                     Ok(Err(e)) => {
-                        rerr = conn_reason(&e);
+                        rerr = e.to_string();
                         rstatus = 0;
                     }
                     Err(_) => {
@@ -2091,16 +2138,22 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             }
         } else {
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
-                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), crate::bridge::read_text(r)).await {
                 Ok(Ok(t)) => rbody = t,
                 Ok(Err(e)) => {
-                    rerr = conn_reason(&e);
+                    rerr = e.to_string();
                     rstatus = 0;
                 }
                 Err(_) => {
                     rerr = "上游响应体读取超时".into();
                     rstatus = 0;
                 }
+            }
+        }
+        if !stream && (200..300).contains(&rstatus) {
+            match wire_plan.reply(&rbody) {
+                Ok(body) => rbody = body,
+                Err(error) => { rerr = error; rstatus = 502; }
             }
         }
         // WAF/CDN 拦截页（HTML 401/403）不是上游鉴权响应：改判 502 走
@@ -2366,6 +2419,7 @@ fn slow_start_response(
     want_usage: bool,
     prize_guard: Option<PrizeGuard>,
     prize_metered: bool,
+    wire_plan: crate::bridge::Plan,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     let ep2 = ep_tag.to_string();
@@ -2455,7 +2509,7 @@ fn slow_start_response(
                     release_slow(&mut hold, &key, &ep2, &model2, &ip2, &tok, &up_model2, attempt, t0, 499, "客户端已断开", &est_usage).await;
                     return;
                 }
-                result = tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), resp.text()) => result,
+                result = tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), crate::bridge::read_text(resp)) => result,
             };
             let err = match result {
                 Ok(Ok(raw)) => util::upstream_snippet(&json!({"status": status, "body": raw, "error": ""})),
@@ -2494,7 +2548,7 @@ fn slow_start_response(
             want_usage,
             prize_metered,
         };
-        run_pump(resp, key, None, sctx, tx, prize_guard, hold).await;
+        run_pump(wire_plan.stream(resp), key, None, sctx, tx, prize_guard, hold).await;
     });
     sse_body_response(rx)
 }
@@ -2618,7 +2672,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             false,
         );
     }
-    let body_text = String::from_utf8_lossy(&body_bytes).trim_start_matches('\u{feff}').to_string();
+    let body_text = match std::str::from_utf8(&body_bytes) {
+        Ok(text) => text.trim_start_matches('\u{feff}').to_string(),
+        Err(_) => return error_resp(400, "请求体不是有效 UTF-8", "invalid_request_error", None, anthropic),
+    };
     if body_text.len() > MAX_BODY {
         return error_resp(413, "请求体过大，上限 20MB", "invalid_request_error", None, anthropic);
     }
@@ -2637,6 +2694,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     let Ok(mut chat_req) = chat_req_v else {
         return error_resp(400, &chat_req_v.unwrap_err(), "invalid_request_error", None, anthropic);
     };
+    if req.get("model").and_then(Value::as_str).is_none_or(|model| model.trim().is_empty() || model.len() > 1024 || model.chars().any(char::is_control)) {
+        return error_resp(400, "model 必须为非空字符串，不超过 1024 字节且不含控制字符", "invalid_request_error", None, anthropic);
+    }
     let mut model = util::str_or(req.get("model"), "");
     // 奖品 Key：模型锁定口径与 chat 直通一致（别名互通 + 跳过通用 404）
     if let Some(pc) = &prize_ctx {
@@ -2655,7 +2715,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             model = pc.model.clone();
         }
     }
-    let stream = req.get("stream").map(util::truthy).unwrap_or(false);
+    let stream = match stream_value(req.get("stream")) {
+        Ok(stream) => stream,
+        Err(message) => return error_resp(400, &message, "invalid_request_error", None, anthropic),
+    };
     let est = util::estimate_request_tokens(&body_text, Some(&req));
     let reasoning_effort = {
         let sub = req
@@ -2791,11 +2854,27 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             upstreams::override_for(&key, "max_retries", util::cfg_int(&cfg, "max_retries", 3)).max(1) + 1,
         );
         let up_model = upstreams::map_model_for(&key, &model);
-        chat_req["model"] = Value::from(up_model.clone());
-        upstreams::apply_param_overrides(&key, &model, &mut chat_req);
-        convert::normalize_body_types(&mut chat_req);
-        convert::sanitize_request(&mut chat_req);
-        let raw = serde_json::to_string(&chat_req).unwrap_or_default();
+        let mut routed_req = chat_req.clone();
+        routed_req["model"] = Value::from(up_model.clone());
+        routed_req["stream"] = Value::Bool(stream);
+        convert::normalize_body_types(&mut routed_req);
+        convert::sanitize_request(&mut routed_req);
+        let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
+            "chat/completions", &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
+        ) {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                hold.clear();
+                pool::dec_inflight(&util::str_or(key.get("id"), ""));
+                break 'attempts Some(error_resp(400, &message, "invalid_request_error", None, anthropic));
+            }
+        };
+        // Fixed parameters belong to the selected upstream schema, never another retry channel.
+        upstreams::apply_param_overrides(&key, &model, &mut wire_body);
+        convert::normalize_body_types(&mut wire_body);
+        wire_body["model"] = Value::from(up_model.clone());
+        wire_body["stream"] = Value::Bool(stream);
+        let raw = serde_json::to_string(&wire_body).unwrap_or_default();
         let t0 = Instant::now();
         let mut rerr = String::new();
         let mut rstatus: i64 = 0;
@@ -2807,7 +2886,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             let connect_to = upstreams::override_for(&key, "connect_timeout", util::cfg_int(&cfg, "connect_timeout", 10));
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
             let client = get_http(verify_tls, connect_to);
-            let url = format!("{}/chat/completions", upstreams::base_for(&key));
+            let url = format!("{}/{}", upstreams::base_for(&key), wire_plan.upstream.path());
             // 渠道开关「透传调用方 User-Agent」：开启时把下游客户端的 UA 原样
             // 带给上游（默认关；关=不带 UA，保持既有行为）
             // 开关挂在渠道（upstreams 行）上，pool key 行不携带该字段
@@ -2823,9 +2902,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             let fut = client
                 .post(&url)
                 .header("Accept", if stream { "text/event-stream" } else { "application/json" })
-                .header("Authorization", format!("Bearer {}", util::str_or(key.get("apikey"), "")))
                 .header("Content-Type", "application/json")
-                .body(raw.clone());
+                .json(&wire_body);
+            let fut = wire_plan.auth(fut, &util::str_or(key.get("apikey"), ""), &upstreams::upstream_value(&key, "auth_mode", "auto"));
             let fut = match client_ua {
                 Some(ua) => fut.header("User-Agent", ua),
                 None => fut,
@@ -2892,7 +2971,8 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 prize_guard.take(),
                 // 计次必须跟 chat 端点同口径：写死 false 会让专属额度奖品 Key
                 // 走兜底流时 used 永不累加，额度上限形同虚设
-                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),            ));
+                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false), wire_plan,
+            ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
             let ms = t0.elapsed().as_millis() as i64;
@@ -2920,7 +3000,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, last_key.as_ref()) as u64)).await;
             continue;
         }
-        let mut r = got_resp.unwrap();
+        let mut r = if stream { wire_plan.stream(got_resp.unwrap()) } else { got_resp.unwrap() };
         rstatus = r.status().as_u16() as i64;
         if stream && (200..400).contains(&rstatus) {
             let ttfb_to = util::cfg_int(&cfg, "ttfb_timeout", 0) as f64;
@@ -3069,10 +3149,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 // 与渠道耗尽分类全依赖它——转换端点（/v1/responses、/v1/messages）
                 // 与 chat 直通同享自愈链路
                 let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
-                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), crate::bridge::read_text(r)).await {
                     Ok(Ok(t)) => rbody = t,
                     Ok(Err(e)) => {
-                        rerr = conn_reason(&e);
+                        rerr = e.to_string();
                         rstatus = 0;
                     }
                     Err(_) => {
@@ -3086,16 +3166,22 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             }
         } else {
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
-                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), r.text()).await {
+                match tokio::time::timeout(Duration::from_secs(read_to.max(1) as u64), crate::bridge::read_text(r)).await {
                 Ok(Ok(t)) => rbody = t,
                 Ok(Err(e)) => {
-                    rerr = conn_reason(&e);
+                    rerr = e.to_string();
                     rstatus = 0;
                 }
                 Err(_) => {
                     rerr = "上游响应体读取超时".into();
                     rstatus = 0;
                 }
+            }
+        }
+        if !stream && (200..300).contains(&rstatus) {
+            match wire_plan.reply(&rbody) {
+                Ok(body) => rbody = body,
+                Err(error) => { rerr = error; rstatus = 502; }
             }
         }
         // WAF/CDN 拦截页（HTML 401/403）不是上游鉴权响应：改判 502 走
@@ -3460,8 +3546,15 @@ mod tests {
     }
 
     #[test]
+    fn stream_strings_do_not_turn_false_into_a_stream() {
+        assert!(!stream_value(Some(&json!("false"))).unwrap());
+        assert!(stream_value(Some(&json!("true"))).unwrap());
+        assert!(stream_value(Some(&json!({"invalid":true}))).is_err());
+    }
+
+    #[test]
     fn nonstream_errors_and_invalid_bodies_cannot_be_billed_as_success() {
-        for body in ["<html>proxy error</html>", "null", "{}", "{\"choices\":[]}"] {
+        for body in ["<html>proxy error</html>", "null", "{}", "{\"choices\":[]}", "{\"choices\":[{}]}"] {
             assert!(validate_json_reply(body, false).is_err());
         }
         let body = json!({"padding":"x".repeat(300),"error":{"message":"failed"}}).to_string();
@@ -3647,6 +3740,7 @@ mod tests {
         assert!(seen.lock().unwrap().iter().all(|request| request["model"] == "private"));
         gateway.abort();
         upstream_server.abort();
+        crate::bridge::tests::gateway_matrix().await;
         assert_eq!(pool::inflight_odd_releases(), odd_before);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -99,6 +99,40 @@ CI 在 Linux 和 Windows 上运行测试。
 JSON 会返回协议对应的流内错误，记为失败且不扣费。网关不会依据中英混排密度或
 正文中的特殊 token 示例判定“乱码”而截断回复。
 
+## 独立选择上游接口
+
+在管理后台「上游」中设置「发送到上游的接口」。`Base URL` 仍只填公共前缀，例如 `https://api.example.com/v1`，不附带具体端点。
+
+| 渠道 `api_endpoint` | 实际上游对话接口 |
+|---|---|
+| `chat/completions` | `/chat/completions` |
+| `responses` | `/responses` |
+| `messages` | `/messages` |
+| `completions` | `/completions` |
+| `auto` 或旧配置缺失此字段 | 保留旧行为：对话走 Chat，文本补全走 Completions |
+
+明确选择接口后，下游可继续调用 Chat、Responses、Messages 或字符串 prompt 的 Completions；网关转换请求、JSON 响应和 SSE 事件。Embeddings 是独立任务，始终调用 `/embeddings`，不会转换成对话；对话、旧版文本补全与向量的负缓存、熔断状态相互隔离。
+
+渠道 `auth_mode` 可选择 `auto`、`bearer`、`x-api-key`。自动模式按**上游**协议选择：Messages 使用 X-API-Key，其余接口使用 Bearer；始终使用渠道账号密钥，不转发下游的鉴权信息。Messages 同时携带 `anthropic-version: 2023-06-01`。不跟随上游重定向。
+
+```json
+{
+  "name": "Responses 渠道",
+  "base": "https://api.example.com/v1",
+  "api_endpoint": "responses",
+  "auth_mode": "bearer",
+  "enabled": true
+}
+```
+
+固定参数按**选定上游协议**的字段名填写，例如 Responses 的 `max_output_tokens`、Messages 的 `max_tokens`；`model` 与 `stream` 由路由控制。每次重试从原始请求构建，不继承其他渠道的固定参数。修改渠道路由配置会清理旧的负缓存与熔断状态；升级首次启动也会清理旧的未隔离状态。
+
+适配支持常见文本、函数工具、Chat/Responses/Messages 图片输入和 usage。旧版 Completions 使用角色文本拼接 prompt，没有通用的结构化角色隔离，不支持工具或图片。对于要求系统角色隔离的任务，应使用其他三种上游。
+
+这是无状态的协议适配，不是任意原生 API 透传。`previous_response_id`、后台任务、Responses 服务端内置工具、音频/文件内容、带签名的 Messages 思考历史等不能安全转换的功能会明确拒绝。某些协议没有等价参数，例如 Responses 的 stop/seed、Messages 的 JSON 格式或 strict 工具约束，网关会报错，避免静默丢弃要求。Responses/Messages 不支持跨协议 `n>1`。
+
+非流式上游响应（含解压后的错误体）上限 20 MiB；SSE 仍按单事件 1 MiB 限制。API 请求和上游响应必须为有效 UTF-8。
+
 ## 接口
 
 ```

@@ -120,17 +120,7 @@ pub fn require(headers: &HeaderMap, is_post: bool) -> Result<(), Response> {
     if is_post {
         let cfg = store().load();
         let expected = csrf_token(cfg.get("config").unwrap_or(&Value::Null));
-        // Python 语义是 `headers.get("x-csrf") or cookies.get(...) or ""`：
-        // 前端 window.__csrf 不存在，JS 发的是空 X-CSRF，必须回退到浏览器
-        // 自动携带的 ngw_csrf cookie；把空串当真值会让整个后台 403
-        let got = headers
-            .get("x-csrf")
-            .and_then(|x| x.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| cookie_get(headers, CSRF_COOKIE))
-            .unwrap_or_default();
-        if !constant_eq(&got, &expected) {
+        if !csrf_header_matches(headers, &expected) {
             return Err(csrf_error());
         }
     }

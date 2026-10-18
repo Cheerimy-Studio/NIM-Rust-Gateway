@@ -364,7 +364,7 @@ details.upgrp[open]{background:#fff}
     <div class="table-responsive">
     <table class="table table-hover align-middle">
       <thead>
-        <tr><th>名称</th><th>Base URL</th><th>可行性</th><th class="text-end">权重</th><th class="text-end">RPM 上限</th>
+        <tr><th>名称</th><th>Base URL</th><th>上游接口</th><th>可行性</th><th class="text-end">权重</th><th class="text-end">RPM 上限</th>
           <th class="text-end">日上限</th><th>模型</th><th>策略</th><th class="text-end">账号</th><th class="text-end">今日</th>
           <th class="text-end">本分钟</th><th>状态</th><th>操作</th></tr>
       </thead>
@@ -388,6 +388,26 @@ details.upgrp[open]{background:#fff}
           <input class="form-control form-control-sm font-monospace" id="up-base" placeholder="https://integrate.api.nvidia.com/v1"></div>
         <div class="col-md-3"><label class="form-label" for="up-weight">权重（1-100）</label>
           <input type="number" min="1" max="100" class="form-control form-control-sm" id="up-weight" value="10"></div>
+      </div>
+      <div class="mt-3">
+        <label class="form-label" for="up-endpoint">发送到上游的接口</label>
+        <select class="form-select form-select-sm" id="up-endpoint">
+          <option value="auto">兼容旧配置（自动）</option>
+          <option value="chat/completions">OpenAI Chat Completions — /chat/completions</option>
+          <option value="responses">OpenAI Responses — /responses</option>
+          <option value="messages">Anthropic Messages — /messages</option>
+          <option value="completions">文本 Completions — /completions</option>
+        </select>
+        <div class="form-text">对话请求发送到这里选定的上游接口，由网关转换下游协议。向量请求仍使用 /embeddings。旧版文本接口不支持图片或工具。</div>
+      </div>
+      <div class="mt-3">
+        <label class="form-label" for="up-auth-mode">上游鉴权</label>
+        <select class="form-select form-select-sm" id="up-auth-mode">
+          <option value="auto">按上游协议自动选择</option>
+          <option value="bearer">Authorization: Bearer</option>
+          <option value="x-api-key">X-API-Key</option>
+        </select>
+        <div class="form-text">使用本渠道账号的密钥。自动模式下 Messages 使用 X-API-Key，其余接口使用 Bearer。</div>
       </div>
       <details class="upgrp mt-3" open>
         <summary>模型</summary>
@@ -485,6 +505,7 @@ details.upgrp[open]{background:#fff}
           </div>
           <div class="col-12">
             <label class="form-label">渠道固定参数（按模型分设）</label>
+            <div class="form-text mb-2">按选定上游接口的字段名填写，例如 Responses 使用 max_output_tokens。model 和 stream 由网关路由控制。</div>
             <div class="pover-editor">
               <div class="d-flex gap-2 mb-2">
                 <select id="pover-model" class="form-select form-select-sm" style="max-width:220px">
@@ -1239,7 +1260,7 @@ details.upgrp[open]{background:#fff}
 </div>
 
 <script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
-<script>window.NGW = {base: "/", csrf: window.__csrf || ""};</script>
+<script>window.NGW = {base: "/", csrf: "{{CSRF}}"};</script>
 <script src="/assets/admin.js?v={{VERSION}}"></script>
 </body>
 </html>

@@ -24,6 +24,7 @@ pub fn ensure_default() {
         .map(|a| a.iter().map(|u| util::str_or(u.get("id"), "")).collect())
         .unwrap_or_default();
     let need = ids.is_empty()
+        || db.pointer("/config/endpoint_cache_v1").and_then(Value::as_bool) != Some(true)
         || db.get("keys").and_then(|x| x.as_array()).map(|keys| {
             keys.iter()
                 .any(|k| !ids.contains(&util::str_or(k.get("upstream_id"), "")))
@@ -34,6 +35,15 @@ pub fn ensure_default() {
 }
 
 pub fn migrate(db: &mut Value) {
+    // Old unscoped entries may have been created by an incompatible endpoint.
+    // Reset once on upgrade; never discard fresh, task-scoped state on later loads.
+    if db.pointer("/config/endpoint_cache_v1").and_then(Value::as_bool) != Some(true) {
+        db["model_missing"] = serde_json::json!({});
+        db["model_breaker"] = serde_json::json!({});
+        if let Some(cfg) = db.get_mut("config").and_then(Value::as_object_mut) {
+            cfg.insert("endpoint_cache_v1".into(), Value::Bool(true));
+        }
+    }
     let has = db
         .get("upstreams")
         .and_then(|x| x.as_array())
@@ -48,6 +58,8 @@ pub fn migrate(db: &mut Value) {
             "id": format!("u_{}", util::rand_hex(6)),
             "name": "NVIDIA NIM",
             "base": base,
+            "api_endpoint": "auto",
+            "auth_mode": "auto",
             "enabled": true,
             "weight": 10,
             "rpm_cap": 0,
@@ -593,14 +605,34 @@ fn clamp(v: &Value, lo: i64, hi: i64, default: i64) -> i64 {
 
 pub fn validate_save(data: &Value) -> (Option<Value>, String) {
     let name = util::str_or(data.get("name"), "").trim().to_string();
-    let mut base = util::str_or(data.get("base"), "").trim().to_string();
+    let raw_base = util::str_or(data.get("base"), "");
+    if raw_base.chars().any(char::is_control) { return (None, "Base URL 不能包含控制字符".into()); }
+    let mut base = raw_base.trim().to_string();
     base = base.trim_end_matches('/').to_string();
     if name.is_empty() {
         return (None, "名称不能为空".into());
     }
-    if !base.starts_with("http://") && !base.starts_with("https://") {
-        return (None, "Base URL 必须以 http(s):// 开头".into());
+    let Ok(url) = reqwest::Url::parse(&base) else { return (None, "Base URL 不是有效 URL".into()) };
+    if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() {
+        return (None, "Base URL 必须是有效的 http(s) URL".into());
     }
+    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some()
+        || base.chars().any(char::is_control) {
+        return (None, "Base URL 不能包含用户密码、查询参数、片段或控制字符；密钥请通过账号配置".into());
+    }
+    let endpoint = match data.get("api_endpoint") {
+        None => "auto",
+        Some(Value::String(value)) => value.as_str(),
+        _ => return (None, "api_endpoint 必须为字符串".into()),
+    };
+    if endpoint != "auto" && !["chat/completions", "responses", "messages", "completions"].contains(&endpoint) {
+        return (None, "不支持的上游端点，请从协议列表选择".into());
+    }
+    let auth_mode = match data.get("auth_mode") {
+        None => "auto",
+        Some(Value::String(mode)) if ["auto", "bearer", "x-api-key"].contains(&mode.as_str()) => mode.as_str(),
+        _ => return (None, "auth_mode 必须为 auto、bearer 或 x-api-key".into()),
+    };
     for suffix in [
         "/chat/completions",
         "/completions",
@@ -621,19 +653,21 @@ pub fn validate_save(data: &Value) -> (Option<Value>, String) {
     let mut row = serde_json::json!({
         "name": util::str_cut(&name, 40),
         "base": base,
+        "api_endpoint": endpoint,
+        "auth_mode": auth_mode,
         "weight": clamp(data.get("weight").unwrap_or(&Value::from(10)), 1, 100, 10),
-        "rpm_cap": clamp(data.get("rpm_cap").unwrap_or(&Value::from(0)), 0, 1_000_000, 0),
-        "daily_cap": clamp(data.get("daily_cap").unwrap_or(&Value::from(0)), 0, 100_000_000, 0),
-        "rpm": clamp(data.get("rpm").unwrap_or(&Value::from(0)), 0, 1_000_000, 0),
-        "tpm": clamp(data.get("tpm").unwrap_or(&Value::from(0)), 0, 100_000_000, 0),
-        "daily_request_cap": clamp(data.get("daily_request_cap").unwrap_or(&Value::from(0)), 0, 100_000_000, 0),
-        "daily_token_limit": clamp(data.get("daily_token_limit").unwrap_or(&Value::from(0)), 0, 10_000_000_000, 0),
+        "rpm_cap": clamp(data.get("rpm_cap").unwrap_or(&Value::from(0)), -1, 1_000_000, 0),
+        "daily_cap": clamp(data.get("daily_cap").unwrap_or(&Value::from(0)), -1, 100_000_000, 0),
+        "rpm": clamp(data.get("rpm").unwrap_or(&Value::from(0)), -1, 1_000_000, 0),
+        "tpm": clamp(data.get("tpm").unwrap_or(&Value::from(0)), -1, 100_000_000, 0),
+        "daily_request_cap": clamp(data.get("daily_request_cap").unwrap_or(&Value::from(0)), -1, 100_000_000, 0),
+        "daily_token_limit": clamp(data.get("daily_token_limit").unwrap_or(&Value::from(0)), -1, 10_000_000_000, 0),
         "request_timeout": clamp(data.get("request_timeout").unwrap_or(&Value::from(0)), 0, 3600, 0),
         "connect_timeout": clamp(data.get("connect_timeout").unwrap_or(&Value::from(0)), 0, 120, 0),
-        "account_cooldown_ms": clamp(data.get("account_cooldown_ms").unwrap_or(&Value::from(0)), 0, 60_000, 0),
-        "acct_concurrency": clamp(data.get("acct_concurrency").unwrap_or(&Value::from(0)), 0, 10_000, 0),
-        "total_concurrency": clamp(data.get("total_concurrency").unwrap_or(&Value::from(0)), 0, 10_000, 0),
-        "hourly_request_limit": clamp(data.get("hourly_request_limit").unwrap_or(&Value::from(0)), 0, 100_000, 0),
+        "account_cooldown_ms": clamp(data.get("account_cooldown_ms").unwrap_or(&Value::from(0)), -1, 60_000, 0),
+        "acct_concurrency": clamp(data.get("acct_concurrency").unwrap_or(&Value::from(0)), -1, 10_000, 0),
+        "total_concurrency": clamp(data.get("total_concurrency").unwrap_or(&Value::from(0)), -1, 10_000, 0),
+        "hourly_request_limit": clamp(data.get("hourly_request_limit").unwrap_or(&Value::from(0)), -1, 100_000, 0),
         "max_retries": clamp(data.get("max_retries").unwrap_or(&Value::from(0)), 0, 20, 0),
         "retry_backoff_base_ms": clamp(data.get("retry_backoff_base_ms").unwrap_or(&Value::from(0)), 0, 60_000, 0),
         "retry_backoff_max_ms": clamp(data.get("retry_backoff_max_ms").unwrap_or(&Value::from(0)), 0, 300_000, 0),
@@ -684,6 +718,7 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
             None => return,
         };
         let mut replaced = false;
+        let mut routing_changed = false;
         if !uid_in.is_empty() {
             for u in arr.iter_mut() {
                 if util::str_or(u.get("id"), "") == uid_in {
@@ -697,6 +732,8 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
                             }
                         }
                     }
+                    routing_changed = ["base", "api_endpoint", "auth_mode", "model_map", "models"]
+                        .iter().any(|field| u.get(*field) != row.get(*field));
                     let enabled = row.get("enabled").map(util::as_bool2).unwrap_or(false);
                     if let Some(newo) = row.as_object_mut() {
                         newo.insert("id".into(), Value::from(uid_in.clone()));
@@ -721,6 +758,11 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
             }
             arr.push(new_row);
             final_id = new_id;
+        }
+        if routing_changed {
+            if let Some(cache) = db.get_mut("model_missing").and_then(Value::as_object_mut) { cache.remove(&final_id); }
+            // Breakers are model-global in the existing store; clear them after changing routing.
+            if let Some(obj) = db.as_object_mut() { obj.insert("model_breaker".into(), serde_json::json!({})); }
         }
     });
     (get_upstream(&final_id), String::new())
@@ -789,4 +831,42 @@ pub fn delete(uid: &str) -> (bool, String) {
         return (false, "至少保留一个上游".into());
     }
     (true, String::new())
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    #[test]
+    fn channel_unlimited_override_is_not_erased_by_validation() {
+        let mut request=serde_json::json!({"name":"test","base":"https://api.example.test/v1"});
+        for field in ["rpm","tpm","daily_request_cap","daily_token_limit","hourly_request_limit","account_cooldown_ms","acct_concurrency","total_concurrency","rpm_cap","daily_cap"] {request[field]=serde_json::json!(-1);}
+        let row=validate_save(&request).0.unwrap();
+        for field in ["rpm","tpm","daily_request_cap","daily_token_limit","hourly_request_limit","account_cooldown_ms","acct_concurrency","total_concurrency","rpm_cap","daily_cap"] {assert_eq!(row[field],-1);}
+    }
+
+    #[test]
+    fn unscoped_cache_is_reset_once_during_upgrade() {
+        let mut db = serde_json::json!({"config":{},"upstreams":[{"id":"test"}],"keys":[],"model_missing":{"test":{"model":999999999999.0}},"model_breaker":{"model":{"fails":3}}});
+        migrate(&mut db);
+        assert_eq!(db["model_missing"],serde_json::json!({}));
+        assert_eq!(db["model_breaker"],serde_json::json!({}));
+        db["model_missing"]=serde_json::json!({"fresh":true});
+        migrate(&mut db);
+        assert_eq!(db["model_missing"],serde_json::json!({"fresh":true}));
+    }
+
+    #[test]
+    fn endpoint_and_base_url_are_validated_without_accepting_arbitrary_routes() {
+        for endpoint in ["auto","chat/completions","responses","messages","completions"] {
+            let (row,error)=validate_save(&serde_json::json!({"name":"test","base":"https://api.example.test/v1","api_endpoint":endpoint}));
+            assert!(error.is_empty(),"{error}");assert_eq!(row.unwrap()["api_endpoint"],endpoint);
+        }
+        for endpoint in ["../admin","responses?api_key=secret","https://evil.test","embeddings",""] {
+            assert!(validate_save(&serde_json::json!({"name":"test","base":"https://api.example.test/v1","api_endpoint":endpoint})).0.is_none());
+        }
+        assert!(validate_save(&serde_json::json!({"name":"test","base":"https://api.example.test/v1","api_endpoint":true})).0.is_none());
+        for base in ["https://user:secret@example.test/v1","https://example.test/v1?secret=x","https://example.test/v1#x","file:///tmp/test","http://","https://example.test/v1\n"] {
+            assert!(validate_save(&serde_json::json!({"name":"test","base":base})).0.is_none(),"{base}");
+        }
+    }
 }

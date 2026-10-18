@@ -489,6 +489,15 @@ fn compare_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
         .then(ia.cmp(&ib))
 }
 
+/// Embedding failures must never poison a dialogue model with the same name.
+pub fn capability_key(model: &str, endpoint: &str) -> String {
+    match endpoint {
+        "emb" => format!("\0embeddings\0{}", model),
+        "cmpl" => format!("\0completions\0{}", model),
+        _ => model.to_string(),
+    }
+}
+
 pub fn model_key(uid: &str, model: &str) -> String {
     format!("{}\u{0}{}", uid, model)
 }
@@ -719,9 +728,9 @@ impl AcquireOut {
 }
 
 /// 取号：在 STORE 锁内执行调度逻辑。
-pub fn acquire(est_tokens: i64, model: &str) -> AcquireOut {
+pub fn acquire(est_tokens: i64, model: &str, endpoint: &str) -> AcquireOut {
     let mut out = AcquireOut::new();
-    store().update(|db| acquire_fn(db, &mut out, est_tokens, model));
+    store().update(|db| acquire_fn(db, &mut out, est_tokens, model, endpoint));
     out
 }
 
@@ -771,7 +780,7 @@ fn reason_text(r: &[i64; 13], total: i64) -> String {
     format!("{} / 共 {}", joined, total)
 }
 
-pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: &str) {
+pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: &str, endpoint: &str) {
     let cfg = db.get("config").cloned().unwrap_or(Value::Object(Obj::new()));
     let now_f = util::now_f();
     let now = now_f as i64;
@@ -909,7 +918,7 @@ pub fn acquire_fn(db: &mut Value, out: &mut AcquireOut, est_tokens: i64, model: 
                 continue;
             }
         }
-        if !model.is_empty() && model_missing_fresh(db, &uid, model) {
+        if !model.is_empty() && model_missing_fresh(db, &uid, &capability_key(model, endpoint)) {
             reason[R_MODEL_MISSING] += 1;
             continue;
         }
@@ -1301,7 +1310,8 @@ fn release_fn(
                 let cls = classify(http_status, errno, error);
                 if cls == "model" && (http_status == 400 || http_status == 404) && log.is_some() {
                     let model_name = util::str_or(log.and_then(|l| l.get("model")), "");
-                    mark_model_missing(db, &uid, &model_name);
+                    let endpoint = util::str_or(log.and_then(|l| l.get("ep")), "");
+                    mark_model_missing(db, &uid, &capability_key(&model_name, &endpoint));
                 }
                 match cls {
                     "req" | "channel" | "model" | "pool_exhausted" => {
@@ -1393,17 +1403,17 @@ fn release_fn(
             let tin = usage
                 .and_then(|u| u.get("prompt_tokens"))
                 .and_then(util::py_int)
-                .unwrap_or(0);
+                .unwrap_or(0).max(0);
             let tout = usage
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(util::py_int)
-                .unwrap_or(0);
+                .unwrap_or(0).max(0);
             {
                 let o = k.as_object_mut().unwrap();
                 let pt = util::int_or(o.get("prompt_tokens"), 0);
                 let ct = util::int_or(o.get("completion_tokens"), 0);
-                o.insert("prompt_tokens".into(), Value::from(pt + tin));
-                o.insert("completion_tokens".into(), Value::from(ct + tout));
+                o.insert("prompt_tokens".into(), Value::from(pt.saturating_add(tin)));
+                o.insert("completion_tokens".into(), Value::from(ct.saturating_add(tout)));
             }
             // daily
             {
@@ -1423,7 +1433,7 @@ fn release_fn(
                 let rq = dobj.get("requests").and_then(util::py_int).unwrap_or(0);
                 let tk = dobj.get("tokens").and_then(util::py_int).unwrap_or(0);
                 dobj.insert("requests".into(), Value::from(rq + 1));
-                dobj.insert("tokens".into(), Value::from(tk + tin + tout));
+                dobj.insert("tokens".into(), Value::from(tk.saturating_add(tin).saturating_add(tout)));
                 if dm.len() > 3 {
                     let mut ds: Vec<String> = dm.keys().cloned().collect();
                     ds.sort();
@@ -1442,7 +1452,7 @@ fn release_fn(
                 }
                 let mm = mt.as_object_mut().unwrap();
                 let cur = mm.get(&minute).and_then(util::py_int).unwrap_or(0);
-                mm.insert(minute.clone(), Value::from(cur + tin + tout));
+                mm.insert(minute.clone(), Value::from(cur.saturating_add(tin).saturating_add(tout)));
                 if mm.len() > 2 {
                     let keep: Vec<String> = vec![
                         (minute.parse::<i64>().unwrap_or(0) - 1).to_string(),
@@ -1543,7 +1553,7 @@ fn release_fn(
                     let br = br_all
                         .as_object_mut()
                         .unwrap()
-                        .entry(model_name.clone())
+                        .entry(capability_key(&model_name, &util::str_or(log.and_then(|l| l.get("ep")), "")))
                         .or_insert_with(|| serde_json::json!({"fails": 0, "opened_until": 0}));
                     if !br.is_object() {
                         *br = serde_json::json!({"fails": 0, "opened_until": 0});
@@ -1927,4 +1937,40 @@ pub async fn test_key(key_id: &str) -> Value {
     }
     release(key_id, ok, status, &err, None, Some(&log_row), 0);
     serde_json::json!({"ok": ok, "status": status, "ms": ms, "models": count, "error": err})
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    #[test]
+    fn extreme_upstream_usage_cannot_overflow_and_poison_the_store_lock() {
+        let key=new_key("overflow","","test","test");let id=util::str_or(key.get("id"),"");
+        let mut db=serde_json::json!({"config":{},"keys":[key]});
+        db["keys"][0]["prompt_tokens"]=Value::from(i64::MAX);
+        release_fn(&mut db,&id,true,200,"",Some(&serde_json::json!({"prompt_tokens":i64::MAX,"completion_tokens":i64::MAX})),None,0);
+        assert_eq!(db["keys"][0]["prompt_tokens"],i64::MAX);
+        assert_eq!(db["keys"][0]["daily"][util::local_day(util::now_i())]["tokens"],i64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn embeddings_cannot_poison_dialogue_negative_cache_or_breakers() {
+        let key=new_key("scope","","test","scope");let id=util::str_or(key.get("id"),"");
+        let mut db=serde_json::json!({"config":{},"keys":[key]});
+        let log=serde_json::json!({"ep":"emb","model":"same-name"});
+        release_fn(&mut db,&id,false,404,"model not found",None,Some(&log),0);
+        assert!(!model_missing_fresh(&db,"scope","same-name"));
+        assert!(model_missing_fresh(&db,"scope",&capability_key("same-name","emb")));
+        let text_log=serde_json::json!({"ep":"cmpl","model":"same-name"});
+        release_fn(&mut db,&id,false,404,"model not found",None,Some(&text_log),0);
+        assert!(!model_missing_fresh(&db,"scope","same-name"));
+        assert!(model_missing_fresh(&db,"scope",&capability_key("same-name","cmpl")));
+
+        for _ in 0..3 {release_fn(&mut db,&id,false,502,"upstream error",None,Some(&log),0);}
+        assert!(db["model_breaker"].get("same-name").is_none());
+        assert!(db["model_breaker"].get(capability_key("same-name","emb")).is_some());
+    }
 }

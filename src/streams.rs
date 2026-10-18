@@ -881,19 +881,12 @@ impl AnthropicStream {
                 &json!({"type": "content_block_stop", "index": idx}),
             ));
         }
-        let output_tokens = self
-            .base
-            .usage
-            .as_ref()
-            .and_then(|u| u.get("completion_tokens"))
-            .and_then(util::py_int)
-            .unwrap_or(0);
         out.push_str(&sse_frame(
             "message_delta",
             &json!({
                 "type": "message_delta",
                 "delta": {"stop_reason": self.stop_reason(), "stop_sequence": null},
-                "usage": {"output_tokens": output_tokens},
+                "usage": crate::convert::anthropic_usage(self.base.usage.as_ref(), self.est_input),
             }),
         ));
         out.push_str(&sse_frame("message_stop", &json!({"type": "message_stop"})));

@@ -48,12 +48,7 @@ fn user_require_err() -> Response {
         .into_response()
 }
 
-fn constant_eq(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
-
-/// 用户会话校验：返回 user_id。POST 额外校验 ngw_ucsrfs cookie（服务端双提交）。
+/// 用户会话校验：返回 user_id。POST 额外校验独立的 X-CSRF 请求头。
 pub fn user_require(headers: &HeaderMap, is_post: bool) -> Result<String, Response> {
     let cfg = store().load();
     let secret = util::str_or(cfg.get("config").and_then(|c| c.get("session_secret")), "");
@@ -74,8 +69,7 @@ pub fn user_require(headers: &HeaderMap, is_post: bool) -> Result<String, Respon
     }
     if is_post {
         let expect = users::user_csrf_token(&secret, &uid);
-        let got_csrf = cookie_get(headers, "ngw_ucsrfs").unwrap_or_default();
-        if !constant_eq(&got_csrf, &expect) {
+        if !csrf_header_matches(headers, &expect) {
             return Err((
                 StatusCode::FORBIDDEN,
                 axum::Json(json!({"error": {"message": "CSRF 校验失败，请刷新页面", "type": "auth"}})),
@@ -154,6 +148,7 @@ pub async fn login(headers: &HeaderMap, ip: String, body: Bytes) -> Response {
 }
 
 pub async fn logout(headers: &HeaderMap) -> Response {
+    if let Err(response) = user_require(headers, true) { return response; }
     // 删除 Cookie 与种入 Cookie 的 Secure 标记保持一致（https 部署下删除也应带 Secure）
     let secure = headers
         .get("x-forwarded-proto")

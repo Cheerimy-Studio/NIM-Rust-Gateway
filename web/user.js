@@ -2,13 +2,33 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 
+let userCsrfToken = '';
+let userCsrfRefresh = null;
+async function getUserCsrfToken() {
+  if (userCsrfToken) return userCsrfToken;
+  if (!userCsrfRefresh) {
+    userCsrfRefresh = fetch('api/user/session', {credentials: 'same-origin'})
+      .then(async res => {
+        const data = await res.json();
+        if (!res.ok || !data.csrf) throw new Error('会话已过期，请重新登录');
+        userCsrfToken = data.csrf;
+        return userCsrfToken;
+      }).finally(() => { userCsrfRefresh = null; });
+  }
+  return userCsrfRefresh;
+}
+
 async function api(path, opts = {}) {
   const init = {method: opts.method || 'GET', headers: {}};
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(init.method.toUpperCase())) {
+    init.headers['X-CSRF'] = await getUserCsrfToken();
+  }
   if (opts.json !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.json); }
   const res = await fetch('api/user/' + path, init);
   let data = null;
   try { data = await res.json(); } catch (e) { }
   if (!res.ok) throw new Error((data && data.error && data.error.message) || ('HTTP ' + res.status));
+  if (path === 'logout') userCsrfToken = '';
   return data;
 }
 
@@ -482,6 +502,8 @@ $('#login-go').onclick = async () => {
       err.style.display = 'block';
       return;
     }
+    const session = await r.json();
+    userCsrfToken = session.csrf || '';
     showPanel();
     await loadMe();
     await loadKeys();

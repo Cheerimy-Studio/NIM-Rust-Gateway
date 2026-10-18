@@ -108,6 +108,19 @@ fn content_with_images(blocks: &Value) -> Option<Vec<Value>> {
     Some(parts)
 }
 
+fn validate_portable_content(content: &Value, allowed: &[&str]) -> Result<(), String> {
+    if content.is_string() || content.is_null() { return Ok(()); }
+    for block in content.as_array().ok_or("content 必须为字符串或数组")? {
+        if block.is_string() { continue; }
+        let kind = block.get("type").and_then(Value::as_str).ok_or("内容块缺少 type")?;
+        if !allowed.contains(&kind) { return Err(format!("协议适配不支持内容类型 {}，不会静默丢弃", kind)); }
+        if ["image", "input_image"].contains(&kind) && image_part(block).is_none() {
+            return Err("图片必须提供可转换的 URL 或 base64；不支持原生 file_id 引用".into());
+        }
+    }
+    Ok(())
+}
+
 /// 转发前清理会被严格上游拒绝的请求体。
 pub fn sanitize_request(body: &mut Value) {
     let Some(obj) = body.as_object_mut() else { return };
@@ -160,21 +173,42 @@ fn normalize_for_upstream(obj: &mut serde_json::Map<String, Value>) {
 /// Responses 协议的 usage（该协议的唯一产出点）。
 pub fn map_usage(u: Option<&Value>) -> Value {
     let u = u.cloned().unwrap_or(Value::Null);
-    let tin = util::int_or(u.get("prompt_tokens"), 0);
-    let tout = util::int_or(u.get("completion_tokens"), 0);
+    let tin = util::int_or(u.get("prompt_tokens"), 0).max(0);
+    let tout = util::int_or(u.get("completion_tokens"), 0).max(0);
     let total = util::int_or(u.get("total_tokens"), 0);
     json!({
         "input_tokens": tin,
-        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+        "input_tokens_details": {"cached_tokens": util::int_or(u.pointer("/prompt_tokens_details/cached_tokens"), 0).max(0), "cache_write_tokens": util::int_or(u.pointer("/prompt_tokens_details/cache_write_tokens"), 0).max(0)},
         "output_tokens": tout,
-        "output_tokens_details": {"reasoning_tokens": 0},
-        "total_tokens": if total == 0 { tin + tout } else { total },
+        "output_tokens_details": {"reasoning_tokens": util::int_or(u.pointer("/completion_tokens_details/reasoning_tokens"), 0).max(0)},
+        "total_tokens": if total == 0 { tin.saturating_add(tout) } else { total },
     })
+}
+
+pub fn anthropic_usage(usage: Option<&Value>, estimated_input: i64) -> Value {
+    let empty = json!({});
+    let u = usage.unwrap_or(&empty);
+    let cached = util::int_or(u.pointer("/prompt_tokens_details/cached_tokens"), 0).max(0);
+    let written = util::int_or(u.pointer("/prompt_tokens_details/cache_write_tokens"), 0).max(0);
+    let input = util::int_or(u.get("prompt_tokens"), estimated_input).max(0);
+    let mut out = json!({
+        "input_tokens": input.saturating_sub(cached).saturating_sub(written).max(0),
+        "output_tokens": util::int_or(u.get("completion_tokens"), 0).max(0),
+    });
+    if cached > 0 { out["cache_read_input_tokens"] = json!(cached); }
+    if written > 0 { out["cache_creation_input_tokens"] = json!(written); }
+    out
 }
 
 // ============================================================ Responses API
 
 pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
+    if req.get("background").is_some_and(util::truthy) {
+        return Err("本网关不支持后台 Responses 任务".into());
+    }
+    if req.get("tools").and_then(Value::as_array).is_some_and(|tools| tools.iter().any(|t| t["type"] != "function")) {
+        return Err("协议适配只支持 function 工具，不支持 Responses 服务端内置工具".into());
+    }
     let prev = util::str_or(req.get("previous_response_id"), "");
     if !prev.is_empty() {
         return Err(
@@ -211,6 +245,7 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
                         role = "system".into();
                     }
                     let content = obj.get("content").cloned().unwrap_or(Value::Null);
+                    validate_portable_content(&content, &["input_text", "output_text", "text", "input_image", "image", "refusal"])?;
                     if let Some(multi) = content_with_images(&content) {
                         messages.push(json!({"role": role, "content": multi}));
                     } else {
@@ -245,6 +280,7 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
                     }));
                 } else if typ == "function_call_output" {
                     let out = obj.get("output").cloned().unwrap_or(Value::Null);
+                    validate_portable_content(&out, &["input_text", "output_text", "text"])?;
                     let content = match &out {
                         Value::String(s) => s.clone(),
                         other => flatten_content(other),
@@ -254,6 +290,8 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
                         "tool_call_id": util::str_or(obj.get("call_id"), ""),
                         "content": content,
                     }));
+                } else {
+                    return Err(format!("不支持的 Responses input 类型：{}", typ));
                 }
             }
         }
@@ -268,6 +306,15 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
         "messages": messages,
     });
     let chat_obj = chat.as_object_mut().unwrap();
+    if let Some(format) = req.pointer("/text/format") {
+        let mut chat_format = format.clone();
+        if format["type"] == "json_schema" {
+            let mut schema = format.as_object().ok_or("text.format 必须为对象")?.clone();
+            schema.remove("type");
+            chat_format = json!({"type":"json_schema","json_schema":schema});
+        }
+        chat_obj.insert("response_format".into(), chat_format);
+    }
     for k in ["temperature", "top_p", "stream", "parallel_tool_calls", "user", "seed"] {
         if let Some(v) = req.get(k) {
             chat_obj.insert(k.to_string(), v.clone());
@@ -305,14 +352,16 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
                     if obj.contains_key("function") {
                         tools.push(t.clone());
                     } else {
-                        tools.push(json!({
+                        let mut tool = json!({
                             "type": "function",
                             "function": {
                                 "name": util::str_or(obj.get("name"), ""),
                                 "description": util::str_or(obj.get("description"), ""),
-                                "parameters": obj.get("parameters").cloned().unwrap_or(json!({"type": "object", "properties": []})),
+                                "parameters": obj.get("parameters").cloned().unwrap_or(json!({"type": "object", "properties": {}})),
                             },
-                        }));
+                        });
+                        if let Some(strict) = obj.get("strict") { tool["function"]["strict"] = strict.clone(); }
+                        tools.push(tool);
                     }
                 }
             }
@@ -464,6 +513,7 @@ pub fn chat_to_responses(chat: &Value, meta: &Value) -> Value {
 pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
     let mut messages: Vec<Value> = Vec::new();
     let system = req.get("system").cloned().unwrap_or(Value::Null);
+    validate_portable_content(&system, &["text"])?;
     if util::truthy(&system) {
         let text = match &system {
             Value::String(s) => s.clone(),
@@ -501,6 +551,12 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                     }
                     let Some(bo) = b.as_object() else { continue };
                     let t = util::str_or(bo.get("type"), "");
+                    if !["text", "image", "tool_use", "tool_result"].contains(&t.as_str()) {
+                        return Err(format!("协议适配不支持 Messages 内容块 {}；不会丢弃带签名的思考或工具历史", t));
+                    }
+                    if t == "image" && image_part(b).is_none() {
+                        return Err("无法转换此 Messages 图片块".into());
+                    }
                     if t == "text" {
                         text_parts.push(util::str_or(bo.get("text").filter(|x| !x.is_null()), ""));
                     } else if t == "tool_use" {
@@ -521,6 +577,7 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                         }));
                     } else if t == "tool_result" {
                         let inner = bo.get("content").cloned().unwrap_or(Value::from(""));
+                        validate_portable_content(&inner, &["text"])?;
                         let c = match &inner {
                             Value::String(s) => s.clone(),
                             other => flatten_content(other),
@@ -619,7 +676,7 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                         "function": {
                             "name": name,
                             "description": util::str_or(obj.get("description"), ""),
-                            "parameters": obj.get("input_schema").cloned().unwrap_or(json!({"type": "object", "properties": []})),
+                            "parameters": obj.get("input_schema").cloned().unwrap_or(json!({"type": "object", "properties": {}})),
                         },
                     }));
                 }
@@ -635,6 +692,9 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
             match ttype.as_str() {
                 "any" => {
                     chat_obj.insert("tool_choice".into(), Value::from("required"));
+                }
+                "none" => {
+                    chat_obj.insert("tool_choice".into(), Value::from("none"));
                 }
                 "tool" => {
                     chat_obj.insert(
@@ -724,10 +784,7 @@ pub fn chat_to_anthropic(chat: &Value) -> Value {
         "content": content,
         "stop_reason": stop_map(&finish),
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": util::int_or(usage.get("prompt_tokens"), 0),
-            "output_tokens": util::int_or(usage.get("completion_tokens"), 0),
-        },
+        "usage": anthropic_usage(Some(&usage), 0),
     })
 }
 

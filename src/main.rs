@@ -2,6 +2,7 @@
 
 mod admin;
 mod convert;
+mod bridge;
 mod user_api;
 mod pool;
 mod mailer;
@@ -201,7 +202,8 @@ async fn h_login(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap,
     admin::login(&headers, addr.ip().to_string(), body).await
 }
 
-async fn h_logout() -> Response {
+async fn h_logout(headers: HeaderMap) -> Response {
+    if let Err(response) = admin::require(&headers, true) { return response; }
     admin::logout().await
 }
 
