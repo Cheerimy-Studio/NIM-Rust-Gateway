@@ -2091,7 +2091,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         let tdefs_pro = convert::parse_thinking_defaults(
             &upstreams::upstream_value(&key, "thinking_defaults", ""));
         if !tdefs_pro.is_empty() {
-            convert::downgrade_thinking(&mut routed_req, &up_model, &tdefs_pro);
+            convert::downgrade_thinking(&mut routed_req, &model, &tdefs_pro);
         }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             endpoint, &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
@@ -2351,7 +2351,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         continue 'attempts;
                     }
                     let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
-                    if convert::downgrade_thinking(&mut req, &up_model, &tdefs) {
+                    if convert::downgrade_thinking(&mut req, &model, &tdefs) {
                         drop(r);
                         reuse_key = Some(key);
                         continue 'attempts;
@@ -2491,7 +2491,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         if rstatus == 400 && attempt < max_attempts && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
             downgraded = true;
             let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
-            if convert::downgrade_thinking(&mut req, &up_model, &tdefs) {
+            if convert::downgrade_thinking(&mut req, &model, &tdefs) {
                 reuse_key = Some(key.clone());
                 continue;
             }
@@ -3230,7 +3230,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         let tdefs_pro = convert::parse_thinking_defaults(
             &upstreams::upstream_value(&key, "thinking_defaults", ""));
         if !tdefs_pro.is_empty() {
-            convert::downgrade_thinking(&mut routed_req, &up_model, &tdefs_pro);
+            convert::downgrade_thinking(&mut routed_req, &model, &tdefs_pro);
         }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             "chat/completions", &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
@@ -3480,7 +3480,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         continue 'attempts;
                     }
                     let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
-                    if convert::downgrade_thinking(&mut chat_req, &up_model, &tdefs) {
+                    if convert::downgrade_thinking(&mut chat_req, &model, &tdefs) {
                         drop(r);
                         reuse_key = Some(key);
                         continue 'attempts;
@@ -3613,7 +3613,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         if rstatus == 400 && attempt < max_attempts && convert::thinking_unsupported(&rbody, rstatus) && !downgraded {
             downgraded = true;
             let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
-            if convert::downgrade_thinking(&mut chat_req, &up_model, &tdefs) {
+            if convert::downgrade_thinking(&mut chat_req, &model, &tdefs) {
                 reuse_key = Some(key.clone());
                 continue;
             }

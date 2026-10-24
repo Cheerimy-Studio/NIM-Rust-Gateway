@@ -943,8 +943,8 @@ pub fn downgrade_thinking(body: &mut Value, model: &str, defaults: &HashMap<Stri
     let m = model.to_lowercase();
     let mut default_effort: Option<&String> = None;
     for (pat, eff) in defaults {
-        // `*` = 渠道级兜底（匹配所有模型）；其他按子串匹配（`m3` 命中 `m3.1-flash`）
-        if pat == "*" || m.contains(pat.as_str()) {
+        // 精确匹配（后台下拉框选的就是完整模型名）；`*` = 渠道级兜底
+        if pat == "*" || m == pat.as_str() {
             default_effort = Some(eff);
             break;
         }
