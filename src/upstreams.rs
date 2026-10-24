@@ -2,7 +2,8 @@
 
 use crate::store::{store, Obj, Value};
 use crate::util;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 pub fn all_upstreams() -> Vec<Value> {
     let db = store().load();
@@ -472,9 +473,101 @@ pub fn models_alias_linked(a: &str, b: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------- 模型降级链
+
+/// 一条命名链：请求链名时按序尝试成员，正文输出前的失败对调用方不可见。
+/// 借鉴 dsh-our-free-model 的 combos 设计。
+#[derive(Clone)]
+pub struct ModelChain {
+    pub name: String,
+    pub members: Vec<String>,
+    pub rr: bool,
+    pub sticky: i64,
+}
+
+/// 解析配置 `model_chains`：每行 `名称 = 模型A, 模型B`，可选后缀
+/// `| fb`（fallback，固定链首，默认）/ `| rr` / `| rrN`（round-robin，N 轮粘滞）。
+pub fn parse_model_chains(cfg: &Value) -> Vec<ModelChain> {
+    let text = util::str_or(cfg.get("model_chains"), "");
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let name = line[..eq].trim().to_string();
+        let mut rest = line[eq + 1..].trim().to_string();
+        if name.is_empty() || name.chars().count() > 80 {
+            continue;
+        }
+        let mut rr = false;
+        let mut sticky = 3i64;
+        if let Some(bar) = rest.rfind('|') {
+            let flag = rest[bar + 1..].trim().to_lowercase();
+            let head = rest[..bar].trim().to_string();
+            if flag == "fb" || flag == "fallback" {
+                rest = head;
+                rr = false;
+            } else if flag.starts_with("rr") {
+                rest = head;
+                rr = true;
+                let n = flag[2..].trim();
+                if let Ok(v) = n.parse::<i64>() {
+                    sticky = v.clamp(1, 100);
+                }
+            }
+        }
+        let members: Vec<String> = rest
+            .split(',')
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty() && m.chars().count() <= 160)
+            .collect();
+        if members.len() >= 2 && out.iter().all(|c: &ModelChain| c.name != name) {
+            out.push(ModelChain { name, members, rr, sticky });
+        }
+        if out.len() >= 50 {
+            break;
+        }
+    }
+    out
+}
+
+/// round-robin 起点状态：(链名 → (当前起点, 剩余粘滞次数))。
+/// 粘滞语义：同一链连续 sticky 次请求保持同一起点分摊负载，
+/// 之后推进到下一成员。fallback 链恒为 0。
+static CHAIN_ROTATION: Mutex<Option<HashMap<String, (usize, i64)>>> = Mutex::new(None);
+
+pub fn chain_by_name<'a>(chains: &'a [ModelChain], name: &str) -> Option<&'a ModelChain> {
+    chains.iter().find(|c| c.name == name)
+}
+
+pub fn chain_start(chain: &ModelChain) -> usize {
+    if !chain.rr || chain.members.len() < 2 {
+        return 0;
+    }
+    let mut g = CHAIN_ROTATION.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    let entry = m.entry(chain.name.clone()).or_insert((0, chain.sticky - 1));
+    if entry.1 > 0 {
+        entry.1 -= 1;
+        return entry.0 % chain.members.len();
+    }
+    entry.0 = (entry.0 + 1) % chain.members.len();
+    entry.1 = chain.sticky - 1;
+    entry.0
+}
+
 pub fn model_routable(model: &str, hide_mapped_global: bool) -> bool {
     let mut any_enabled = false;
     let db = store().load();
+    // 降级链：链名可路由 = 任一成员可路由（成员级路由在请求循环里逐个走）
+    {
+        let chains = parse_model_chains(db.get("config").unwrap_or(&Value::Null));
+        if let Some(c) = chains.iter().find(|c| c.name == model) {
+            return c.members.iter().any(|m| model_routable(m, hide_mapped_global));
+        }
+    }
     let ups = db.get("upstreams").and_then(|x| x.as_array()).cloned().unwrap_or_default();
     for u in &ups {
         if !u.get("enabled").map(|x| util::truthy(x)).unwrap_or(false) {
@@ -572,6 +665,10 @@ pub fn curated_models() -> Vec<String> {
                 }
             }
         }
+        // 降级链名作为虚拟模型进入清单
+        for c in parse_model_chains(&cfg) {
+            push(&c.name, &mut out);
+        }
         return out;
     }
     for u in &ups {
@@ -580,6 +677,9 @@ pub fn curated_models() -> Vec<String> {
                 push(m, &mut out);
             }
         }
+    }
+    for c in parse_model_chains(&cfg) {
+        push(&c.name, &mut out);
     }
     out
 }

@@ -846,6 +846,9 @@ const INT_SETTINGS: &[&str] = &[
     "pool_daily_cap",
     "warmup_seconds",
     "smtp_port",
+    "recovery_max_ms",
+    "tool_compact_threshold",
+    "tool_compact_max",
 ];
 const STR_SETTINGS: &[&str] = &[
     "upstream_base",
@@ -860,8 +863,11 @@ const STR_SETTINGS: &[&str] = &[
     "smtp_from",
     "reg_email_regex",
     "reg_email_error_msg",
+    "model_chains",
 ];
 const BOOL_SETTINGS: &[&str] = &[
+    "recovery_enabled",
+    "tool_compact_enabled",
     "log_enabled",
     "verify_tls",
     "queue_enabled",

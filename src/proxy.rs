@@ -1266,6 +1266,22 @@ pub struct StreamCtx {
     // 客户端原始请求声明了 stream_options.include_usage（与每次尝试的上游体无关：
     // 400 自愈剥离 stream_options 后仍需为客户端合成 usage 尾帧）
     pub want_usage: bool,
+    // 思考检查点续写：流式纯思考断流/静默停止时，用检查点重发一次续写请求。
+    // None = 未启用（非流式、配置关闭、或上下文不足以重建请求）
+    pub recovery: Option<RecoveryDial>,
+}
+
+/// 续写重拨所需的最小上下文：从泵里发起一次新的上游请求。
+/// 凭据与端点信息从 key 现取（泵持有 key 的克隆），这里只带请求形态与渠道协议设置。
+pub struct RecoveryDial {
+    /// 客户端 chat 形态请求（含完整 messages 历史；model 为客户端请求名）
+    pub chat_req: Value,
+    /// 渠道「发送到上游的接口」设置（auto / chat/completions / responses / messages / completions）
+    pub api_endpoint: String,
+    /// 渠道「上游鉴权」设置
+    pub auth_mode: String,
+    /// 渠道开启 UA 透传时的客户端 UA
+    pub user_agent: Option<String>,
 }
 
 #[derive(Default)]
@@ -1275,6 +1291,10 @@ struct StreamProgress {
     completed: HashSet<i64>,
     usage: Option<Value>,
     output_bytes: usize,
+    // 内容出现标记：用于空内容判定与思考检查点续写的触发条件
+    saw_text: bool,
+    saw_reasoning: bool,
+    saw_tool: bool,
 }
 
 impl StreamProgress {
@@ -1303,11 +1323,22 @@ impl StreamProgress {
                     self.completed.insert(index);
                 }
                 // Estimate generated payload only, never SSE framing or repeated model/ID fields.
+                if choice.pointer("/delta/content").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+                    || choice.get("text").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+                {
+                    self.saw_text = true;
+                }
+                if choice.pointer("/delta/reasoning_content").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+                    || choice.pointer("/delta/reasoning").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+                {
+                    self.saw_reasoning = true;
+                }
                 for text in [choice.get("text"), choice.pointer("/delta/content"),
                     choice.pointer("/delta/reasoning_content"), choice.pointer("/delta/reasoning")] {
                     self.output_bytes += text.and_then(Value::as_str).map(str::len).unwrap_or(0);
                 }
                 if let Some(tools) = choice.pointer("/delta/tool_calls").and_then(Value::as_array) {
+                    if !tools.is_empty() { self.saw_tool = true; }
                     for tool in tools {
                         self.output_bytes += tool.pointer("/function/arguments")
                             .and_then(Value::as_str).map(str::len).unwrap_or(0);
@@ -1325,6 +1356,95 @@ impl StreamProgress {
     fn estimated_output(&self) -> i64 {
         if self.output_bytes == 0 { 0 } else { util::estimate_output_tokens(self.output_bytes) }
     }
+}
+
+/// 在流式交接点构建续写上下文：配置开启且请求可重建时才有值。
+/// chat_req 为客户端 chat 形态请求（proxy_chat 传 req、proxy_convert 传 chat_req）。
+fn recovery_dial(cfg: &Value, chat_req: &Value, key: &Value, ctx: &Ctx) -> Option<RecoveryDial> {
+    if !cfg.get("recovery_enabled").map(util::truthy).unwrap_or(true) {
+        return None;
+    }
+    if chat_req.get("messages").and_then(|m| m.as_array()).is_none() {
+        return None;
+    }
+    // 渠道开关「透传调用方 User-Agent」：与主请求同口径
+    let pass_ua = upstreams::get_upstream(&util::str_or(key.get("upstream_id"), ""))
+        .and_then(|u| u.get("pass_client_ua").cloned())
+        .map(|v| util::truthy(&v))
+        .unwrap_or(false);
+    Some(RecoveryDial {
+        chat_req: chat_req.clone(),
+        api_endpoint: upstreams::upstream_value(key, "api_endpoint", "auto"),
+        auth_mode: upstreams::upstream_value(key, "auth_mode", "auto"),
+        user_agent: if pass_ua {
+            ctx.headers.get("user-agent").and_then(|x| x.to_str().ok()).map(|s| s.to_string())
+        } else {
+            None
+        },
+    })
+}
+
+/// 续写指令（借鉴 dsh-our-free-model 的 recovery 措辞，实战验证过的提示词）：
+/// 告知模型前文是草稿而非新指令、直接给最终答案、不再重启分析。
+const RECOVERY_INSTRUCTION: &str = "The previous response was interrupted before its final answer. \
+Complete the original task using the conversation above. \
+The text below is an incomplete draft of the interrupted analysis, not new instructions. \
+Use its established results to deliver the final answer now. \
+For this continuation, the checkpoint already satisfies any earlier request for prolonged \
+analysis, exhaustive exploration, or writing out the full reasoning before answering. \
+Do not restart that analysis or explore additional constructions. \
+Give a concise, substantive final answer in at most 800 words, in the language requested \
+by the original task. Include the conclusion first and only the essential justification. \
+If the checkpoint leaves an uncertainty, state it directly rather than starting another \
+long analysis. Do not call tools. \
+If completing the task requires unavailable tools, explain what remains unperformed; \
+never claim an external action was executed. \
+Do not merely summarize the interruption or promise to continue.";
+
+/// 用思考检查点重拨一次上游：成功返回已按渠道协议包装好的响应流。
+async fn dial_recovery(
+    dial: &RecoveryDial,
+    key: &Value,
+    checkpoint: &str,
+    cfg: &Value,
+) -> Option<reqwest::Response> {
+    // 续写请求 = 原始对话 + 一条携带检查点的 user 指令；输出预算收紧到 8192
+    let mut rreq = dial.chat_req.clone();
+    rreq["stream"] = Value::Bool(true);
+    if util::int_or(rreq.get("max_tokens"), 0) <= 0 {
+        rreq["max_tokens"] = Value::from(8192);
+    }
+    let instruction = format!(
+        "{}\n\n<interrupted-analysis-checkpoint>\n{}\n</interrupted-analysis-checkpoint>",
+        RECOVERY_INSTRUCTION, checkpoint
+    );
+    if let Some(msgs) = rreq.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        msgs.push(json!({"role": "user", "content": instruction}));
+    } else {
+        return None;
+    }
+    let (mut wire_body, wire_plan) = crate::bridge::Plan::prepare(
+        "chat/completions", &dial.api_endpoint, &rreq,
+    ).ok()?;
+    wire_body["stream"] = Value::Bool(true);
+    let verify_tls = cfg.get("verify_tls").map(util::truthy).unwrap_or(true);
+    let connect_to = upstreams::override_for(key, "connect_timeout", util::cfg_int(cfg, "connect_timeout", 10));
+    let client = get_http(verify_tls, connect_to);
+    let url = format!("{}/{}", upstreams::base_for(key), wire_plan.upstream.path());
+    let mut fut = client
+        .post(&url)
+        .header("Accept", "text/event-stream")
+        .header("Content-Type", "application/json")
+        .json(&wire_body);
+    fut = wire_plan.auth(fut, &util::str_or(key.get("apikey"), ""), &dial.auth_mode);
+    if let Some(ua) = &dial.user_agent {
+        fut = fut.header("User-Agent", ua);
+    }
+    let resp = fut.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    Some(wire_plan.stream(resp))
 }
 
 /// 统一的流式 pump：读上游 chunk →（可选协议转换/模型改名）→ 下发。
@@ -1355,6 +1475,14 @@ async fn run_pump(
     let mut leak_buf = String::new();
     let mut leak_next = 1024usize;
     let mut leak_done = false;
+    // 思考检查点续写：累积思考文本；纯思考断流/静默停止时用检查点重拨一次
+    let recovery_cfg = cfg_all();
+    let recovery_on = ctx.recovery.is_some()
+        && recovery_cfg.get("recovery_enabled").map(util::truthy).unwrap_or(true);
+    let recovery_budget_ms = util::cfg_int(&recovery_cfg, "recovery_max_ms", 600000).max(0);
+    let mut checkpoint = String::new();
+    let mut checkpoint_overflow = false;
+    let mut recovery_done = false;
     let est_prompt = (ctx.body.chars().count() as i64 + 2) / 3;
     let mut conv_resp = (ctx.protocol.as_deref() == Some("responses"))
         .then(|| ResponsesStream::new(&ctx.model));
@@ -1374,6 +1502,7 @@ async fn run_pump(
         };
         emit_bytes!(frame);
     }
+    'attempt: loop {
     'read: while !client_gone && !progress.done {
         let chunk = if let Some(chunk) = pending.take() {
             chunk
@@ -1429,6 +1558,26 @@ async fn run_pump(
                         leak_buf.extend(text.chars().take(room));
                     }
                 }
+                // 思考检查点累积（128KB 上限，超限视为不可恢复）
+                if recovery_on && !recovery_done {
+                    if let Some(value) = parsed.as_ref() {
+                        if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+                            for choice in choices {
+                                for ptr in ["/delta/reasoning_content", "/delta/reasoning"] {
+                                    if let Some(t) = choice.pointer(ptr).and_then(Value::as_str) {
+                                        if !t.is_empty() && !checkpoint_overflow {
+                                            if checkpoint.len() + t.len() > 131072 {
+                                                checkpoint_overflow = true;
+                                            } else {
+                                                checkpoint.push_str(t);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if leak_buf.len() >= leak_next {
                     if util::has_token_leak(&leak_buf) {
                         truncated = "上游输出乱码（特殊 token 泄漏），已中止".into();
@@ -1440,6 +1589,15 @@ async fn run_pump(
                         leak_next = (leak_next * 2).min(32768);
                     }
                 }
+            }
+            // 静默停止：流正常结束但只有思考、没有任何正文/工具 —— 扣下终端事件，
+            // 先尝试检查点续写；续写不了再按失败收口（终端事件不下发，error 事件才是收口）
+            if progress.done && recovery_on && !recovery_done
+                && progress.saw_reasoning && !progress.saw_text && !progress.saw_tool
+                && !checkpoint_overflow && !checkpoint.trim().is_empty()
+                && recovery_budget_ms > (ctx.t0.elapsed().as_millis() as i64)
+            {
+                break 'read;
             }
             if is_convert {
                 let mut out = String::new();
@@ -1463,9 +1621,60 @@ async fn run_pump(
             if client_gone || progress.done { break; }
         }
     }
-    if !client_gone && truncated.is_empty() && !progress.done
-        && (decoder.has_pending() || !progress.finished()) {
-        truncated = "上游流提前结束，未收到完整结束标记".into();
+        if !client_gone && truncated.is_empty() && !progress.done
+            && (decoder.has_pending() || !progress.finished()) {
+            truncated = "上游流提前结束，未收到完整结束标记".into();
+        }
+        // ---- 恢复判定：纯思考断流（truncated）或静默停止（done 但无正文）----
+        if !client_gone
+            && recovery_on
+            && !recovery_done
+            && !checkpoint_overflow
+            && !checkpoint.trim().is_empty()
+            && progress.saw_reasoning
+            && !progress.saw_text
+            && !progress.saw_tool
+            && recovery_budget_ms > (ctx.t0.elapsed().as_millis() as i64)
+        {
+            if let Some(dial) = ctx.recovery.as_ref() {
+                if let Some(new_resp) = dial_recovery(dial, &key, &checkpoint, &recovery_cfg).await {
+                    // 重置流状态续读：usage 与输出字节数跨段累计，检查点标记已用
+                    let saved_usage = progress.usage.take();
+                    let saved_bytes = progress.output_bytes;
+                    recovery_done = true;
+                    truncated.clear();
+                    decoder = crate::sse::Decoder::default();
+                    progress = StreamProgress::default();
+                    progress.usage = saved_usage;
+                    progress.output_bytes = saved_bytes;
+                    resp = new_resp;
+                    pending = None;
+                    continue 'attempt;
+                }
+            }
+        }
+        // 静默停止且未能续写：按失败收口（终端事件已被扣下，error 事件收尾）
+        if !client_gone
+            && truncated.is_empty()
+            && progress.done
+            && progress.saw_reasoning
+            && !progress.saw_text
+            && !progress.saw_tool
+            && recovery_on
+        {
+            truncated = "上游只返回了思考，没有正文".into();
+        }
+        // 空内容：流正常结束但零正文/零工具/零思考 —— 对客户端是空回复，按失败处理
+        if !client_gone
+            && truncated.is_empty()
+            && progress.done
+            && !progress.saw_text
+            && !progress.saw_tool
+            && !progress.saw_reasoning
+        {
+            truncated = "上游返回空内容".into();
+        }
+        break 'attempt;
     }
     if !client_gone && !truncated.is_empty() {
         let mut out = String::new();
@@ -1675,6 +1884,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     };
     let est = util::estimate_request_tokens(&body_text, Some(&req));
     let tok = util::str_or(entry.as_ref().and_then(|e| e.get("t")), "");
+    let mut chain: Option<upstreams::ModelChain> = None;
+    let mut chain_pos: usize = 0;
+    let mut advance_member = false;
+    let requested_model = model.clone();
     // 奖品 Key：模型范围由奖品自身锁定。请求名与锁定名经别名互通即可放行，
     // 并统一改写为锁定的规范名（路由/计费口径一致）；跳过通用 404 校验
     // （锁定名可能是被隐藏的映射目标名，通用校验会误杀）
@@ -1692,8 +1905,16 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             req["model"] = Value::from(pc.model.clone());
             model = pc.model.clone();
         }
-    } else if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, false) {
-        return bad;
+    } else {
+        // 降级链：链名请求按成员路由，正文输出前的失败静默换下一个成员
+        let chains = upstreams::parse_model_chains(&cfg);
+        chain = upstreams::chain_by_name(&chains, &model).cloned();
+        if let Some(c) = &chain {
+            chain_pos = upstreams::chain_start(c);
+            model = c.members[chain_pos].clone();
+        } else if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, false) {
+            return bad;
+        }
     }
     // 奖品 Key：模型锁定 + 并发占位（超限 429）。占位由 HoldGuard 式 Drop 释放。
     let mut prize_guard: Option<PrizeGuard> = None;
@@ -1781,12 +2002,33 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             break 'attempts None;
         }
         attempt += 1;
+        // 降级链推进：上一成员在正文输出前失败 → 换下一个；耗尽按最终失败收口
+        if advance_member {
+            advance_member = false;
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() {
+                    chain_pos += 1;
+                    model = c.members[chain_pos].clone();
+                } else {
+                    break 'attempts None;
+                }
+            }
+        }
         let taken = if let Some(k) = reuse_key.take() {
             Taken { ok: true, key: Some(k), status: 0, message: String::new() }
         } else {
             take_account(ep_tag, &model, est, &cfg, &tok, &ctx.ip).await
         };
         if !taken.ok {
+            // 降级链：当前成员在所有渠道不可路由（404）且还有后续成员 → 推进
+            if taken.status == 404 {
+                if let Some(c) = &chain {
+                    if chain_pos + 1 < c.members.len() {
+                        advance_member = true;
+                        continue;
+                    }
+                }
+            }
             pool::arelease(
                 String::new(),
                 false,
@@ -1807,6 +2049,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         }
         let key = taken.key.unwrap();
         hold.hold(&key);
+        let rdial_chat = recovery_dial(&cfg, &req, &key, &ctx);
         max_attempts = attempt.max(
             upstreams::override_for(&key, "max_retries", util::cfg_int(&cfg, "max_retries", 3)).max(1) + 1,
         );
@@ -1816,6 +2059,14 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         routed_req["stream"] = Value::Bool(stream);
         convert::normalize_body_types(&mut routed_req);
         convert::sanitize_request(&mut routed_req);
+        // 工具输出压缩：超大 tool 消息在转发前就地重写（git diff 削减/重复行折叠）
+        if cfg.get("tool_compact_enabled").map(util::truthy).unwrap_or(true) {
+            convert::compact_tool_outputs(
+                &mut routed_req,
+                util::cfg_int(&cfg, "tool_compact_threshold", 8192).max(0) as usize,
+                util::cfg_int(&cfg, "tool_compact_max", 60000).max(0) as usize,
+            );
+        }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             endpoint, &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
         ) {
@@ -1921,7 +2172,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             let fut = slow_fut.take().unwrap();
             hold.handoff();
             break 'attempts Some(slow_start_response(
-                fut, key, ctx, body, ep_tag, &model, &up_model, attempt, t0, tok, None, stream,
+                fut, key, ctx, body, rdial_chat, ep_tag, &requested_model, &up_model, attempt, t0, tok, None, stream,
                 user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                 prize_ctx.as_ref().map(|p| p.key.clone()),
                 client_wants_usage,
@@ -1944,6 +2195,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 continue;
             }
             hold.clear();
+            advance_member = true;
             pool::arelease(
                 util::str_or(key.get("id"), ""),
                 success,
@@ -2005,7 +2257,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     StreamCtx {
                         ep: ep_tag.to_string(),
                         ep_tag: ep_tag.to_string(),
-                        model: model.clone(),
+                        model: requested_model.clone(),
                         up_model: up_model.clone(),
                         body: body.clone(),
                         ip: ctx.ip.clone(),
@@ -2013,7 +2265,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         status: rstatus,
                         attempt,
                         t0,
-                        rewrite: up_model != model,
+                        rewrite: up_model != requested_model,
                         heartbeat: true,
                         ttfb_deadline: ttfb_to,
                         protocol: None,
@@ -2023,6 +2275,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
                         prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                         want_usage: client_wants_usage,
+                        recovery: rdial_chat,
                     },
                     prize_guard.take(),
                 ));
@@ -2083,7 +2336,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         StreamCtx {
                             ep: ep_tag.to_string(),
                             ep_tag: ep_tag.to_string(),
-                            model: model.clone(),
+                            model: requested_model.clone(),
                             up_model: up_model.clone(),
                             body: body.clone(),
                             ip: ctx.ip.clone(),
@@ -2091,7 +2344,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                             status: rstatus,
                             attempt,
                             t0,
-                            rewrite: up_model != model,
+                            rewrite: up_model != requested_model,
                             heartbeat: false,
                             ttfb_deadline: 0.0,
                             protocol: None,
@@ -2101,9 +2354,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                             prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
                         prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                             want_usage: client_wants_usage,
+                            recovery: rdial_chat,
                     },
                         prize_guard.take(),
-                    ));
+                ));
                 }
             }
         }
@@ -2182,7 +2436,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         // 瞬态错误（连接失败/超时/5xx/空响应）先同号快速重试一次（不惩罚账号）
         if !success
             && !same_key_tried.contains(&util::str_or(key.get("id"), ""))
-            && (rstatus == 0 || rstatus >= 500)
+            && (rstatus == 0 || rstatus == 408 || rstatus == 425 || rstatus >= 500)
             && attempt < max_attempts
         {
             same_key_tried.insert(util::str_or(key.get("id"), ""));
@@ -2226,6 +2480,9 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             &body,
         );
         hold.clear();
+        if !success {
+            advance_member = true;
+        }
         pool::arelease(
             util::str_or(key.get("id"), ""),
             success,
@@ -2264,8 +2521,8 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             let mut j: Value = serde_json::from_str(&rbody).unwrap_or(Value::Null);
             let mut out_body = rbody.clone();
             if j.is_object() {
-                if up_model != model {
-                    j["model"] = Value::from(model.clone());
+                if up_model != requested_model {
+                    j["model"] = Value::from(requested_model.clone());
                 }
                 // ZCode/SDK 兼容：content 分片数组平铺成字符串；tool_calls.arguments
                 // 规范为 JSON 字符串；非标 finish_reason 改写（空回复判定只认白名单，
@@ -2331,7 +2588,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     other => convert::flatten_content(other),
                 })
                 .unwrap_or_default();
-            log_session(&cfg, &model, &util::str_or(key.get("email"), ""), &req.get("messages").cloned().unwrap_or(json!([])), &resp_text, rstatus).await;
+            log_session(&cfg, &requested_model, &util::str_or(key.get("email"), ""), &req.get("messages").cloned().unwrap_or(json!([])), &resp_text, rstatus).await;
             if !no_training(&ctx.headers) && util::cfg_int(&cfg, "training_log_max", 500) > 0 {
                 let m = j
                     .get("choices")
@@ -2363,13 +2620,36 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         last_key = Some(key.clone());
         // 401/403 为账号级鉴权失败：立即返回（账号已被硬封禁，重试只会得到 429 封禁掩码）
         if rstatus == 401 || rstatus == 403 {
+            // 降级链：账号级鉴权失败在还有后续成员时换成员（不同渠道可能凭据有效）
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() && attempt < max_attempts {
+                    advance_member = true;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+                    continue;
+                }
+            }
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
         }
         // 渠道级不可用：同一渠道所有账号共享渠道池，换号/重试都注定失败 → 快速失败
         if convert::is_channel_exhausted(&rbody) {
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() && attempt < max_attempts {
+                    advance_member = true;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+                    continue;
+                }
+            }
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
         }
-        if !(rstatus == 0 || rstatus == 429 || rstatus >= 500) {
+        if !(rstatus == 0 || rstatus == 408 || rstatus == 425 || rstatus == 429 || rstatus >= 500) {
+            // 降级链：非瞬态 4xx（模型不存在/参数不支持等）在还有后续成员时换成员
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() && attempt < max_attempts {
+                    advance_member = true;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+                    continue;
+                }
+            }
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
         }
         // 429 吸收：换号重试，不透传 429 给下游。账号已在上方统一释放（触发 429 冷却），
@@ -2402,6 +2682,7 @@ fn slow_start_response(
     key: Value,
     ctx: Ctx,
     body: String,
+    recovery: Option<RecoveryDial>,
     ep_tag: &str,
     model: &str,
     up_model: &str,
@@ -2543,6 +2824,7 @@ fn slow_start_response(
             prize_key,
             want_usage,
             prize_metered,
+            recovery,
         };
         run_pump(wire_plan.stream(resp), key, None, sctx, tx, prize_guard, hold).await;
     });
@@ -2693,6 +2975,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         return error_resp(400, "model 必须为非空字符串，不超过 1024 字节且不含控制字符", "invalid_request_error", None, anthropic);
     }
     let mut model = util::str_or(req.get("model"), "");
+    let mut chain: Option<upstreams::ModelChain> = None;
+    let mut chain_pos: usize = 0;
+    let mut advance_member = false;
+    let requested_model = model.clone();
     // 奖品 Key：模型锁定口径与 chat 直通一致（别名互通 + 跳过通用 404）
     if let Some(pc) = &prize_ctx {
         if !crate::upstreams::models_alias_linked(&model, &pc.model) {
@@ -2735,8 +3021,18 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         "max_output_tokens": req.get("max_output_tokens").cloned().unwrap_or(Value::Null),
         "reasoning_effort": reasoning_effort,
     });
-    if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, anthropic) {
-        return bad;
+    if chain.is_none() {
+        let chains = upstreams::parse_model_chains(&cfg);
+        chain = upstreams::chain_by_name(&chains, &model).cloned();
+        if let Some(c) = &chain {
+            chain_pos = upstreams::chain_start(c);
+            model = c.members[chain_pos].clone();
+        }
+    }
+    if chain.is_none() {
+        if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, anthropic) {
+            return bad;
+        }
     }
     // 奖品 Key：模型锁定 + 并发占位
     let mut prize_guard: Option<PrizeGuard> = None;
@@ -2825,12 +3121,33 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             break 'attempts None;
         }
         attempt += 1;
+        // 降级链推进：上一成员在正文输出前失败 → 换下一个；耗尽按最终失败收口
+        if advance_member {
+            advance_member = false;
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() {
+                    chain_pos += 1;
+                    model = c.members[chain_pos].clone();
+                } else {
+                    break 'attempts None;
+                }
+            }
+        }
         let taken = if let Some(k) = reuse_key.take() {
             Taken { ok: true, key: Some(k), status: 0, message: String::new() }
         } else {
             take_account(ep, &model, est, &cfg, &tok, &ctx.ip).await
         };
         if !taken.ok {
+            // 降级链：当前成员不可路由且还有后续成员 → 推进
+            if taken.status == 404 {
+                if let Some(c) = &chain {
+                    if chain_pos + 1 < c.members.len() {
+                        advance_member = true;
+                        continue;
+                    }
+                }
+            }
             pool::arelease(
                 String::new(),
                 false,
@@ -2845,6 +3162,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         }
         let key = taken.key.unwrap();
         hold.hold(&key);
+        let rdial_conv = recovery_dial(&cfg, &chat_req, &key, &ctx);
         max_attempts = attempt.max(
             upstreams::override_for(&key, "max_retries", util::cfg_int(&cfg, "max_retries", 3)).max(1) + 1,
         );
@@ -2854,6 +3172,14 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         routed_req["stream"] = Value::Bool(stream);
         convert::normalize_body_types(&mut routed_req);
         convert::sanitize_request(&mut routed_req);
+        // 工具输出压缩：超大 tool 消息在转发前就地重写（git diff 削减/重复行折叠）
+        if cfg.get("tool_compact_enabled").map(util::truthy).unwrap_or(true) {
+            convert::compact_tool_outputs(
+                &mut routed_req,
+                util::cfg_int(&cfg, "tool_compact_threshold", 8192).max(0) as usize,
+                util::cfg_int(&cfg, "tool_compact_max", 60000).max(0) as usize,
+            );
+        }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             "chat/completions", &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
         ) {
@@ -2956,7 +3282,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             let fut = slow_fut.take().unwrap();
             hold.handoff();
             break 'attempts Some(slow_start_response(
-                fut, key, ctx, raw, ep, &model, &up_model, attempt, t0, tok,
+                fut, key, ctx, raw, rdial_conv, ep, &requested_model, &up_model, attempt, t0, tok,
                 Some(protocol.to_string()), stream,
                 user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
                 prize_ctx.as_ref().map(|p| p.key.clone()),
@@ -2978,6 +3304,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 continue;
             }
             hold.clear();
+            advance_member = true;
             pool::arelease(
                 util::str_or(key.get("id"), ""),
                 false,
@@ -3033,7 +3360,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     StreamCtx {
                         ep: ep.to_string(),
                         ep_tag: ep.to_string(),
-                        model: model.clone(),
+                        model: requested_model.clone(),
                         up_model: up_model.clone(),
                         body: raw.clone(),
                         ip: ctx.ip.clone(),
@@ -3051,6 +3378,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
                         prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                             want_usage: false,
+                            recovery: rdial_conv,
                     },
                     prize_guard.take(),
                 ));
@@ -3109,7 +3437,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         StreamCtx {
                             ep: ep.to_string(),
                             ep_tag: ep.to_string(),
-                            model: model.clone(),
+                            model: requested_model.clone(),
                             up_model: up_model.clone(),
                             body: raw.clone(),
                             ip: ctx.ip.clone(),
@@ -3127,9 +3455,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                             prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
                         prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
                                 want_usage: false,
+                                recovery: rdial_conv,
                     },
                         prize_guard.take(),
-                    ));
+                ));
                 }
             }
         }
@@ -3204,7 +3533,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         };
         if !success
             && !same_key_tried.contains(&util::str_or(key.get("id"), ""))
-            && (rstatus == 0 || rstatus >= 500)
+            && (rstatus == 0 || rstatus == 408 || rstatus == 425 || rstatus >= 500)
             && attempt < max_attempts
         {
             same_key_tried.insert(util::str_or(key.get("id"), ""));
@@ -3247,6 +3576,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             &raw,
         );
         hold.clear();
+        if !success {
+            advance_member = true;
+        }
         pool::arelease(
             util::str_or(key.get("id"), ""),
             success,
@@ -3286,7 +3618,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             if !chat.is_object() || chat.get("choices").and_then(|c| c.as_array()).is_none() {
                 break 'attempts Some(error_resp(502, "上游返回了无法解析的响应", "upstream_error", None, anthropic));
             }
-            chat["model"] = Value::from(model.clone());
+            chat["model"] = Value::from(requested_model.clone());
             // 会话审计
             {
                 let first_msg = chat
@@ -3316,7 +3648,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 } else {
                     json!([{"role": "user", "content": util::str_or(req.get("input"), "")}])
                 };
-                log_session(&cfg, &model, &util::str_or(key.get("email"), ""), &req_msgs, &resp_text, 200).await;
+                log_session(&cfg, &requested_model, &util::str_or(key.get("email"), ""), &req_msgs, &resp_text, 200).await;
                 if !no_training(&ctx.headers) && util::cfg_int(&cfg, "training_log_max", 500) > 0 {
                     let txt = match first_msg.get("content") {
                         Some(Value::String(s)) => s.clone(),
@@ -3340,12 +3672,33 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         last = Some(json!({"status": rstatus, "body": rbody, "error": rerr, "content_type": ""}));
         last_key = Some(key.clone());
         if rstatus == 401 || rstatus == 403 {
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() && attempt < max_attempts {
+                    advance_member = true;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+                    continue;
+                }
+            }
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
         }
         if convert::is_channel_exhausted(&rbody) {
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() && attempt < max_attempts {
+                    advance_member = true;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+                    continue;
+                }
+            }
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
         }
-        if !(rstatus == 0 || rstatus == 429 || rstatus >= 500) {
+        if !(rstatus == 0 || rstatus == 408 || rstatus == 425 || rstatus == 429 || rstatus >= 500) {
+            if let Some(c) = &chain {
+                if chain_pos + 1 < c.members.len() && attempt < max_attempts {
+                    advance_member = true;
+                    tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, Some(&key)) as u64)).await;
+                    continue;
+                }
+            }
             break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
         }
         // 429 吸收：账号已在上方统一释放（触发 429 冷却），这里不能再 arelease 一次
@@ -3621,6 +3974,7 @@ mod tests {
                     t0:Instant::now(), rewrite:true, heartbeat:true, ttfb_deadline:1.0,
                     protocol:protocol.map(str::to_string), capture_train:false,
                     user:Some(("user".into(), "key".into())), prize_key:None, prize_metered:false, want_usage:protocol.is_none(),
+                    recovery:None,
                 };
                 let output = spawn_pump(response, key, first, ctx, None);
                 let bytes = tokio::time::timeout(Duration::from_secs(5), axum::body::to_bytes(output.into_body(), 1024*1024))
@@ -3671,6 +4025,7 @@ mod tests {
             body:"{}".into(), ip:"test".into(), tok:"test".into(), status:200, attempt:1,
             t0:Instant::now(), rewrite:false, heartbeat:false, ttfb_deadline:300.0,
             protocol:None, capture_train:false, user:None, prize_key:None, prize_metered:false, want_usage:false,
+            recovery:None,
         };
         let hold = HoldGuard::new(Some(key.clone()), "chat", "public", "test", "test", true);
         let (tx, rx) = tokio::sync::mpsc::channel(1);

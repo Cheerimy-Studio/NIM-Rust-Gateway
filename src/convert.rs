@@ -1269,9 +1269,194 @@ pub fn strip_reasoning_from_messages(body: &mut Value) -> bool {
 
 // ---------------------------------------------------------------- 上游错误分类
 
+// ---------------------------------------------------------------- 工具输出压缩
+
+/// 判断文本是否是 unified diff（git diff）。
+fn looks_like_diff(text: &str) -> bool {
+    text.contains("\ndiff --git ") || text.starts_with("diff --git ")
+}
+
+/// 压缩 git diff：去掉 index/mode 等元数据行，hunk 上下文只保留变更块
+/// 相邻的一行（标准 smart-diff 削减）。变更行(+/-)与 hunk 头全部保留。
+fn compact_diff_lines(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_hunk = false;
+    let mut ctx_run = 0usize;
+    for line in text.split('\n') {
+        if line.starts_with("diff --git ") || line.starts_with("--- ") || line.starts_with("+++ ")
+            || line.starts_with("rename from") || line.starts_with("rename to")
+            || line.starts_with("Binary files") || line.starts_with("new file mode")
+            || line.starts_with("deleted file mode") || line.starts_with("old mode") || line.starts_with("new mode")
+        {
+            out.push(line.to_string());
+            in_hunk = false;
+            ctx_run = 0;
+            continue;
+        }
+        if line.starts_with("index ") || line.starts_with("similarity index ") {
+            continue; // 纯元数据：对模型回答没有信息量
+        }
+        if line.starts_with("@@") {
+            out.push(line.to_string());
+            in_hunk = true;
+            ctx_run = 0;
+            continue;
+        }
+        if !in_hunk {
+            out.push(line.to_string());
+            continue;
+        }
+        let is_ctx = line.starts_with(' ') || line.is_empty();
+        let is_change = line.starts_with('+') || line.starts_with('-');
+        if is_change {
+            out.push(line.to_string());
+            ctx_run = 0;
+        } else if is_ctx {
+            // 上下文行（变更块前后未变动的行）对回答贡献极小：
+            // 丢弃并按连续段折叠为一个省略标记；文件身份由文件头与 hunk 头保留
+            ctx_run += 1;
+            if ctx_run == 1 {
+                out.push("…".into());
+            }
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n")
+}
+
+/// 折叠连续重复行（构建日志/编号转储的典型浪费）。
+fn collapse_repeats(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut run = 1usize;
+    let mut prev: Option<&str> = None;
+    for line in text.split('\n') {
+        if prev == Some(line) {
+            run += 1;
+            continue;
+        }
+        if let Some(p) = prev {
+            out.push(p.to_string());
+            if run >= 4 {
+                out.push(format!("\u{2026} (上一行重复 {} 次)", run));
+            }
+        }
+        prev = Some(line);
+        run = 1;
+    }
+    if let Some(p) = prev {
+        out.push(p.to_string());
+        if run >= 4 {
+            out.push(format!("\u{2026} (上一行重复 {} 次)", run));
+        }
+    }
+    out.join("\n")
+}
+
+/// 头尾保留的截断：中间用标记替代。
+fn head_tail_cap(text: &str, max_bytes: usize) -> String {
+    let b = text.as_bytes();
+    if b.len() <= max_bytes {
+        return text.to_string();
+    }
+    let head = max_bytes * 2 / 3;
+    let tail = max_bytes / 3;
+    // 按字符边界找安全切点
+    let head_cut = {
+        let mut i = head;
+        while i < b.len() && (b[i] & 0xC0) == 0x80 { i += 1; }
+        i
+    };
+    let tail_start = {
+        let mut i = b.len() - tail;
+        while i < b.len() && (b[i] & 0xC0) == 0x80 { i += 1; }
+        i
+    };
+    format!(
+        "{}\n\u{2026}[输出过长，已截断：省略 {} 字节]\n{}",
+        String::from_utf8_lossy(&b[..head_cut]).to_string(),
+        b.len() - head_cut - (b.len() - tail_start),
+        String::from_utf8_lossy(&b[tail_start..]).to_string(),
+    )
+}
+
+/// 对超大 tool 输出做压缩（git diff 削减 + 重复行折叠 + 头尾截断）。
+/// 返回节省的字节数。幂等：压缩后的内容带标记，通常已低于阈值不会再触发。
+pub fn compact_tool_outputs(body: &mut Value, threshold: usize, max_out: usize) -> usize {
+    if threshold == 0 || max_out == 0 {
+        return 0;
+    }
+    let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return 0;
+    };
+    let mut saved = 0usize;
+    for m in msgs.iter_mut() {
+        if util::str_or(m.get("role"), "") != "tool" {
+            continue;
+        }
+        let Some(content) = m.get("content").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        let size = content.len();
+        if size <= threshold {
+            continue;
+        }
+        let compacted = if looks_like_diff(content) {
+            compact_diff_lines(content)
+        } else {
+            collapse_repeats(content)
+        };
+        let compacted = head_tail_cap(&compacted, max_out);
+        let new_size = compacted.len() + 48;
+        if new_size < size {
+            let marked = format!(
+                "[tool output compacted: {} bytes -> {} bytes]\n{}",
+                size, new_size, compacted
+            );
+            if let Some(o) = m.as_object_mut() {
+                o.insert("content".into(), Value::from(marked));
+            }
+            saved += size - new_size;
+        }
+    }
+    saved
+}
+
 pub fn is_channel_exhausted(body_text: &str) -> bool {
     let s = body_text.to_lowercase();
     ["no available channel", "no channel available", "无可用渠道", "channel_exhausted"]
         .iter()
         .any(|k| s.contains(k))
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+    #[test]
+    fn compact_tool_outputs_smoke() {
+        let mut diff = String::from("diff --git a/x.rs b/x.rs
+index aaa..bbb 100644
+");
+        for i in 0..200 {
+            diff.push_str(&format!("--- a/x.rs
++++ b/x.rs
+@@ -{},3 +{},3 @@
+", i, i));
+            diff.push_str(&format!(" ctx {} a
+ ctx {} b
+-old {}
++new {}
+ ctx {} c
+", i, i, i, i, i));
+        }
+        let mut body = json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "c1", "content": diff},
+        ]});
+        let saved = compact_tool_outputs(&mut body, 8192, 60000);
+        let content = body["messages"][1]["content"].as_str().unwrap();
+        println!("saved={} content_len={} has_marker={}", saved, content.len(), content.contains("tool output compacted"));
+        assert!(saved > 0, "nothing saved, diff len={}", diff.len());
+        assert!(content.contains("tool output compacted"));
+    }
 }
