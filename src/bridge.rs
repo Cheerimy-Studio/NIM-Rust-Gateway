@@ -350,10 +350,11 @@ fn choice(req: &Value, anthropic: bool) -> Result<Option<Value>, String> {
             c.clone()
         }
     } else {
-        let name = c
-            .pointer("/function/name")
-            .and_then(Value::as_str)
-            .ok_or("无效的指定工具名称")?;
+        // 指定 function 之外的 tool_choice 形式（allowed_tools、内置工具引用）
+        // 在目标协议没有等价形式：丢弃约束而非拒绝请求（工具定义仍随请求转发）
+        let Some(name) = c.pointer("/function/name").and_then(Value::as_str) else {
+            return Ok(None);
+        };
         json!({"type":if anthropic {"tool"} else {"function"},"name":name})
     };
     Ok(Some(v))
@@ -653,7 +654,9 @@ fn reply_to_chat(protocol: Protocol, v: &Value) -> Result<Value, String> {
                 Some("message")=>for p in item.get("content").and_then(Value::as_array).ok_or("缺少 message content")? {match p["type"].as_str(){Some("output_text")=>text.push_str(p["text"].as_str().ok_or("缺少 output_text")?),Some("refusal")=>text.push_str(p["refusal"].as_str().unwrap_or("")),_=>return Err("无法转换上游输出内容类型".into())}},
                 Some("reasoning")=>if let Some(parts)=item.get("summary").and_then(Value::as_array){for p in parts {reasoning.push_str(p["text"].as_str().unwrap_or(""));}},
                 Some("function_call")=>tools.push(json!({"id":nonempty(item,"call_id")?,"type":"function","function":{"name":nonempty(item,"name")?,"arguments":nonempty(item,"arguments")?}})),
-                _=>return Err("跨协议转换不支持此 Responses 内置工具输出".into()),
+                // 服务端内置工具动作（web_search_call 等）：结果已体现在后续
+                // message 文本里，chat 协议无对应承载形式，跳过
+                _=>{},
             }
         }
         if !tools.is_empty() && finish == "stop" {
@@ -870,9 +873,9 @@ impl NativeStream {
                         self.args.insert(native);
                     }
                     self.emit(self.chunk(json!({"tool_calls":[{"index":i,"id":nonempty(item,"call_id")?,"type":"function","function":{"name":nonempty(item,"name")?,"arguments":args}}]}),None),out)?;
-                } else if ![Some("message"), Some("reasoning")].contains(&item["type"].as_str()) {
-                    return Err("不支持该 Responses 内置工具流".into());
                 }
+                // message/reasoning/function_call 之外的项目（web_search_call 等
+                // 服务端内置工具）chat 协议无承载形式：跳过，不中断流
             }
             "response.function_call_arguments.delta" => {
                 let i = *self
@@ -979,7 +982,8 @@ impl NativeStream {
                         };
                         self.emit(self.chunk(json!({"tool_calls":[{"index":i,"id":nonempty(b,"id")?,"type":"function","function":{"name":nonempty(b,"name")?,"arguments":args}}]}),None),out)?;
                     }
-                    _ => return Err("不支持该 Messages 内容块类型".into()),
+                    _ => {}
+                    // 未知内容块（document 等）：chat 协议无承载形式，跳过不中断
                 }
             }
             "content_block_delta" => {
@@ -1313,19 +1317,50 @@ pub(crate) mod tests {
         assert!(read_text_limit(response, 16).await.is_err());
     }
     #[test]
-    fn unsupported_native_features_are_explicit_errors_and_cache_usage_roundtrips() {
+    fn native_features_degrade_without_errors_and_cache_usage_roundtrips() {
+        // 无 file_id 的输入文件/图片引用仍显式拒绝（无法转换内容本体）
         assert!(crate::convert::responses_to_chat(&json!({"input":[{"role":"user","content":[{"type":"input_file","file_id":"file_123"}]}]})).is_err());
         assert!(crate::convert::responses_to_chat(&json!({"input":[{"role":"user","content":[{"type":"input_image","file_id":"file_123"}]}]})).is_err());
 
-        assert!(crate::convert::responses_to_chat(
-            &json!({"input":"hi","tools":[{"type":"web_search"}]})
+        // 服务端内置工具（web_search 等）：跳过而非整单拒绝——chat 上游没有
+        // 承载形式，但请求本身（文本/函数工具）应照常转发
+        let chat = crate::convert::responses_to_chat(
+            &json!({"input":"hi","tools":[{"type":"web_search"},{"type":"function","name":"w","parameters":{"type":"object"}}],"tool_choice":{"type":"allowed_tools","mode":"auto"}}),
         )
-        .is_err());
-        assert!(crate::convert::responses_to_chat(
-            &json!({"input":[{"type":"item_reference","id":"old"}]})
-        )
-        .is_err());
-        assert!(crate::convert::anthropic_to_chat(&json!({"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"signed","signature":"sig"}]}]})).is_err());
+        .unwrap();
+        assert_eq!(chat["tools"].as_array().map(Vec::len), Some(1));
+        assert_eq!(chat["tools"][0]["type"], "function");
+        assert!(chat.get("tool_choice").is_none());
+        // 服务端动作历史（web_search_call / reasoning）：跳过
+        let chat = crate::convert::responses_to_chat(&json!({"input":[
+            {"type":"web_search_call"},
+            {"type":"reasoning","summary":[]},
+            {"role":"user","content":"hi"}
+        ]}))
+        .unwrap();
+        assert_eq!(chat["messages"].as_array().map(Vec::len), Some(1));
+        // 带签名的思考历史：转成 reasoning_content 继续携带（不丢弃）
+        let chat = crate::convert::anthropic_to_chat(&json!({"messages":[
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":"step 1","signature":"sig"},
+                {"type":"text","text":"answer"}
+            ]}
+        ]}))
+        .unwrap();
+        assert_eq!(chat["messages"][0]["reasoning_content"], "step 1");
+        assert_eq!(chat["messages"][0]["content"], "answer");
+        // 工具结果里的图片：提取为 tool 消息之后的多模态 user 消息
+        let chat = crate::convert::anthropic_to_chat(&json!({"messages":[
+            {"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":[
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}
+                ]}
+            ]}
+        ]}))
+        .unwrap();
+        assert_eq!(chat["messages"][0]["role"], "tool");
+        assert_eq!(chat["messages"][1]["role"], "user");
+        assert_eq!(chat["messages"][1]["content"][0]["type"], "image_url");
         let chat_usage = usage(
             Protocol::Messages,
             &json!({"input_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"output_tokens":7}),

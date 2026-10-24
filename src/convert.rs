@@ -206,9 +206,9 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
     if req.get("background").is_some_and(util::truthy) {
         return Err("本网关不支持后台 Responses 任务".into());
     }
-    if req.get("tools").and_then(Value::as_array).is_some_and(|tools| tools.iter().any(|t| t["type"] != "function")) {
-        return Err("协议适配只支持 function 工具，不支持 Responses 服务端内置工具".into());
-    }
+    // Responses 服务端内置工具（web_search / local_shell / apply_patch 等）由
+    // OpenAI 服务端执行，chat 上游没有对应承载：跳过而非整单拒绝，
+    // function 工具照常转换。tool_choice 引用内置工具时一并丢弃（见下方）。
     let prev = util::str_or(req.get("previous_response_id"), "");
     if !prev.is_empty() {
         return Err(
@@ -290,6 +290,24 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
                         "tool_call_id": util::str_or(obj.get("call_id"), ""),
                         "content": content,
                     }));
+                } else if matches!(
+                    typ.as_str(),
+                    "reasoning"
+                        | "web_search_call"
+                        | "web_search_call_result"
+                        | "code_interpreter_call"
+                        | "file_search_call"
+                        | "image_generation_call"
+                        | "local_shell_call"
+                        | "mcp_call"
+                        | "mcp_list_tools"
+                        | "apply_patch_call"
+                        | "custom_tool_call"
+                        | "item_reference"
+                ) {
+                    // 服务端动作与推理历史：chat 协议没有对应承载形式，
+                    // 其结果已体现在后续 assistant 消息文本里，跳过即可
+                    continue;
                 } else {
                     return Err(format!("不支持的 Responses input 类型：{}", typ));
                 }
@@ -388,6 +406,9 @@ pub fn responses_to_chat(req: &Value) -> Result<Value, String> {
                     "tool_choice".into(),
                     json!({"type": "function", "function": {"name": name}}),
                 );
+            } else if tc.is_object() && !tc.get("function").is_some() {
+                // allowed_tools / 内置工具引用：chat 协议无可映射形式，丢弃
+                // （丢弃 tool_choice 不影响请求本身，工具定义仍在）
             } else {
                 chat_obj.insert("tool_choice".into(), tc);
             }
@@ -541,8 +562,10 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
             }
             let multi = content_with_images(&content);
             let mut text_parts: Vec<String> = Vec::new();
+            let mut reasoning_parts: Vec<String> = Vec::new();
             let mut tool_calls: Vec<Value> = Vec::new();
             let mut tool_results: Vec<Value> = Vec::new();
+            let mut result_images: Vec<Value> = Vec::new();
             if let Some(blocks) = content.as_array() {
                 for b in blocks {
                     if let Some(s) = b.as_str() {
@@ -551,8 +574,23 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                     }
                     let Some(bo) = b.as_object() else { continue };
                     let t = util::str_or(bo.get("type"), "");
-                    if !["text", "image", "tool_use", "tool_result"].contains(&t.as_str()) {
-                        return Err(format!("协议适配不支持 Messages 内容块 {}；不会丢弃带签名的思考或工具历史", t));
+                    if !["text", "image", "thinking", "redacted_thinking", "tool_use", "tool_result"]
+                        .contains(&t.as_str())
+                    {
+                        return Err(format!("协议适配不支持 Messages 内容块 {}；不会丢弃内容历史", t));
+                    }
+                    if t == "thinking" {
+                        // 带签名的思考历史：转成 chat 协议的 reasoning_content
+                        // 继续携带（signature 是 Anthropic 侧字段，chat 无对应形式）
+                        reasoning_parts.push(util::str_or(
+                            bo.get("thinking").filter(|x| !x.is_null()),
+                            "",
+                        ));
+                        continue;
+                    }
+                    if t == "redacted_thinking" {
+                        // 加密推理块无可转换文本，跳过
+                        continue;
                     }
                     if t == "image" && image_part(b).is_none() {
                         return Err("无法转换此 Messages 图片块".into());
@@ -577,25 +615,58 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                         }));
                     } else if t == "tool_result" {
                         let inner = bo.get("content").cloned().unwrap_or(Value::from(""));
-                        validate_portable_content(&inner, &["text"])?;
-                        let c = match &inner {
-                            Value::String(s) => s.clone(),
-                            other => flatten_content(other),
-                        };
+                        // 工具结果可含文本与图片（CC 截图流）：文本进 tool 消息，
+                        // 图片提为 tool 消息之后的 user 消息（chat 协议的 tool 角色
+                        // 只承载文本，图片单独走多模态 user 消息才不会丢内容）
+                        let mut tr_text = String::new();
+                        if let Some(arr) = inner.as_array() {
+                            for piece in arr {
+                                if let Some(ps) = piece.as_str() {
+                                    tr_text.push_str(ps);
+                                    continue;
+                                }
+                                let pt = util::str_or(piece.get("type"), "");
+                                if pt == "text" {
+                                    let tv = util::str_or(
+                                        piece.get("text").filter(|x| !x.is_null()),
+                                        "",
+                                    );
+                                    tr_text.push_str(&tv);
+                                } else if pt == "image" {
+                                    let img = image_part(piece)
+                                        .ok_or("无法转换此工具结果图片块")?;
+                                    result_images.push(img);
+                                } else if !pt.is_empty() {
+                                    return Err(format!(
+                                        "协议适配不支持工具结果内容类型 {}",
+                                        pt
+                                    ));
+                                }
+                            }
+                        } else {
+                            tr_text = match &inner {
+                                Value::String(s) => s.clone(),
+                                other => flatten_content(other),
+                            };
+                        }
                         tool_results.push(json!({
                             "tool_call_id": util::str_or(bo.get("tool_use_id"), ""),
-                            "content": c,
+                            "content": tr_text,
                         }));
                     }
                 }
             }
             if !tool_calls.is_empty() {
                 let joined = text_parts.concat();
-                messages.push(json!({
+                let mut msg = json!({
                     "role": "assistant",
                     "content": if joined.is_empty() { Value::Null } else { Value::from(joined) },
                     "tool_calls": tool_calls,
-                }));
+                });
+                if !reasoning_parts.is_empty() {
+                    msg["reasoning_content"] = json!(reasoning_parts.concat());
+                }
+                messages.push(msg);
             }
             // OpenAI 契约：tool 消息必须紧跟其 assistant(tool_calls) 消息。
             // Anthropic 客户端常把 tool_result 和后续文本放在同一条 user 消息里，
@@ -610,16 +681,36 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                         }),
                     );
                 }
-                // 同一条 user 消息里的尾部文本仍有意义：作为独立的 user 转发
-                if !text_parts.is_empty() && tool_calls.is_empty() {
+                if !result_images.is_empty() {
+                    // 工具结果里的图片：文本（若有）+ 图片组成 user 多模态消息
+                    let mut parts: Vec<Value> = Vec::new();
+                    if !text_parts.is_empty() {
+                        parts.push(json!({"type": "text", "text": text_parts.concat()}));
+                    }
+                    parts.extend(result_images.iter().cloned());
+                    messages.push(json!({"role": "user", "content": parts}));
+                } else if !text_parts.is_empty() && tool_calls.is_empty() {
+                    // 同一条 user 消息里的尾部文本仍有意义：作为独立的 user 转发
                     messages.push(json!({"role": role, "content": text_parts.concat()}));
                 }
             } else if let Some(ref multi) = multi {
                 messages.push(json!({"role": role, "content": multi}));
             } else if !text_parts.is_empty() {
-                messages.push(json!({"role": role, "content": text_parts.concat()}));
+                let mut msg = json!({"role": role, "content": text_parts.concat()});
+                if role == "assistant" && !reasoning_parts.is_empty() {
+                    msg["reasoning_content"] = json!(reasoning_parts.concat());
+                }
+                messages.push(msg);
+            } else if role == "assistant" && !reasoning_parts.is_empty() {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "reasoning_content": reasoning_parts.concat(),
+                }));
             }
-            if text_parts.is_empty() && multi.is_none() && tool_calls.is_empty() && tool_results.is_empty() {
+            if text_parts.is_empty() && multi.is_none() && tool_calls.is_empty()
+                && tool_results.is_empty() && reasoning_parts.is_empty()
+            {
                 messages.push(json!({"role": role, "content": ""}));
             }
         }
