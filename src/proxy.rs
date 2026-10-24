@@ -1089,7 +1089,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
 
 // ---------------------------------------------------------------- 上游失败响应
 
-pub fn upstream_fail(key: Option<&Value>, res: Option<&Value>, cfg: &Value, anthropic: bool) -> Response {
+pub fn upstream_fail(key: Option<&Value>, res: Option<&Value>, cfg: &Value, anthropic: bool, retry_after_secs: i64) -> Response {
     let status = util::int_or(res.and_then(|r| r.get("status")), 0);
     let code = if status >= 400 { status } else { 502 };
     let mut hide = cfg.get("hide_upstream_errors").map(util::truthy).unwrap_or(true);
@@ -1129,13 +1129,21 @@ pub fn upstream_fail(key: Option<&Value>, res: Option<&Value>, cfg: &Value, anth
         c if c >= 500 => "渠道暂不可用，请稍后重试".into(),
         c => format!("请求未被渠道接受，HTTP {}，原因见管理后台日志", c),
     });
-    error_resp(
+    let mut resp = error_resp(
         code.min(599) as u16,
         &msg,
         "upstream_error",
         Some(&format!("upstream_{}", code)),
         anthropic,
-    )
+    );
+    // 上游 Retry-After 优先于固定默认值：客户端（ZCode 读此头安排重试）
+    // 按上游的真实限速窗口重试，而不是撞在同一个窗口里
+    if retry_after_secs > 0 {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&retry_after_secs.to_string()) {
+            resp.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
+        }
+    }
+    resp
 }
 
 // ---------------------------------------------------------------- 账号持有守卫
@@ -1202,7 +1210,7 @@ impl Drop for HoldGuard {
                     &self.ep, &self.model, 499, ms, "客户端已断开", 1, Some(&k), &self.ip,
                     "", self.stream, ms, 0, 0, &self.tok,
                 )),
-                0,
+                0, 0,
             );
         }
     }
@@ -1727,7 +1735,7 @@ async fn run_pump(
             util::int_or(usage.get("completion_tokens"), 0),
             &ctx.tok,
         )),
-        0,
+        0, 0,
     )
     .await;
     // 多用户计费：仅完整成功的调用计费（「仅成功计费」口径与面板提示一致）；
@@ -2032,7 +2040,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                             taken.message.clone(),
                             None,
                             Some(release_log(ep_tag, &model, taken.status, 0, &taken.message, attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
-                            0,
+                            0, 0,
                         )
                         .await;
                         advance_member = true;
@@ -2047,7 +2055,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 taken.message.clone(),
                 None,
                 Some(release_log(ep_tag, &model, taken.status, 0, &taken.message, attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
-                0,
+                0, 0,
             )
             .await;
             break 'attempts Some(error_resp(
@@ -2214,19 +2222,28 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 err.clone(),
                 Some(usage),
                 Some(release_log(ep_tag, &model, 0, ms, &err, attempt, Some(&key), &ctx.ip, &up_model, stream, ms, 0, 0, &tok)),
-                0,
+                0, 0,
             )
             .await;
             last = Some(json!({"status": 0, "body": "", "error": rerr}));
             last_key = Some(key);
             if convert::is_channel_exhausted(&util::str_or(last.as_ref().and_then(|l| l.get("error")), "")) {
-                break 'attempts Some(upstream_fail(last_key.as_ref(), last.as_ref(), &cfg, false));
+                break 'attempts Some(upstream_fail(last_key.as_ref(), last.as_ref(), &cfg, false, 0));
             }
             tokio::time::sleep(Duration::from_millis(backoff_ms(&cfg, attempt, last_key.as_ref()) as u64)).await;
             continue;
         }
         let mut r = if stream { wire_plan.stream(got_resp.unwrap()) } else { got_resp.unwrap() };
         rstatus = r.status().as_u16() as i64;
+        // 上游 Retry-After（秒）：尊重上游限速窗口——账号冷却取 max(指数, 上游值)
+        let upstream_retry_after = r
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0 && *v <= 86400.0)
+            .map(|v| v.ceil() as i64)
+            .unwrap_or(0);
         if stream && (200..400).contains(&rstatus) {
             // 预读首帧：只为识别立即返回的 SSE 错误事件以便换号/降级重试。
             // 等一小段；上游推理慢时立刻转入心跳透传，绝不能把客户端干等几十秒。
@@ -2507,6 +2524,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 &tok,
             )),
             0,
+            upstream_retry_after,
         )
         .await;
         if success {
@@ -2639,7 +2657,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     continue;
                 }
             }
-            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
+            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false, upstream_retry_after));
         }
         // 渠道级不可用：同一渠道所有账号共享渠道池，换号/重试都注定失败 → 快速失败
         if convert::is_channel_exhausted(&rbody) {
@@ -2650,7 +2668,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     continue;
                 }
             }
-            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
+            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false, upstream_retry_after));
         }
         if !(rstatus == 0 || rstatus == 408 || rstatus == 425 || rstatus == 429 || rstatus >= 500) {
             // 降级链：非瞬态 4xx（模型不存在/参数不支持等）在还有后续成员时换成员
@@ -2661,7 +2679,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     continue;
                 }
             }
-            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false));
+            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, false, upstream_retry_after));
         }
         // 429 吸收：换号重试，不透传 429 给下游。账号已在上方统一释放（触发 429 冷却），
         // 这里绝不能再 arelease 一次 —— 否则冷却翻倍、统计/日志/失败计数全部双记
@@ -2678,7 +2696,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     hold.clear();
     match out {
         Some(resp) => resp,
-        None => upstream_fail(last_key.as_ref(), last.as_ref(), &cfg, false),
+        None => upstream_fail(last_key.as_ref(), last.as_ref(), &cfg, false, 0),
     }
 }
 
@@ -2865,7 +2883,7 @@ async fn release_slow(
         err,
         Some(usage),
         Some(&release_log(ep, model, status, ms, err, attempt, Some(key), ip, up_model, true, ms, 0, 0, tok)),
-        0,
+        0, 0,
     );
 }
 
@@ -3161,7 +3179,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                             taken.message.clone(),
                             None,
                             Some(release_log(ep, &model, taken.status, 0, &taken.message, attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
-                            0,
+                            0, 0,
                         )
                         .await;
                         advance_member = true;
@@ -3176,7 +3194,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 taken.message.clone(),
                 None,
                 Some(release_log(ep, &model, taken.status, 0, &taken.message, attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
-                0,
+                0, 0,
             )
             .await;
             break 'attempts Some(error_resp(taken.status.clamp(400, 599) as u16, &taken.message, "invalid_request_error", None, anthropic));
@@ -3333,7 +3351,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 err.clone(),
                 Some(usage),
                 Some(release_log(ep, &model, 0, ms, &err, attempt, Some(&key), &ctx.ip, &up_model, stream, ms, 0, 0, &tok)),
-                0,
+                0, 0,
             )
             .await;
             last = Some(json!({"status": 0, "body": "", "error": rerr}));
@@ -3343,6 +3361,15 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         }
         let mut r = if stream { wire_plan.stream(got_resp.unwrap()) } else { got_resp.unwrap() };
         rstatus = r.status().as_u16() as i64;
+        // 上游 Retry-After（秒）：尊重上游限速窗口——账号冷却取 max(指数, 上游值)
+        let upstream_retry_after = r
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0 && *v <= 86400.0)
+            .map(|v| v.ceil() as i64)
+            .unwrap_or(0);
         if stream && (200..400).contains(&rstatus) {
             let ttfb_to = util::cfg_int(&cfg, "ttfb_timeout", 0) as f64;
             let pre_to = if ttfb_to <= 0.0 { 8.0 } else { 8.0_f64.min(ttfb_to) };
@@ -3613,6 +3640,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 &tok,
             )),
             0,
+            upstream_retry_after,
         )
         .await;
         if success {
@@ -3700,7 +3728,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     continue;
                 }
             }
-            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
+            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic, upstream_retry_after));
         }
         if convert::is_channel_exhausted(&rbody) {
             if let Some(c) = &chain {
@@ -3710,7 +3738,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     continue;
                 }
             }
-            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
+            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic, upstream_retry_after));
         }
         if !(rstatus == 0 || rstatus == 408 || rstatus == 425 || rstatus == 429 || rstatus >= 500) {
             if let Some(c) = &chain {
@@ -3720,7 +3748,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     continue;
                 }
             }
-            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic));
+            break 'attempts Some(upstream_fail(Some(&key), last.as_ref(), &cfg, anthropic, upstream_retry_after));
         }
         // 429 吸收：账号已在上方统一释放（触发 429 冷却），这里不能再 arelease 一次
         if rstatus == 429 && rl_left > 0 && cfg.get("queue_enabled").map(util::truthy).unwrap_or(true) {
@@ -3736,7 +3764,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     hold.clear();
     match out {
         Some(resp) => resp,
-        None => upstream_fail(last_key.as_ref(), last.as_ref(), &cfg, anthropic),
+        None => upstream_fail(last_key.as_ref(), last.as_ref(), &cfg, anthropic, 0),
     }
 }
 

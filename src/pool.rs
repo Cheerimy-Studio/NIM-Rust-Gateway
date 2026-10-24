@@ -1220,9 +1220,10 @@ pub fn release(
     usage: Option<&Value>,
     log: Option<&Value>,
     errno: i64,
+    retry_after_secs: i64,
 ) {
     dec_inflight(key_id);
-    store().update(|db| release_fn(db, key_id, success, http_status, error, usage, log, errno));
+    store().update(|db| release_fn(db, key_id, success, http_status, error, usage, log, errno, retry_after_secs));
 }
 
 pub async fn arelease(
@@ -1233,10 +1234,11 @@ pub async fn arelease(
     usage: Option<Value>,
     log: Option<Value>,
     errno: i64,
+    retry_after_secs: i64,
 ) {
     dec_inflight(&key_id);
     let db_res = tokio::task::spawn_blocking(move || {
-        store().update(|db| release_fn(db, &key_id, success, http_status, &error, usage.as_ref(), log.as_ref(), errno));
+        store().update(|db| release_fn(db, &key_id, success, http_status, &error, usage.as_ref(), log.as_ref(), errno, retry_after_secs));
     });
     let _ = db_res.await;
 }
@@ -1250,6 +1252,7 @@ fn release_fn(
     usage: Option<&Value>,
     log: Option<&Value>,
     errno: i64,
+    retry_after_secs: i64,
 ) {
     let now = util::now_i();
     let cfg = db.get("config").cloned().unwrap_or(Value::Object(Obj::new()));
@@ -1330,7 +1333,10 @@ fn release_fn(
                         }
                         let base = eff("cool_429_seconds", cfg_int_("cool_429_seconds", 30));
                         if base > 0 {
-                            let cool = (base * (1i64 << streak.saturating_sub(1).min(4))).min(600);
+                            // 上游 Retry-After 优先于指数冷却：上游明说「多久后再来」，
+                            // 提前重选只会再撞一次 429（浪费一次尝试 + 冷却重新计时）
+                            let exp = (base * (1i64 << streak.saturating_sub(1).min(4))).min(600);
+                            let cool = exp.max(retry_after_secs.clamp(0, 3600));
                             let cur = util::int_or(k.get("cooldown_until"), 0);
                             if let Some(o) = k.as_object_mut() {
                                 o.insert("cooldown_until".into(), Value::from(cur.max(now + cool)));
@@ -1935,7 +1941,7 @@ pub async fn test_key(key_id: &str) -> Value {
     if !key_id.is_empty() {
         inc_inflight(key_id);
     }
-    release(key_id, ok, status, &err, None, Some(&log_row), 0);
+    release(key_id, ok, status, &err, None, Some(&log_row), 0, 0);
     serde_json::json!({"ok": ok, "status": status, "ms": ms, "models": count, "error": err})
 }
 
@@ -1947,7 +1953,7 @@ mod usage_tests {
         let key=new_key("overflow","","test","test");let id=util::str_or(key.get("id"),"");
         let mut db=serde_json::json!({"config":{},"keys":[key]});
         db["keys"][0]["prompt_tokens"]=Value::from(i64::MAX);
-        release_fn(&mut db,&id,true,200,"",Some(&serde_json::json!({"prompt_tokens":i64::MAX,"completion_tokens":i64::MAX})),None,0);
+        release_fn(&mut db,&id,true,200,"",Some(&serde_json::json!({"prompt_tokens":i64::MAX,"completion_tokens":i64::MAX})),None,0,0);
         assert_eq!(db["keys"][0]["prompt_tokens"],i64::MAX);
         assert_eq!(db["keys"][0]["daily"][util::local_day(util::now_i())]["tokens"],i64::MAX);
     }
@@ -1961,15 +1967,15 @@ mod capability_tests {
         let key=new_key("scope","","test","scope");let id=util::str_or(key.get("id"),"");
         let mut db=serde_json::json!({"config":{},"keys":[key]});
         let log=serde_json::json!({"ep":"emb","model":"same-name"});
-        release_fn(&mut db,&id,false,404,"model not found",None,Some(&log),0);
+        release_fn(&mut db,&id,false,404,"model not found",None,Some(&log),0,0);
         assert!(!model_missing_fresh(&db,"scope","same-name"));
         assert!(model_missing_fresh(&db,"scope",&capability_key("same-name","emb")));
         let text_log=serde_json::json!({"ep":"cmpl","model":"same-name"});
-        release_fn(&mut db,&id,false,404,"model not found",None,Some(&text_log),0);
+        release_fn(&mut db,&id,false,404,"model not found",None,Some(&text_log),0,0);
         assert!(!model_missing_fresh(&db,"scope","same-name"));
         assert!(model_missing_fresh(&db,"scope",&capability_key("same-name","cmpl")));
 
-        for _ in 0..3 {release_fn(&mut db,&id,false,502,"upstream error",None,Some(&log),0);}
+        for _ in 0..3 {release_fn(&mut db,&id,false,502,"upstream error",None,Some(&log),0,0);}
         assert!(db["model_breaker"].get("same-name").is_none());
         assert!(db["model_breaker"].get(capability_key("same-name","emb")).is_some());
     }
