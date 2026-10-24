@@ -896,7 +896,9 @@ pub fn parse_thinking_defaults(raw: &str) -> HashMap<String, String> {
         let (k, v) = line.split_once('=').unwrap();
         let k = k.trim().to_lowercase();
         let v = v.trim().to_lowercase();
-        if !k.is_empty() && ["minimal", "low", "medium", "high", "max"].contains(&v.as_str()) {
+        // "off" = 剥离该模型的全部思考参数（上游不支持思考时的主动适配）
+        // `*` = 匹配所有模型（渠道级兜底）
+        if !k.is_empty() && ["off", "minimal", "low", "medium", "high", "max"].contains(&v.as_str()) {
             out.insert(k, v);
         }
     }
@@ -941,13 +943,34 @@ pub fn downgrade_thinking(body: &mut Value, model: &str, defaults: &HashMap<Stri
     let m = model.to_lowercase();
     let mut default_effort: Option<&String> = None;
     for (pat, eff) in defaults {
-        if m.contains(pat.as_str()) {
+        // `*` = 渠道级兜底（匹配所有模型）；其他按子串匹配（`m3` 命中 `m3.1-flash`）
+        if pat == "*" || m.contains(pat.as_str()) {
             default_effort = Some(eff);
             break;
         }
     }
     let mut changed = false;
     if let Some(eff) = default_effort {
+        if eff == "off" {
+            // off = 该上游/模型不支持思考参数：全部剥离（含 chat_template_kwargs）
+            for k in THINKING_DROP_KEYS {
+                if obj.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
+                    changed = true;
+                }
+            }
+            if obj.get("chat_template_kwargs").map(|v| v.is_object()).unwrap_or(false) {
+                let ctk = obj.get_mut("chat_template_kwargs").unwrap().as_object_mut().unwrap();
+                for k in THINKING_KWARG_KEYS {
+                    if ctk.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
+                        changed = true;
+                    }
+                }
+                if ctk.is_empty() {
+                    obj.remove("chat_template_kwargs");
+                }
+            }
+            return changed;
+        }
         for k in EFFORT_KEYS {
             if let Some(v) = obj.get_mut(*k) {
                 if util::str_or(Some(v), "") != *eff {

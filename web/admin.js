@@ -809,7 +809,7 @@ function poverAdd() {
 
 function tdefAdd() {
   const model = $('#tdef-model').value.trim();
-  const effort = $('#tdef-effort').value;
+  const effort = $('#tdef-effort').value.trim().toLowerCase();
   if (!model) { toast('请选择模型', 'warning'); return; }
   tdefData[model] = effort;
   tdefRender();

@@ -2086,6 +2086,13 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 util::cfg_int(&cfg, "tool_compact_max", 60000).max(0) as usize,
             );
         }
+        // 主动思考适配：渠道配置了 thinking_defaults 时，发送前就按配置调整/剥离
+        // 思考参数（`off` 剥离全部），而不是等上游 400 再自愈（省一次往返）
+        let tdefs_pro = convert::parse_thinking_defaults(
+            &upstreams::upstream_value(&key, "thinking_defaults", ""));
+        if !tdefs_pro.is_empty() {
+            convert::downgrade_thinking(&mut routed_req, &up_model, &tdefs_pro);
+        }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             endpoint, &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
         ) {
@@ -3218,6 +3225,12 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                 util::cfg_int(&cfg, "tool_compact_threshold", 8192).max(0) as usize,
                 util::cfg_int(&cfg, "tool_compact_max", 60000).max(0) as usize,
             );
+        }
+        // 主动思考适配（同 chat 直通）
+        let tdefs_pro = convert::parse_thinking_defaults(
+            &upstreams::upstream_value(&key, "thinking_defaults", ""));
+        if !tdefs_pro.is_empty() {
+            convert::downgrade_thinking(&mut routed_req, &up_model, &tdefs_pro);
         }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             "chat/completions", &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,

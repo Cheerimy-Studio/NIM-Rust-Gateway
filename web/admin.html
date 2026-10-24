@@ -525,10 +525,11 @@ details.upgrp[open]{background:#fff}
                 <select id="tdef-model" class="form-select form-select-sm" style="max-width:220px">
                   <option value="">选择模型...</option>
                 </select>
-                <input type="text" id="tdef-effort" class="form-control form-control-sm" placeholder="强度：minimal/low/medium/high/max" style="max-width:190px">
+                <input type="text" id="tdef-effort" class="form-control form-control-sm" placeholder="强度：off/minimal/low/medium/high/max" style="max-width:190px">
                 <button type="button" id="tdef-add" class="btn btn-sm btn-outline-primary">添加</button>
               </div>
               <div id="tdef-list" class="pover-list small"></div>
+            <div class="small text-muted mt-1">模型名支持子串匹配（如 <code>m3</code> 命中 <code>m3.1-flash</code>）或 <code>*</code> 通配。强度 <code>off</code> 剥离该模型的全部思考参数——上游不支持思考时选这个，省去 400 重试。未匹配的模型不做调整。</div>
             </div>
           </div>
         </div>
