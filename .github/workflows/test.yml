@@ -19,3 +19,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test locked dependencies
         run: cargo test --locked --all-targets
+      - name: Check frontend syntax and reward interactions
+        run: |
+          node --check web/admin.js
+          node --check web/user.js
+          node tests/frontend-rewards.cjs

@@ -71,7 +71,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("intercepted", &["intercepted"]),
     ("queue", &["queue"]),
     ("users", &["users", "user_tokens", "user_logs", "user_logs_paid", "user_logs_free", "user_rpm", "fund_logs"]),
-    ("wheels", &["wheels", "prize_keys", "draw_logs"]),
+    ("wheels", &["wheels", "prize_keys", "draw_logs", "draw_receipts"]),
     ("promo", &["invite_events", "invite_members", "invite_hits"]),
     ("mail", &["email_codes", "pw_resets"]),
     (
@@ -239,18 +239,54 @@ fn dir_fingerprint() -> (i64, usize) {
 fn write_group_file(group: &str, payload: &str) -> Result<(), String> {
     let path = group_file(group);
     let tmp = format!("{}.{}.tmp", path.display(), std::process::id());
-    fs::write(&tmp, payload.as_bytes()).map_err(|e| e.to_string())?;
-    // 表文件含 API Key 与口令哈希：Unix 上收紧到 0600
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    // 断电/崩溃时元数据日志可能只落下 rename 而数据块还没写盘，
-    // 重命名前强制刷盘，避免表文件（含余额/口令哈希）损坏或半截
-    fs::OpenOptions::new().write(true).open(&tmp)
-        .and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+    let mut file = options.open(&tmp).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    file.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
     fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+fn sync_db_dir() {
+    // Windows cannot open a directory as a regular File.
+    #[cfg(unix)]
+    if let Err(e) = fs::File::open(db_dir()).and_then(|f| f.sync_all()) {
+        eprintln!("[store] 无法同步数据目录: {e}");
+    }
+}
+
+const REWARD_JOURNAL: &str = "reward_journal";
+
+/// 重放已经提交、尚未完整写回分表的奖励事务。损坏时停止启动，防止用部分余额继续运行。
+fn recover_reward_journal() -> Result<(), String> {
+    let raw = match fs::read(group_file(REWARD_JOURNAL)) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let journal: Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+    let groups = journal.as_object().ok_or("奖励事务格式错误")?;
+    for (group, value) in groups {
+        let (_, keys) = GROUPS.iter().find(|(name, _)| name == group).ok_or("奖励事务包含未知表")?;
+        let obj = value.as_object().ok_or("奖励事务表格式错误")?;
+        if obj.keys().any(|k| !keys.contains(&k.as_str())) {
+            return Err("奖励事务包含未知字段".into());
+        }
+    }
+    for (group, value) in groups {
+        write_group_file(group, &serde_json::to_string(value).map_err(|e| e.to_string())?)?;
+    }
+    sync_db_dir();
+    fs::remove_file(group_file(REWARD_JOURNAL)).map_err(|e| e.to_string())?;
+    sync_db_dir();
+    Ok(())
 }
 
 fn read_group_file(group: &str) -> Value {
@@ -304,6 +340,7 @@ impl Store {
             let _ = fs::write(&guard, "Require all denied\n");
         }
         let _ = fs::create_dir_all(db_dir());
+        recover_reward_journal().unwrap_or_else(|e| panic!("奖励事务恢复失败，请修复存储后重启: {e}"));
         let s = Store {
             inner: Mutex::new(Inner {
                 memo: None,
@@ -366,6 +403,11 @@ impl Store {
             self.flush();
             inner = self.inner.lock().unwrap();
             let fp2 = dir_fingerprint();
+            // 写盘仍失败时内存是最新有效状态，不能用部分写回的磁盘覆盖它。
+            if inner.dirty && inner.memo.is_some() {
+                inner.memo_at = Instant::now();
+                return inner.memo.clone().unwrap();
+            }
             if inner.memo.is_some() && inner.dir_fp == Some(fp2) {
                 inner.memo_at = Instant::now();
                 return inner.memo.clone().unwrap();
@@ -475,6 +517,40 @@ impl Store {
         db
     }
 
+    /// 奖励事务先在副本校验，失败不修改内存。日志落盘是提交点，跨表写回可在重启时重放。
+    pub fn reward_transaction<T>(&self, f: impl FnOnce(&mut Value) -> Result<T, String>) -> Result<T, String> {
+        self.load();
+        if group_file(REWARD_JOURNAL).exists() {
+            self.flush();
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if group_file(REWARD_JOURNAL).exists() {
+            return Err("奖励存储暂不可用，请稍后重试".into());
+        }
+        let mut next = inner.memo.clone().ok_or("存储未初始化")?;
+        let result = f(&mut next)?;
+        if inner.memo.as_ref() == Some(&next) {
+            return Ok(result);
+        }
+        let mut journal = Obj::new();
+        for (gi, (group, keys)) in GROUPS.iter().enumerate() {
+            let value = extract_group(&next, keys);
+            if group_hash(&value) != inner.saved[gi] {
+                journal.insert((*group).into(), value);
+            }
+        }
+        let payload = serde_json::to_string(&journal).map_err(|e| e.to_string())?;
+        write_group_file(REWARD_JOURNAL, &payload).map_err(|e| format!("奖励存储失败: {e}"))?;
+        sync_db_dir();
+        inner.memo = Some(next);
+        inner.dirty = true;
+        inner.memo_at = Instant::now();
+        bump_gen();
+        // 日志已提交；分表暂时写不成功也保留提交结果，由 flush 或重启恢复。
+        self.flush_locked(&mut inner, false);
+        Ok(result)
+    }
+
     /// 丢弃内存 memo（数据目录被外部替换/回滚后调用）。
     /// 不丢的话：替换完磁盘的几秒窗口里任何一次 update/flush 都会把
     /// 内存里的旧数据原样写回，把刚恢复的数据再次覆盖掉
@@ -495,10 +571,32 @@ impl Store {
     /// 训练记录）。每张表按需写、通常只有几十 KB 到 1MB，持锁几毫秒换取数据一致性。
     pub fn flush(&self) {
         let mut inner = self.inner.lock().unwrap();
+        self.flush_locked(&mut inner, true);
+    }
+
+    fn flush_locked(&self, inner: &mut Inner, refresh_journal: bool) {
         if !inner.dirty || inner.memo.is_none() {
             return;
         }
         let snapshot = inner.memo.clone().unwrap();
+        if refresh_journal && group_file(REWARD_JOURNAL).exists() {
+            // 日志尚未完成时可能又有普通记账更新。先把重放快照推进到最新状态，
+            // 避免崩溃后用旧事务覆盖已写回的新余额或调用计数。
+            let refreshed = (|| -> Result<(), String> {
+                let raw = fs::read(group_file(REWARD_JOURNAL)).map_err(|e| e.to_string())?;
+                let mut journal: Obj = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+                for (gi,(group,keys)) in GROUPS.iter().enumerate() {
+                    let obj = extract_group(&snapshot,keys);
+                    if journal.contains_key(*group) || group_hash(&obj) != inner.saved[gi] {
+                        journal.insert((*group).into(),obj);
+                    }
+                }
+                write_group_file(REWARD_JOURNAL,&serde_json::to_string(&journal).map_err(|e| e.to_string())?)?;
+                sync_db_dir();
+                Ok(())
+            })();
+            if let Err(e) = refreshed { warn_persist(&e); return; }
+        }
         let mut all_ok = true;
         for (gi, (group, keys)) in GROUPS.iter().enumerate() {
             let obj = extract_group(&snapshot, keys);
@@ -516,6 +614,15 @@ impl Store {
             }
         }
         if all_ok {
+            sync_db_dir();
+            if group_file(REWARD_JOURNAL).exists() {
+                if let Err(e) = fs::remove_file(group_file(REWARD_JOURNAL)) {
+                    warn_persist(&e.to_string());
+                    inner.dir_fp = Some(dir_fingerprint());
+                    return;
+                }
+                sync_db_dir();
+            }
             inner.dirty = false;
         }
         // 指纹刷新与写盘同锁：本进程写盘不会被误判成「外部改动」
@@ -590,13 +697,14 @@ pub fn migrate(db: &mut Value) {
         "wheels",
         "prize_keys",
         "draw_logs",
+        "draw_receipts",
     ] {
         obj.entry(k)
             .or_insert(if k == "upstreams" || k == "keys" || k == "logs" || k == "queue" || k == "sessions"
                 || k == "users" || k == "user_tokens" || k == "user_logs"
                 || k == "user_logs_paid" || k == "user_logs_free"
                 || k == "fund_logs"
-                || k == "wheels" || k == "prize_keys" || k == "draw_logs" {
+                || k == "wheels" || k == "prize_keys" || k == "draw_logs" || k == "draw_receipts" {
                 Value::Array(vec![])
             } else {
                 Value::Object(Obj::new())
@@ -635,6 +743,7 @@ pub fn migrate(db: &mut Value) {
         ("wheels", "arr"),
         ("prize_keys", "arr"),
         ("draw_logs", "arr"),
+        ("draw_receipts", "arr"),
         ("buckets", "obj"),
         ("pool_buckets", "obj"),
         ("pool_daily", "obj"),
@@ -778,4 +887,32 @@ fn bump_gen() {
 
 pub fn store() -> &'static Store {
     STORE.get_or_init(Store::new)
+}
+
+#[cfg(test)]
+pub(crate) fn reward_recovery_regressions() {
+    let s=store();
+    let before=s.load();s.flush();
+    let failed:Result<(),String>=s.reward_transaction(|db| {db["users"]=serde_json::json!([]);Err("reject".into())});
+    assert!(failed.is_err());assert_eq!(s.load(),before);
+    let tmp=PathBuf::from(format!("{}.{}.tmp",group_file(REWARD_JOURNAL).display(),std::process::id()));
+    fs::create_dir(&tmp).unwrap();
+    let failed=s.reward_transaction(|db| {db["users"]=serde_json::json!([]);Ok(())});
+    assert!(failed.is_err());assert_eq!(s.load(),before);fs::remove_dir(tmp).unwrap();
+    // Simulate interruption between users.json and wheels.json writeback.
+    let wheel_file=group_file("wheels");let saved=wheel_file.with_extension("test-backup");
+    fs::rename(&wheel_file,&saved).unwrap();fs::create_dir(&wheel_file).unwrap();
+    s.reward_transaction(|db| {db["users"]=serde_json::json!([{"id":"recovery","grant":1}]);db["wheels"]=serde_json::json!([{"id":"recovered"}]);Ok(())}).unwrap();
+    assert!(group_file(REWARD_JOURNAL).is_file());
+    s.update(|db|db["users"][0]["grant"]=serde_json::json!(2));s.flush();
+    let journal:Value=serde_json::from_slice(&fs::read(group_file(REWARD_JOURNAL)).unwrap()).unwrap();
+    assert_eq!(journal["users"]["users"][0]["grant"],2,"pending journal must include newer ordinary updates");
+    fs::remove_dir(&wheel_file).unwrap();fs::rename(&saved,&wheel_file).unwrap();
+    s.discard_memory();recover_reward_journal().unwrap();
+    let recovered=s.load();assert_eq!(recovered["users"][0]["grant"],2);assert_eq!(recovered["wheels"][0]["id"],"recovered");
+    assert!(!group_file(REWARD_JOURNAL).exists());
+    write_group_file(REWARD_JOURNAL,"{bad").unwrap();
+    assert!(recover_reward_journal().is_err());assert_eq!(fs::read(group_file("users")).unwrap(),serde_json::to_vec(&extract_group(&recovered,&["users","user_tokens","user_logs","user_logs_paid","user_logs_free","user_rpm","fund_logs"])).unwrap());
+    fs::remove_file(group_file(REWARD_JOURNAL)).unwrap();
+    s.update(|db|*db=before);s.flush();
 }

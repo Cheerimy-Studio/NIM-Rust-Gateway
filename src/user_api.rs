@@ -189,14 +189,20 @@ pub async fn sign_status(headers: &HeaderMap) -> Response {
     let cfg = cfg_v.get("config").cloned().unwrap_or(json!({}));
     let (enabled, min, max) = users::sign_config(&cfg);
     let day = util::local_day(util::now_i());
-    let signed_today = users::sign_store_get(&day, &uid).is_some();
-    let today_amount = users::sign_store_get(&day, &uid).unwrap_or(0.0);
+    let record = match users::sign_record(&cfg_v, &uid, &day) {
+        Ok(record) => record,
+        Err(message) => return (StatusCode::SERVICE_UNAVAILABLE,axum::Json(json!({"error":{"message":message}}))).into_response(),
+    };
+    let signed_today = record.is_some();
+    let today_amount = record.unwrap_or(0.0);
     json_resp(json!({
         "enabled": enabled,
         "min": min,
         "max": max,
         "signed_today": signed_today,
         "today_amount": util::round6(today_amount),
+        "day":day,
+        "reset_in":util::tomorrow_midnight(util::now_i()).saturating_sub(util::now_i()).max(1),
     }))
 }
 
@@ -570,8 +576,27 @@ pub async fn wheels_draw(headers: &HeaderMap, body: Bytes) -> Response {
             .into_response();
     };
     let id = util::str_or(body.get("id"), "");
-    let use_credit = body.get("use_credit").map(util::truthy).unwrap_or(false);
-    let (ok, body) = crate::wheel::draw(&uid, &id, use_credit);
+    let use_credit = body.get("use_credit").map(util::as_bool2).unwrap_or(false);
+    let request_id = match body.get("request_id") {
+        None => "",
+        Some(Value::String(id)) => id.as_str(),
+        _ => return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":"抽奖请求 ID 无效"}}))).into_response(),
+    };
+    let expected_cost = match body.get("expected_cost") {
+        None => None,
+        Some(v) => match v.as_f64().filter(|n| n.is_finite() && *n >= 0.0) {
+            Some(n) => Some(n),
+            None => return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":"抽奖费用格式错误"}}))).into_response(),
+        }
+    };
+    let requested_at=match body.get("requested_at") {
+        None => None,
+        Some(v) => match v.as_i64().filter(|n|*n>0) {
+            Some(at) => Some(at),
+            None => return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":"抽奖时间格式错误"}}))).into_response(),
+        }
+    };
+    let (ok, body) = crate::wheel::draw(&uid, &id, use_credit, request_id, expected_cost, requested_at);
     if ok {
         json_resp(body)
     } else {

@@ -2112,10 +2112,9 @@ function prizeRowHtml(p = {}) {
     `<option value="${v}"${p.type === v ? ' selected' : ''}>${t}</option>`).join('');
   const colorOpts = PRIZE_COLORS.map(([v, t]) =>
     `<option value="${v}"${p.color === v ? ' selected' : ''}>${t}</option>`).join('');
-  // 金额/模型共用一个输入框：余额类回显金额、Key 类回显模型名。
-  // 不能用 amount ?? model —— 模型类奖品 amount 恒为 0（非 null），?? 短路回显成 0，
-  // 再点保存模型名就被写成 "0"。
-  const isAmt = p.type === 'recharge' || p.type === 'grant';
+  // 金额和模型分别保留编辑值，切换类型不丢失输入。
+  const initialType = p.type || PRIZE_TYPES[0][0];
+  const isAmt = initialType === 'recharge' || initialType === 'grant';
   const amVal = isAmt ? (p.amount ? String(p.amount) : '') : (p.model ?? '');
   tr.innerHTML = '<td><input class="form-control form-control-sm wz-label" value="' + esc(p.label || '') + '"></td>'
     + '<td><select class="form-select form-select-sm wz-type">' + typeOpts + '</select></td>'
@@ -2130,15 +2129,24 @@ function prizeRowHtml(p = {}) {
   tr._prize = p;
   tr.querySelector('.wz-del').onclick = () => { tr.remove(); wheelSum(); };
   tr.querySelector('.wz-weight').addEventListener('input', wheelSum);
-  // 切换类型时按原始奖品数据切换回显（金额 ↔ 模型名），两个语义共用输入框不串值
-  tr.querySelector('.wz-type').addEventListener('change', () => {
-    const t = tr.querySelector('.wz-type').value;
-    const inp = tr.querySelector('.wz-amount-model');
-    const amt = t === 'recharge' || t === 'grant';
-    const src = tr._prize || {};
-    inp.value = amt ? (src.amount ? String(src.amount) : '') : (src.model ?? '');
-    inp.placeholder = amt ? '金额' : '模型名';
-  });
+  const values = {amount: p.amount ? String(p.amount) : '', model: p.model || ''};
+  let valueKind = isAmt ? 'amount' : 'model';
+  const syncType = () => {
+    const type = tr.querySelector('.wz-type').value;
+    const input = tr.querySelector('.wz-amount-model');
+    const next = type === 'recharge' || type === 'grant' ? 'amount' : 'model';
+    values[valueKind] = input.value;
+    if (next !== valueKind) input.value = values[next];
+    valueKind = next;
+    input.placeholder = next === 'amount' ? '金额' : '模型名';
+    input.disabled = type === 'none';
+    const isKey = type === 'model_unlimited' || type === 'model_quota';
+    tr.querySelector('.wz-hours').disabled = !isKey;
+    tr.querySelector('.wz-conc').disabled = !isKey;
+    tr.querySelector('.wz-quota').disabled = type !== 'model_quota';
+  };
+  tr.querySelector('.wz-type').addEventListener('change', syncType);
+  syncType();
   return tr;
 }
 
@@ -2251,7 +2259,7 @@ async function loadPrizeKeys() {
   for (const k of rows) {
     const tr = document.createElement('tr');
     const expired = k.expires_at > 0 && now >= k.expires_at;
-    const exhausted = k.quota > 0 && (k.used ?? 0) >= k.quota;
+    const exhausted = k.type === 'model_quota' && (k.used ?? 0) >= k.quota;
     const st = !k.enabled ? '<span class="badge bg-secondary">停用</span>'
       : expired ? '<span class="badge bg-danger">已过期</span>'
       : exhausted ? '<span class="badge bg-danger">已用尽</span>'
@@ -2259,7 +2267,7 @@ async function loadPrizeKeys() {
     tr.innerHTML = '<td class="key-mono small">' + esc(k.key.slice(0, 14)) + '…</td>'
       + '<td class="small">' + (k.type === 'model_unlimited' ? '体验卡' : '专属额度') + '</td>'
       + '<td class="small mono">' + esc(k.model || '-') + '</td>'
-      + '<td class="small">' + (k.quota > 0 ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
+      + '<td class="small">' + (k.type === 'model_quota' ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
       + '<td class="small text-muted">' + (k.expires_at > 0 ? new Date(k.expires_at * 1000).toLocaleString() : '不限') + '</td>'
       + '<td>' + st + '</td>'
       + '<td class="text-end text-nowrap"></td>';
@@ -2282,15 +2290,24 @@ async function loadPrizeKeys() {
 $('#wh-new').onclick = () => openWheelEditor(null);
 $('#wh-cancel').onclick = () => closeWheelEditor();
 $('#wh-prize-add').onclick = () => { $('#wh-prize-rows').appendChild(prizeRowHtml()); wheelSum(); };
+let savingWheel = false;
 $('#wh-save').onclick = guard(async () => {
+  if (savingWheel) return;
   const body = collectWheel();
-  if (!body.name) return toast('填写转盘名称', 'danger');
+  if (!body.name) return toast('请输入转盘名称', 'danger');
   const sum = body.prizes.reduce((a, p) => a + (p.weight || 0), 0);
   if (Math.abs(sum - 100) > 0.01) return toast('展示权重合计必须为 100，当前 ' + Math.round(sum * 100) / 100, 'danger');
-  await api('wheels', {method: 'POST', json: body});
-  toast('转盘已保存');
-  closeWheelEditor();
-  loadWheels();
+  savingWheel = true;
+  $('#wh-save').disabled = true;
+  try {
+    await api('wheels', {method: 'POST', json: body});
+    toast('转盘已保存');
+    closeWheelEditor();
+    await loadWheels();
+  } finally {
+    savingWheel = false;
+    $('#wh-save').disabled = false;
+  }
 });
 $('#pk-refresh').onclick = () => run(() => loadPrizeKeys());
 

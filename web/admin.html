@@ -278,7 +278,7 @@ details.upgrp[open]{background:#fff}
   <div class="row g-3">
     <div class="col-lg-4">
       <div class="card h-100">
-        <div class="card-header"><i class="bi bi-list-ol me-2 text-muted"></i>模型调用 TOP（今日）</div>
+        <div class="card-header"><i class="bi bi-list-ol me-2 text-muted"></i>今日模型调用 TOP</div>
         <div class="table-responsive"><table class="table table-sm">
           <thead><tr><th>模型</th><th class="text-end">次数</th></tr></thead>
           <tbody id="dash-models"></tbody>
@@ -386,13 +386,13 @@ details.upgrp[open]{background:#fff}
           <input class="form-control form-control-sm" id="up-name" placeholder="NVIDIA NIM"></div>
         <div class="col-md-6"><label class="form-label" for="up-base">Base URL</label>
           <input class="form-control form-control-sm font-monospace" id="up-base" placeholder="https://integrate.api.nvidia.com/v1"></div>
-        <div class="col-md-3"><label class="form-label" for="up-weight">权重（1-100）</label>
+        <div class="col-md-3"><label class="form-label" for="up-weight" title="1-100">权重</label>
           <input type="number" min="1" max="100" class="form-control form-control-sm" id="up-weight" value="10"></div>
       </div>
       <div class="mt-3">
         <label class="form-label" for="up-endpoint">发送到上游的接口</label>
         <select class="form-select form-select-sm" id="up-endpoint">
-          <option value="auto">兼容旧配置（自动）</option>
+          <option value="auto">自动</option>
           <option value="chat/completions">OpenAI Chat Completions — /chat/completions</option>
           <option value="responses">OpenAI Responses — /responses</option>
           <option value="messages">Anthropic Messages — /messages</option>
@@ -412,14 +412,14 @@ details.upgrp[open]{background:#fff}
       <details class="upgrp mt-3" open>
         <summary>模型</summary>
         <div class="row g-3 pt-1">
-          <div class="col-12"><label class="form-label" for="up-models">渠道可用模型（空=不限）</label>
+          <div class="col-12"><label class="form-label" for="up-models" title="空=不限">渠道可用模型</label>
             <textarea class="form-control form-control-sm font-monospace" id="up-models" rows="2" placeholder="deepseek-ai/deepseek-r1&#10;meta/llama-3.3-70b-instruct"></textarea></div>
-          <div class="col-12"><label class="form-label" for="up-map">模型映射（每行 客户端模型=上游模型）</label>
+          <div class="col-12"><label class="form-label" for="up-map" title="每行 客户端模型=上游模型">模型映射</label>
             <textarea class="form-control form-control-sm font-monospace" id="up-map" rows="2" placeholder="gpt-4o=meta/llama-3.3-70b-instruct"></textarea></div>
         </div>
       </details>
       <details class="upgrp mt-2" open>
-        <summary>调度与限额（0=继承全局，-1=不限）</summary>
+        <summary title="0 继承全局，-1 不限">调度与限额</summary>
         <div class="row g-3 pt-1">
           <div class="col-md-3"><label class="form-label" for="up-rpm-key">单账号 RPM</label>
             <input type="number" min="-1" class="form-control form-control-sm" id="up-rpm-key" value="0"></div>
@@ -432,9 +432,9 @@ details.upgrp[open]{background:#fff}
         </div>
       </details>
       <details class="upgrp mt-2">
-        <summary>限额细节（0=继承全局，-1=不限）</summary>
+        <summary title="0 继承全局，-1 不限">限额细节</summary>
         <div class="row g-3 pt-1">
-          <div class="col-md-3"><label class="form-label" for="up-coolcd">账号请求间隔（毫秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-coolcd" title="毫秒">账号请求间隔 · 毫秒</label>
             <input type="number" min="-1" class="form-control form-control-sm" id="up-coolcd" value="0"></div>
           <div class="col-md-3"><label class="form-label" for="up-hrl">触发日 token 上限后每小时请求上限</label>
             <input type="number" min="-1" class="form-control form-control-sm" id="up-hrl" value="0"></div>
@@ -449,39 +449,39 @@ details.upgrp[open]{background:#fff}
         </div>
       </details>
       <details class="upgrp mt-2">
-        <summary>重试 / 退避 / 超时 / 封禁（0=继承全局）</summary>
+        <summary title="0 继承全局">重试与封禁</summary>
         <div class="row g-3 pt-1">
           <div class="col-md-3"><label class="form-label" for="up-retries">失败换号重试次数</label>
             <input type="number" min="0" max="20" class="form-control form-control-sm" id="up-retries" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-bb-base">退避基数（毫秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-bb-base" title="毫秒">退避基数 · 毫秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-bb-base" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-bb-max">退避上限（毫秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-bb-max" title="毫秒">退避上限 · 毫秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-bb-max" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-minwait">失败重试最小等待（毫秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-minwait" title="毫秒">失败重试最小等待 · 毫秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-minwait" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-timeout">请求超时（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-timeout" title="秒">请求超时 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-timeout" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-ctimeout">连接超时（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-ctimeout" title="秒">连接超时 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-ctimeout" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-bstep">失败封禁阶梯步长（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-bstep" title="秒">失败封禁阶梯步长 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-bstep" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-bmax">封禁上限（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-bmax" title="秒">封禁上限 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-bmax" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-hfban">401/403 单次封禁（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-hfban" title="秒">401/403 单次封禁 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-hfban" value="0"></div>
           <div class="col-md-3"><label class="form-label" for="up-hfcnt">401/403 累计次数 → 封 1 天</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-hfcnt" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-c429k">429 冷却（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-c429k" title="秒">429 冷却 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-c429k" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-c5xxk">5xx 冷却（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-c5xxk" title="秒">5xx 冷却 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-c5xxk" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-ctok">超时冷却（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-ctok" title="秒">超时冷却 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-ctok" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-ccnk">连接失败冷却（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-ccnk" title="秒">连接失败冷却 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-ccnk" value="0"></div>
           <div class="col-md-3"><label class="form-label" for="up-bthk">熔断阈值</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-bthk" value="0"></div>
-          <div class="col-md-3"><label class="form-label" for="up-bseck">熔断持续（秒）</label>
+          <div class="col-md-3"><label class="form-label" for="up-bseck" title="秒">熔断持续 · 秒</label>
             <input type="number" min="0" class="form-control form-control-sm" id="up-bseck" value="0"></div>
         </div>
       </details>
@@ -492,7 +492,7 @@ details.upgrp[open]{background:#fff}
             <select id="up-herr" class="form-select form-select-sm">
               <option value="0">继承全局</option><option value="1">只透传状态码</option><option value="2">透传详情</option>
             </select></div>
-          <div class="col-md-6"><label class="form-label" for="up-hname">原名访问（映射目标名）</label>
+          <div class="col-md-6"><label class="form-label" for="up-hname" title="映射目标名">原名访问</label>
             <select id="up-hname" class="form-select form-select-sm">
               <option value="0">继承全局</option><option value="1">禁止访问</option><option value="2">允许访问</option>
             </select>
@@ -500,11 +500,11 @@ details.upgrp[open]{background:#fff}
           <div class="col-md-6">
             <div class="form-check form-switch mt-1">
               <input class="form-check-input" type="checkbox" id="up-pua">
-              <label class="form-check-label small" for="up-pua">透传调用方 User-Agent 到上游（默认关）</label>
+              <label class="form-check-label small" for="up-pua">透传 User-Agent</label>
             </div>
           </div>
           <div class="col-12">
-            <label class="form-label">渠道固定参数（按模型分设）</label>
+            <label class="form-label" title="按模型分设">渠道固定参数</label>
             <div class="form-text mb-2">按选定上游接口的字段名填写，例如 Responses 使用 max_output_tokens。model 和 stream 由网关路由控制。</div>
             <div class="pover-editor">
               <div class="d-flex gap-2 mb-2">
@@ -519,7 +519,7 @@ details.upgrp[open]{background:#fff}
             </div>
           </div>
           <div class="col-12">
-            <label class="form-label">思考默认强度（上游报错后的降级强度）</label>
+            <label class="form-label" title="上游报错后的降级强度">思考默认强度</label>
             <div class="tdef-editor">
               <div class="d-flex gap-2 mb-2">
                 <select id="tdef-model" class="form-select form-select-sm" style="max-width:220px">
@@ -575,9 +575,9 @@ details.upgrp[open]{background:#fff}
     <div class="card-header">添加令牌</div>
     <div class="card-body">
       <div class="row g-2 align-items-end">
-        <div class="col-md-4"><label class="form-label" for="tok-name">令牌（留空自动生成）</label>
+        <div class="col-md-4"><label class="form-label" for="tok-name" title="留空自动生成">令牌</label>
           <input class="form-control form-control-sm font-monospace" id="tok-name" placeholder="sk-gw-…"></div>
-        <div class="col-md-5"><label class="form-label" for="tok-models">可用模型（逗号分隔，空=全部模型）</label>
+        <div class="col-md-5"><label class="form-label" for="tok-models" title="逗号分隔，空=全部模型">可用模型</label>
           <input class="form-control form-control-sm" id="tok-models" placeholder="kimi-k3, glm-5.3"></div>
         <div class="col-md-3"><button id="tok-add" class="btn btn-sm btn-primary w-100">添加</button></div>
       </div>
@@ -602,7 +602,7 @@ details.upgrp[open]{background:#fff}
       <div class="row g-2 align-items-end">
         <div class="col-md-3"><label class="form-label" for="promo-name">活动名称</label>
           <input class="form-control form-control-sm" id="promo-name" placeholder="如：新人 Register 送豪礼"></div>
-        <div class="col-md-2"><label class="form-label" for="promo-amount">奖励金额（元）</label>
+        <div class="col-md-2"><label class="form-label" for="promo-amount" title="元">奖励金额 · 元</label>
           <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="promo-amount" value="20"></div>
         <div class="col-md-2"><label class="form-label" for="promo-target">拉人次数</label>
           <input type="number" step="1" min="1" class="form-control form-control-sm" id="promo-target" value="100"></div>
@@ -614,7 +614,7 @@ details.upgrp[open]{background:#fff}
         </div>
         <div class="col-md-1"><button id="promo-add" class="btn btn-sm btn-primary w-100">创建</button></div>
       </div>
-      <div class="form-text small mt-2 mb-0">阶梯自动生成：邀请门槛逐波翻倍，累计 1 → 3 → 7 → 目标人数（如目标 15 = 每波 1、2、4、8），四个阶段全部完成后一次性发放等额赠金；邀请只推进度，不送抽奖次数与翻倍卡。</div>
+      <div class="form-text small mt-2 mb-0">累计邀请达到目标后，一次性发放赠金。邀请进度按 1、3、7、目标人数分阶段展示。</div>
     </div>
   </div>
   <div class="card">
@@ -635,7 +635,7 @@ details.upgrp[open]{background:#fff}
       <select class="form-select form-select-sm" id="price-channel"></select></div>
     <div style="min-width:180px"><label class="form-label" for="price-model">模型名</label>
       <input class="form-control form-control-sm" id="price-model" placeholder="模型名"></div>
-    <div style="min-width:120px"><label class="form-label" for="price-val">价格（元/次）</label>
+    <div style="min-width:120px"><label class="form-label" for="price-val" title="元/次">价格 · 元/次</label>
       <input type="number" step="0.001" min="0" class="form-control form-control-sm" id="price-val" placeholder="0=免费"></div>
     <button class="btn btn-sm btn-primary" id="price-add">添加</button>
   </div></div>
@@ -658,7 +658,7 @@ details.upgrp[open]{background:#fff}
     <div class="card-body" id="wh-editor" style="display:none">
       <div class="row g-2 mb-2">
         <div class="col-md-4"><label class="form-label" for="wh-name">转盘名称</label>
-          <input class="form-control form-control-sm" id="wh-name" placeholder="如 每日福利抽"></div>
+          <input class="form-control form-control-sm" id="wh-name" placeholder="活动名称"></div>
         <div class="col-md-3"><label class="form-label" for="wh-cost">单次消耗 · 元</label>
           <input type="number" step="0.001" min="0" class="form-control form-control-sm" id="wh-cost" value="0.01"></div>
         <div class="col-md-3 d-flex align-items-end pb-1">
@@ -671,7 +671,7 @@ details.upgrp[open]{background:#fff}
       </div>
       <div class="table-responsive">
         <table class="table table-sm align-middle mb-2">
-          <thead><tr><th>奖品名</th><th>类型</th><th>颜色</th><th style="min-width:90px">展示权重</th><th style="min-width:90px">真实权重</th><th>金额 / 模型</th><th>参数</th><th></th></tr></thead>
+          <thead><tr><th>奖品名</th><th>类型</th><th>颜色</th><th style="min-width:90px">展示权重</th><th style="min-width:90px">抽取权重</th><th>金额 / 模型</th><th>参数</th><th></th></tr></thead>
           <tbody id="wh-prize-rows"></tbody>
         </table>
       </div>
@@ -681,7 +681,7 @@ details.upgrp[open]{background:#fff}
         <button id="wh-cancel" class="btn btn-sm btn-outline-secondary">取消</button>
         <span class="small ms-auto">展示权重合计：<span id="wh-sum" class="fw-semibold">0</span> / 100</span>
       </div>
-      <div class="hint mt-2 mb-0">展示权重即用户看到的概率百分比，合计必须为 100；真实权重决定实际概率，留空与展示权重一致。余额类填金额；体验卡/专属额度填模型名，体验卡可设时长小时，专属额度填次数。</div>
+      <div class="hint mt-2 mb-0">展示权重控制扇区大小，合计为 100。抽取权重决定中奖概率，留空时沿用展示权重；用户端显示实际中奖概率。余额奖品填金额，奖品 Key 填模型名及有效期。</div>
     </div>
   </div>
   <div class="card mb-3">
@@ -695,7 +695,7 @@ details.upgrp[open]{background:#fff}
   </div>
   <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center">
-      <span>奖品 Key（体验卡 / 专属额度）</span>
+      <span>奖品 Key</span>
       <button id="pk-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
     </div>
     <div class="table-responsive">
@@ -859,7 +859,7 @@ details.upgrp[open]{background:#fff}
   <h2 class="pane-title">模型测试</h2>
   <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
     <select id="test-model" class="form-select form-select-sm" style="min-width:240px"></select>
-    <input id="test-system" class="form-control form-control-sm" placeholder="系统提示（可选）" style="max-width:220px">
+    <input id="test-system" class="form-control form-control-sm" placeholder="系统提示" style="max-width:220px">
     <div class="form-check ms-1">
       <input class="form-check-input" type="checkbox" id="test-stream" checked>
       <label class="form-check-label small" for="test-stream">流式</label>
@@ -875,12 +875,12 @@ details.upgrp[open]{background:#fff}
   </div>
   <div class="d-flex gap-2">
     <textarea id="test-input" class="form-control form-control-sm" rows="2"
-      placeholder="输入消息后按 Enter 发送（Shift+Enter 换行）"></textarea>
+      placeholder="Enter 发送，Shift+Enter 换行"></textarea>
     <button id="test-send" class="btn btn-primary px-4">发送</button>
   </div>
   <div class="card mt-3">
     <div class="card-header py-1 small d-flex justify-content-between">
-      <span>链路诊断（最近一次）</span>
+      <span>最近链路诊断</span>
       <span class="text-muted" id="test-diag-sum"></span>
     </div>
     <div class="card-body py-2">
@@ -955,7 +955,7 @@ details.upgrp[open]{background:#fff}
               <input type="number" min="-1" class="form-control form-control-sm" id="set-rate"></div>
             <div class="col-md-3"><label class="form-label" for="set-tpm">单账号 TPM</label>
               <input type="number" min="-1" class="form-control form-control-sm" id="set-tpm"></div>
-            <div class="col-md-3"><label class="form-label" for="set-coolcd">账号请求间隔（毫秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-coolcd" title="毫秒">账号请求间隔 · 毫秒</label>
               <input type="number" min="-1" class="form-control form-control-sm" id="set-coolcd"></div>
             <div class="col-md-3"><label class="form-label" for="set-hrl">触发日 token 上限后每小时请求上限</label>
               <input type="number" min="-1" class="form-control form-control-sm" id="set-hrl"></div>
@@ -971,7 +971,7 @@ details.upgrp[open]{background:#fff}
               <input type="number" min="-1" class="form-control form-control-sm" id="set-dcap"></div>
             <div class="col-md-3"><label class="form-label" for="set-dtok">单账号每日 token 上限</label>
               <input type="number" min="-1" class="form-control form-control-sm" id="set-dtok"></div>
-            <div class="col-md-3"><label class="form-label" for="set-warmup">新账号预热时长（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-warmup" title="秒">新账号预热时长 · 秒</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-warmup"></div>
           </div>
         </div>
@@ -982,15 +982,15 @@ details.upgrp[open]{background:#fff}
           <div class="row g-3">
             <div class="col-md-3"><label class="form-label" for="set-retries">失败换号重试次数</label>
               <input type="number" min="0" max="20" class="form-control form-control-sm" id="set-retries"></div>
-            <div class="col-md-3"><label class="form-label" for="set-bb-base">退避基数（毫秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-bb-base" title="毫秒">退避基数 · 毫秒</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-bb-base"></div>
-            <div class="col-md-3"><label class="form-label" for="set-bb-max">退避上限（毫秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-bb-max" title="毫秒">退避上限 · 毫秒</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-bb-max"></div>
-            <div class="col-md-3"><label class="form-label" for="set-minwait">失败重试最小等待（毫秒，0=不限）</label>
+            <div class="col-md-3"><label class="form-label" for="set-minwait" title="毫秒，0=不限">失败重试最小等待</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-minwait"></div>
-            <div class="col-md-3"><label class="form-label" for="set-timeout">请求超时（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-timeout" title="秒">请求超时 · 秒</label>
               <input type="number" min="10" class="form-control form-control-sm" id="set-timeout"></div>
-            <div class="col-md-3"><label class="form-label" for="set-ctimeout">连接超时（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-ctimeout" title="秒">连接超时 · 秒</label>
               <input type="number" min="2" class="form-control form-control-sm" id="set-ctimeout"></div>
             <div class="col-md-3 d-flex align-items-end pb-1">
               <div class="form-check form-switch">
@@ -1005,11 +1005,11 @@ details.upgrp[open]{background:#fff}
         <div class="card-header"><i class="bi bi-shield-check me-2 text-muted"></i>封禁与账号保护</div>
         <div class="card-body">
           <div class="row g-3">
-            <div class="col-md-3"><label class="form-label" for="set-ban-step">失败封禁阶梯步长（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-ban-step" title="秒">失败封禁阶梯步长 · 秒</label>
               <input type="number" min="1" class="form-control form-control-sm" id="set-ban-step"></div>
-            <div class="col-md-3"><label class="form-label" for="set-ban-max">封禁上限（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-ban-max" title="秒">封禁上限 · 秒</label>
               <input type="number" min="1" class="form-control form-control-sm" id="set-ban-max"></div>
-            <div class="col-md-3"><label class="form-label" for="set-hf-ban">401/403 单次封禁（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-hf-ban" title="秒">401/403 单次封禁 · 秒</label>
               <input type="number" min="1" class="form-control form-control-sm" id="set-hf-ban"></div>
             <div class="col-md-3"><label class="form-label" for="set-hf-cnt">401/403 累计次数 → 封 1 天</label>
               <input type="number" min="1" class="form-control form-control-sm" id="set-hf-cnt"></div>
@@ -1020,7 +1020,7 @@ details.upgrp[open]{background:#fff}
         <div class="card-header"><i class="bi bi-list-check me-2 text-muted"></i>模型限制</div>
         <div class="card-body">
           <div class="row g-3">
-            <div class="col-md-6"><label class="form-label" for="set-mwl">全局白名单（空=不限）</label>
+            <div class="col-md-6"><label class="form-label" for="set-mwl" title="空=不限">全局白名单</label>
               <textarea class="form-control form-control-sm font-monospace" id="set-mwl" rows="3" placeholder="deepseek-ai/deepseek-v4-flash-0731&#10;meta/llama-3.3-70b-instruct"></textarea></div>
             <div class="col-md-6"><label class="form-label" for="set-mbl">全局黑名单</label>
               <textarea class="form-control form-control-sm font-monospace" id="set-mbl" rows="3" placeholder="模型ID，逗号或换行分隔"></textarea></div>
@@ -1034,7 +1034,7 @@ details.upgrp[open]{background:#fff}
             <div class="col-md-6 d-flex align-items-end pb-1">
               <div class="form-check form-switch">
                 <input class="form-check-input" type="checkbox" id="set-herr">
-                <label class="form-check-label small" for="set-herr">渠道报错只透传状态码（详情仅记日志）</label>
+                <label class="form-check-label small" for="set-herr" title="详情仅记日志">渠道报错只透传状态码</label>
               </div>
             </div>
             <div class="col-md-6 d-flex align-items-end pb-1">
@@ -1043,7 +1043,7 @@ details.upgrp[open]{background:#fff}
                 <label class="form-check-label small" for="set-mhide">模型改名后，原名在本渠道不可访问</label>
               </div>
             </div>
-            <div class="col-12"><label class="form-label" for="set-pover">全局固定参数（每行 参数=值，强制覆盖）</label>
+            <div class="col-12"><label class="form-label" for="set-pover" title="每行 参数=值，强制覆盖">全局固定参数</label>
               <textarea class="form-control form-control-sm font-monospace" id="set-pover" rows="2" placeholder="top_p=0.9&#10;top_k=1"></textarea></div>
           </div>
         </div>
@@ -1052,21 +1052,21 @@ details.upgrp[open]{background:#fff}
         <div class="card-header"><i class="bi bi-activity me-2 text-muted"></i>防风控与熔断</div>
         <div class="card-body">
           <div class="row g-3">
-            <div class="col-md-3"><label class="form-label" for="set-c429">429 限流冷却（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-c429" title="秒">429 限流冷却 · 秒</label>
               <input type="number" min="5" class="form-control form-control-sm" id="set-c429"></div>
-            <div class="col-md-3"><label class="form-label" for="set-c5xx">上游 5xx 冷却（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-c5xx" title="秒">上游 5xx 冷却 · 秒</label>
               <input type="number" min="5" class="form-control form-control-sm" id="set-c5xx"></div>
-            <div class="col-md-3"><label class="form-label" for="set-cto">上游超时冷却（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-cto" title="秒">上游超时冷却 · 秒</label>
               <input type="number" min="5" class="form-control form-control-sm" id="set-cto"></div>
-            <div class="col-md-3"><label class="form-label" for="set-ccn">连接失败冷却（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-ccn" title="秒">连接失败冷却 · 秒</label>
               <input type="number" min="5" class="form-control form-control-sm" id="set-ccn"></div>
-            <div class="col-md-3"><label class="form-label" for="set-bth">熔断阈值（同模型连续失败）</label>
+            <div class="col-md-3"><label class="form-label" for="set-bth" title="同模型连续失败">熔断阈值</label>
               <input type="number" min="1" class="form-control form-control-sm" id="set-bth"></div>
-            <div class="col-md-3"><label class="form-label" for="set-bsec">熔断持续（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-bsec" title="秒">熔断持续 · 秒</label>
               <input type="number" min="5" class="form-control form-control-sm" id="set-bsec"></div>
-            <div class="col-md-3"><label class="form-label" for="set-ttfb">首字节超时（秒，0=不限）</label>
+            <div class="col-md-3"><label class="form-label" for="set-ttfb" title="秒，0=不限">首字节超时</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-ttfb"></div>
-            <div class="col-md-3"><label class="form-label" for="set-sidle">流式空闲超时（秒）</label>
+            <div class="col-md-3"><label class="form-label" for="set-sidle" title="秒">流式空闲超时 · 秒</label>
               <input type="number" min="10" class="form-control form-control-sm" id="set-sidle"></div>
             <div class="col-md-3"><label class="form-label" for="set-poolconns">上游连接池上限</label>
               <input type="number" min="50" class="form-control form-control-sm" id="set-poolconns"></div>
@@ -1114,7 +1114,7 @@ details.upgrp[open]{background:#fff}
               <input type="text" class="form-control form-control-sm" id="set-smtp-user"></div>
             <div class="col-md-6"><label class="form-label" for="set-smtp-pass">密码/授权码</label>
               <input type="password" class="form-control form-control-sm" id="set-smtp-pass"></div>
-            <div class="col-md-6"><label class="form-label" for="set-smtp-from">发件人地址（留空=同账号）</label>
+            <div class="col-md-6"><label class="form-label" for="set-smtp-from" title="留空=同账号">发件人地址</label>
               <input type="text" class="form-control form-control-sm" id="set-smtp-from"></div>
             <div class="col-md-6 d-flex align-items-end pb-1">
               <div class="form-check form-switch">
@@ -1122,9 +1122,9 @@ details.upgrp[open]{background:#fff}
                 <label class="form-check-label small" for="set-reg-email-enabled">开放邮箱注册</label>
               </div>
             </div>
-            <div class="col-12"><label class="form-label" for="set-reg-email-regex">邮箱注册正则（留空=不限，如 ^[\w.+-]+@(qq|163|gmail)\.com$）</label>
+            <div class="col-12"><label class="form-label" for="set-reg-email-regex" title="留空=不限，如 ^[\w.+-]+@(qq|163|gmail)\.com$">邮箱注册正则</label>
               <input type="text" class="form-control form-control-sm font-monospace" id="set-reg-email-regex"></div>
-            <div class="col-12"><label class="form-label" for="set-reg-email-error-msg">邮箱被拒时的提示文案（留空=默认提示）</label>
+            <div class="col-12"><label class="form-label" for="set-reg-email-error-msg" title="留空=默认提示">邮箱被拒时的提示文案</label>
               <input type="text" class="form-control form-control-sm" id="set-reg-email-error-msg" placeholder="该邮箱不在允许注册的范围内"></div>
           </div>
         </div>
@@ -1133,7 +1133,7 @@ details.upgrp[open]{background:#fff}
         <div class="card-header"><i class="bi bi-arrow-left-right me-2 text-muted"></i>配置同步</div>
         <div class="card-body">
           <div class="d-flex flex-wrap gap-2 align-items-center">
-            <a id="cfg-export" class="btn btn-sm btn-outline-primary" href="/api/config/export">导出配置（JSON）</a>
+            <a id="cfg-export" class="btn btn-sm btn-outline-primary" href="/api/config/export">导出配置</a>
             <input type="file" id="cfg-import-file" class="form-control form-control-sm" style="max-width:260px" accept=".json">
             <button id="cfg-import" class="btn btn-sm btn-outline-primary">导入配置</button>
             <span class="small text-muted" id="cfg-result"></span>
@@ -1157,9 +1157,9 @@ details.upgrp[open]{background:#fff}
                 <label class="form-check-label small" for="set-update">远程更新</label>
               </div>
             </div>
-            <div class="col-md-6"><label class="form-label" for="set-uachk">自动检查更新间隔（小时，0=关闭）</label>
+            <div class="col-md-6"><label class="form-label" for="set-uachk" title="小时，0=关闭">自动检查更新间隔</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-uachk"></div>
-            <div class="col-md-6"><label class="form-label" for="set-restart-h">定时重启间隔（小时，0=关闭）</label>
+            <div class="col-md-6"><label class="form-label" for="set-restart-h" title="小时，0=关闭">定时重启间隔</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-restart-h" value="0"></div>
             <div class="col-md-6"><label class="form-label" for="set-updtok">更新令牌</label>
               <div class="d-flex gap-2">
@@ -1170,17 +1170,17 @@ details.upgrp[open]{background:#fff}
             <div class="col-md-6 d-flex align-items-end">
               <button type="button" id="btn-update" class="btn btn-sm btn-outline-primary">检查更新</button>
             </div>
-            <div class="col-md-6"><label class="form-label" for="set-qwait">排队最长等待（秒）</label>
+            <div class="col-md-6"><label class="form-label" for="set-qwait" title="秒">排队最长等待 · 秒</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-qwait"></div>
-            <div class="col-md-6"><label class="form-label" for="set-qpoll">排队轮询间隔（毫秒）</label>
+            <div class="col-md-6"><label class="form-label" for="set-qpoll" title="毫秒">排队轮询间隔 · 毫秒</label>
               <input type="number" min="100" class="form-control form-control-sm" id="set-qpoll"></div>
-            <div class="col-md-6"><label class="form-label" for="set-mttl">模型不存在缓存（秒，0=关闭）</label>
+            <div class="col-md-6"><label class="form-label" for="set-mttl" title="秒，0=关闭">模型不存在缓存</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-mttl"></div>
-            <div class="col-md-6"><label class="form-label" for="set-smax">会话内容保留条数（0 关闭）</label>
+            <div class="col-md-6"><label class="form-label" for="set-smax" title="0 关闭">会话内容保留条数</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-smax" value="100"></div>
-            <div class="col-md-6"><label class="form-label" for="set-trmax">训练资料保留条数（0 关闭）</label>
+            <div class="col-md-6"><label class="form-label" for="set-trmax" title="0 关闭">训练资料保留条数</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-trmax" value="500"></div>
-            <div class="col-md-6"><label class="form-label" for="set-trmin">训练资料最小响应长度（0 不过滤）</label>
+            <div class="col-md-6"><label class="form-label" for="set-trmin" title="0 不过滤">训练资料最小响应长度</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-trmin" value="20"></div>
             <div class="col-md-6 d-flex align-items-end pb-1">
               <div class="form-check form-switch">
@@ -1190,7 +1190,7 @@ details.upgrp[open]{background:#fff}
             </div>
             <div class="col-md-6"><label class="form-label" for="set-watchmin">雪崩持续判定分钟数</label>
               <input type="number" min="1" class="form-control form-control-sm" id="set-watchmin"></div>
-            <div class="col-md-6"><label class="form-label" for="set-logmax">日志保留条数（0 关闭）</label>
+            <div class="col-md-6"><label class="form-label" for="set-logmax" title="0 关闭">日志保留条数</label>
               <input type="number" min="0" class="form-control form-control-sm" id="set-logmax"></div>
             <div class="col-md-6"><label class="form-label" for="set-intmax">拦截记录保留条数</label>
               <input type="number" min="1" class="form-control form-control-sm" id="set-intmax" value="100"></div>
@@ -1216,7 +1216,7 @@ details.upgrp[open]{background:#fff}
         <div class="card-body">
           <div class="row g-2">
             <div class="col-12"><input type="password" class="form-control form-control-sm" id="pwd-old" placeholder="当前密码"></div>
-            <div class="col-12"><input type="password" class="form-control form-control-sm" id="pwd-new" placeholder="新密码（≥6 位）"></div>
+            <div class="col-12"><input type="password" class="form-control form-control-sm" id="pwd-new" placeholder="新密码，至少 6 位"></div>
             <div class="col-12"><button id="pwd-btn" class="btn btn-sm btn-warning">修改</button></div>
           </div>
         </div>

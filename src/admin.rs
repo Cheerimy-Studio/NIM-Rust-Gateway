@@ -896,6 +896,28 @@ pub async fn settings_get(headers: &HeaderMap) -> Response {
     json_resp(cfg_without_secrets(&cfg))
 }
 
+fn validate_sign_settings(current: &Value, incoming: &Value) -> Result<(), String> {
+    if incoming.get("sign_min").is_none() && incoming.get("sign_max").is_none() { return Ok(()); }
+    let read = |key:&str,default:f64| {
+        let raw=incoming.get(key).or_else(|| current.get(key));
+        let n=util::f64_or(raw,default);
+        if !(0.000001..=1000.0).contains(&n) { return Err("签到金额须在 0.000001 至 1000 元之间".to_string()); }
+        Ok(util::round6(n))
+    };
+    let min=read("sign_min",0.001)?;
+    let max=read("sign_max",0.01)?;
+    // 显式无效值不能被当作缺省配置接受。
+    for key in ["sign_min","sign_max"] {
+        if let Some(raw)=incoming.get(key) {
+            if util::f64_or(Some(raw),-1.0) < 0.000001 || raw.is_boolean() {
+                return Err("签到金额格式错误".into());
+            }
+        }
+    }
+    if min > max { return Err("签到最小金额不能大于最大金额".into()); }
+    Ok(())
+}
+
 fn apply_settings(db: &mut Value, incoming: &Value, applied: &mut i64) {
     let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) else { return };
     for k in INT_SETTINGS {
@@ -1006,7 +1028,11 @@ pub async fn settings_save(headers: &HeaderMap, body: Bytes) -> Response {
             }
         }
     }
+    let mut validation_error=None;
     store().update(|db| {
+        if let Err(e)=validate_sign_settings(db.get("config").unwrap_or(&Value::Null),&incoming) {
+            validation_error=Some(e);return;
+        }
         let mut applied = 0;
         apply_settings(db, &incoming, &mut applied);
         // 保留条数改小时立即裁剪存量，而不是等下一次拦截才掉
@@ -1019,6 +1045,9 @@ pub async fn settings_save(headers: &HeaderMap, body: Bytes) -> Response {
             logs.truncate(cap.max(0) as usize);
         }
     });
+    if let Some(message)=validation_error {
+        return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":message}}))).into_response();
+    }
     store().flush();
     proxy::invalidate_cfg_cache();
     let cfg = store().load().get("config").cloned().unwrap_or(json!({}));
@@ -1613,7 +1642,11 @@ pub async fn config_import(headers: &HeaderMap, body: Bytes) -> Response {
         body_v.clone()
     };
     let mut applied: i64 = 0;
+    let mut validation_error=None;
     store().update(|db| {
+        if let Err(e)=validate_sign_settings(db.get("config").unwrap_or(&Value::Null),&incoming) {
+            validation_error=Some(e);return;
+        }
         apply_settings(db, &incoming, &mut applied);
         // config_import 的 gateway_tokens 走数组形式
         if let Some(gt) = incoming.get("gateway_tokens").and_then(|g| g.as_array()) {
@@ -1643,6 +1676,9 @@ pub async fn config_import(headers: &HeaderMap, body: Bytes) -> Response {
             }
         }
     });
+    if let Some(message)=validation_error {
+        return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":message}}))).into_response();
+    }
     store().flush();
     proxy::invalidate_cfg_cache();
     json_resp(json!({"ok": true, "applied": applied}))
@@ -2129,8 +2165,10 @@ pub async fn wheels_delete(headers: &HeaderMap, body: Bytes) -> Response {
             .into_response();
     };
     let id = util::str_or(body.get("id"), "");
-    let ok = crate::wheel::delete_wheel(&id);
-    json_resp(json!({"ok": ok}))
+    match crate::wheel::delete_wheel(&id) {
+        Ok(()) => json_resp(json!({"ok":true})),
+        Err(message) => (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":message}}))).into_response(),
+    }
 }
 
 /// GET /api/prize-keys?wheel=<id> — 奖品 Key 列表。
@@ -2173,7 +2211,7 @@ pub async fn prize_keys_op(headers: &HeaderMap, body: Bytes) -> Response {
             .into_response();
     }
     let mut ok = false;
-    store().update(|db| {
+    let persisted=store().reward_transaction(|db| {
         if let Some(a) = db.get_mut("prize_keys").and_then(|k| k.as_array_mut()) {
             if op == "delete" {
                 let before = a.len();
@@ -2191,8 +2229,13 @@ pub async fn prize_keys_op(headers: &HeaderMap, body: Bytes) -> Response {
                 }
             }
         }
+        if !ok { return Err("奖品 Key 不存在".into()); }
+        Ok(())
     });
-    json_resp(json!({"ok": ok}))
+    match persisted {
+        Ok(()) => json_resp(json!({"ok":true})),
+        Err(message) => (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":message}}))).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------- 用户资金/抽奖明细（管理端）
@@ -2262,4 +2305,15 @@ pub async fn user_draws_admin(headers: &HeaderMap, raw_query: Option<String>) ->
     }
     let (rows, total) = crate::users::user_draws_page(&id, page, per);
     json_resp(json!({"rows": rows, "total": total, "per": per}))
+}
+
+#[cfg(test)]
+#[test]
+fn sign_settings_reject_invalid_and_inverted_ranges() {
+    let current=json!({"sign_min":0.001,"sign_max":0.01});
+    for incoming in [json!({"sign_min":0}),json!({"sign_max":"NaN"}),json!({"sign_min":true}),json!({"sign_min":0.02}),json!({"sign_max":1001}),json!({"sign_min":null})] {
+        assert!(validate_sign_settings(&current,&incoming).is_err(),"{incoming}");
+    }
+    assert!(validate_sign_settings(&current,&json!({"sign_min":0.000001,"sign_max":0.000001})).is_ok());
+    assert!(validate_sign_settings(&current,&json!({"sign_enabled":false})).is_ok());
 }

@@ -154,7 +154,7 @@ a{text-decoration:none}
 .modal-body .prize-line{display:flex;justify-content:space-between;padding:3px 0}
 .modal-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
 .type-chip{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px}
-/* ── 抽奖结果：星空 + 票据卡（仿 ZCode Trust Build 风） ── */
+/* ── 抽奖结果弹窗 ── */
 .prize-overlay{position:fixed;inset:0;z-index:4000;display:none;align-items:center;justify-content:center;
   background:radial-gradient(1200px 600px at 50% -10%,#16264d 0%,transparent 60%),
              radial-gradient(900px 500px at 85% 110%,#12224a 0%,transparent 55%),
@@ -203,7 +203,7 @@ a{text-decoration:none}
 .pbtn.primary{background:#fff;color:#111827;border-color:#fff}
 .pbtn.primary:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(255,255,255,.22)}
 .prize-card.lost .prize-tag{color:#98a3b8}
-/* 拉人活动（PDD 红金风） */
+/* 邀请活动 */
 .promo-hero{border-radius:16px;padding:22px 22px 18px;color:#fff;
   background:radial-gradient(600px 300px at 80% -20%,#ffb75e 0%,transparent 55%),
              linear-gradient(150deg,#e0452c 0%,#c81e1e 60%,#a31212 100%);
@@ -420,7 +420,7 @@ body{overflow-x:clip}
       <div class="text-center mt-3"><a href="javascript:void(0)" class="small text-muted" id="back-login-2">返回登录</a></div>
     </div>
     <div id="login-tab-reset" style="display:none">
-      <div class="mb-3"><label class="form-label small fw-semibold">设置新密码（至少 6 位）</label>
+      <div class="mb-3"><label class="form-label small fw-semibold">新密码，至少 6 位</label>
         <input class="form-control" id="reset-pass" type="password"></div>
       <button class="btn btn-primary" id="reset-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
         background:linear-gradient(135deg,#10b981,#059669)">重置密码</button>
@@ -513,7 +513,7 @@ body{overflow-x:clip}
 <div class="pane" id="pane-wheel">
   <div id="wheel-list-view">
     <h2 class="pane-title">抽奖活动</h2>
-    <div class="hint mb-3">消耗余额参与抽奖，优先扣赠金；余额奖品直接到账，体验卡 / 专属额度到「奖品中心」领取 Key。</div>
+    <div class="hint mb-3">抽奖优先使用赠金，余额奖品自动到账，奖品 Key 可在「奖品中心」查看。</div>
     <div class="row g-3" id="wheel-cards"></div>
   </div>
   <div id="wheel-detail-view" style="display:none">

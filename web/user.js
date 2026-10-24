@@ -27,8 +27,13 @@ async function api(path, opts = {}) {
   const res = await fetch('api/user/' + path, init);
   let data = null;
   try { data = await res.json(); } catch (e) { }
-  if (!res.ok) throw new Error((data && data.error && data.error.message) || ('HTTP ' + res.status));
-  if (path === 'logout') userCsrfToken = '';
+  if (!res.ok) {
+    const error = new Error((data && data.error && data.error.message) || ('HTTP ' + res.status));
+    error.status = res.status;
+    throw error;
+  }
+  if (data === null) throw new Error('服务返回无效数据，请重试');
+  if (path === 'logout') { userCsrfToken = ''; clearTimeout(signTimer); }
   return data;
 }
 
@@ -114,10 +119,10 @@ function showPanel() {
 async function loadMe() {
   ME = await api('me');
   $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
-  $('#ov-grant').textContent = '¥' + (ME.grant ?? 0).toFixed(4);
-  $('#ov-grant-total').textContent = '¥' + (ME.grant_total ?? 0).toFixed(4);
-  $('#ov-recharge').textContent = '¥' + (ME.recharge ?? 0).toFixed(4);
-  $('#ov-recharge-total').textContent = '¥' + (ME.recharge_total ?? 0).toFixed(4);
+  $('#ov-grant').textContent = '¥' + rewardMoney(ME.grant);
+  $('#ov-grant-total').textContent = '¥' + rewardMoney(ME.grant_total);
+  $('#ov-recharge').textContent = '¥' + rewardMoney(ME.recharge);
+  $('#ov-recharge-total').textContent = '¥' + rewardMoney(ME.recharge_total);
   try {
     const s = await api('stats');
     $('#ov-calls').textContent = s.total_calls ?? 0;
@@ -145,34 +150,47 @@ async function loadMe() {
   loadSign();
 }
 
+function rewardMoney(amount) {
+  return Number(amount || 0).toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+}
+let signing = false;
+let signTimer = null;
 async function loadSign() {
+  clearTimeout(signTimer);
+  const box = $('#sign-box');
   try {
     const d = await api('sign');
-    if (!d.enabled) return;
-    $('#sign-box').style.removeProperty('display');
+    box.style.display = d.enabled ? '' : 'none';
+    if (d.enabled) signTimer = setTimeout(() => loadSign(), Math.min(86401, Math.max(1, d.reset_in || 86400)) * 1000 + 200);
     const btn = $('#btn-sign');
-    const hint = $('#sign-hint');
-    if (d.signed_today) {
-      btn.disabled = true;
-      btn.textContent = '已签到';
-      hint.textContent = '今日已领 ¥' + (d.today_amount ?? 0).toFixed(4);
-    } else {
-      btn.disabled = false;
-      btn.textContent = '签到';
-      hint.textContent = '每日签到领赠金';
-    }
-  } catch (e) { }
+    btn.disabled = signing || d.signed_today;
+    btn.textContent = d.signed_today ? '已签到' : '签到';
+    $('#sign-hint').textContent = d.signed_today
+      ? '今日已领 ¥' + rewardMoney(d.today_amount) : '每日签到领赠金';
+  } catch (e) { box.style.display = 'none'; }
 }
 
 $('#btn-sign').onclick = () => run(async () => {
-  const d = await api('sign', {method: 'POST'});
-  toast('签到成功，赠金 +¥' + (d.amount ?? 0).toFixed(4));
+  if (signing) return;
+  signing = true;
+  $('#btn-sign').disabled = true;
+  try {
+    const d = await api('sign', {method: 'POST'});
+    toast('签到成功，赠金 +¥' + rewardMoney(d.amount));
+    await refreshWallet();
+  } finally {
+    signing = false;
+    await loadSign();
+  }
+});
+
+async function refreshWallet() {
   ME = await api('me');
   $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
-  $('#ov-grant').textContent = '¥' + (ME.grant ?? 0).toFixed(4);
-  $('#ov-grant-total').textContent = '¥' + (ME.grant_total ?? 0).toFixed(4);
-  loadSign();
-});
+  for (const name of ['grant','grant_total','recharge','recharge_total']) {
+    $('#ov-' + name.replace('_','-')).textContent = '¥' + rewardMoney(ME[name]);
+  }
+}
 
 async function loadKeys() {
   const rows = (await api('keys')).rows || [];
@@ -1006,7 +1024,7 @@ const PRIZE_TYPE_NAMES = {
 let WHEELS = [];
 
 function prizeDesc(p) {
-  const amt = (p.amount ?? 0).toFixed(4);
+  const amt = rewardMoney(p.amount);
   if (p.type === 'recharge') return '充值余额 ¥' + amt;
   if (p.type === 'grant') return '赠金 ¥' + amt;
   if (p.type === 'model_unlimited') {
@@ -1044,7 +1062,7 @@ async function loadWheels() {
       + '<div class="d-flex justify-content-between align-items-center mb-2">'
       + '<span class="fw-semibold fs-6">' + esc(w.name) + '</span>'
       + '<span class="badge bg-dark-subtle text-dark">' + (w.cost > 0 ? '¥' + w.cost + ' / 次' : '免费') + '</span></div>'
-      + '<div class="small text-muted mb-2">奖品 ' + (w.prizes?.length ?? 0) + ' 项 · 概率合计 100%</div>'
+      + '<div class="small text-muted mb-2">' + (w.prizes?.length ?? 0) + ' 项奖品</div>'
       + '<div>' + top + ((w.prizes?.length ?? 0) > 3 ? '<span class="small text-muted">等 ' + w.prizes.length + ' 项</span>' : '') + '</div>'
       + '<div class="small text-primary mt-2">进入活动 →</div>'
       + '</div></div>';
@@ -1054,6 +1072,7 @@ async function loadWheels() {
 }
 
 function openWheelDetail(w) {
+  if (drawing) return;
   $('#wheel-list-view').style.display = 'none';
   $('#wheel-detail-view').style.display = 'block';
   $('#wd-name').textContent = w.name;
@@ -1086,19 +1105,20 @@ function openWheelDetail(w) {
       : 'rotate(' + mid + 'deg) translateY(-99px) translateX(-50%)';
     disc.appendChild(lbl);
   }
-  // 奖项表：概率 = 展示权重占比（后端已按占比归一化）
+  // 奖项表使用实际中奖概率；盘面布局使用 percent。
   const tb = $('#wd-prizes');
   tb.innerHTML = '';
   for (const p of (w.prizes || [])) {
     const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
-    const pct = p.percent ?? 0;
+    const pct = p.chance ?? p.percent ?? 0;
+    const chanceText = pct > 0 && pct < 0.000001 ? '<0.000001' : rewardMoney(pct);
     const tr = document.createElement('tr');
     tr.innerHTML = '<td class="text-nowrap"><span class="type-chip ' + c.chip + ' me-2" style="width:12px">&nbsp;</span>' + esc(p.label) + '</td>'
       + '<td class="small text-nowrap">' + esc(PRIZE_TYPE_NAMES[p.type] || p.type) + '</td>'
       + '<td class="small" style="color:var(--mut)">' + prizeDesc(p) + '</td>'
       + '<td class="text-end text-nowrap"><div class="d-flex align-items-center justify-content-end gap-2">'
       + '<div class="prob-bar"><div class="prob-fill" style="width:' + pct + '%"></div></div>'
-      + '<span class="fw-semibold" style="min-width:46px;display:inline-block;text-align:right">' + pct + '%</span></div></td>';
+      + '<span class="fw-semibold" style="min-width:46px;display:inline-block;text-align:right">' + esc(chanceText) + '%</span></div></td>';
     tb.appendChild(tr);
   }
   const btn = $('#wd-draw');
@@ -1107,6 +1127,7 @@ function openWheelDetail(w) {
 }
 
 function backToWheelList() {
+  if (drawing) return;
   $('#wheel-detail-view').style.display = 'none';
   $('#wheel-list-view').style.display = 'block';
 }
@@ -1116,8 +1137,7 @@ function wheelModal(title, bodyHtml, okText, onCancel) {
   $('#wheel-modal-title').textContent = title;
   $('#wheel-modal-body').innerHTML = bodyHtml;
   $('#wheel-modal-ok').textContent = okText;
-  // 每次打开必须重置 OK 处理器：否则残留上一次的 onclick（如 confirmDraw 的
-  // 「关闭并再抽一次」），结果弹窗点「收下」会莫名再抽一次
+  // 清除上次弹窗的确认操作。
   $('#wheel-modal-ok').onclick = () => { $('#wheel-modal').style.display = 'none'; };
   const mask = $('#wheel-modal');
   mask.style.display = 'flex';
@@ -1143,65 +1163,86 @@ function confirmDraw(w, btn) {
   };
 }
 
+// 未收到确定结果时保留请求 ID，重试只取原回执。
+let pendingDraw = null;
+try { pendingDraw = JSON.parse(sessionStorage.getItem('pendingDraw') || 'null'); } catch (e) { }
+function savePendingDraw(value) {
+  pendingDraw = value;
+  try {
+    if (value) sessionStorage.setItem('pendingDraw', JSON.stringify(value));
+    else sessionStorage.removeItem('pendingDraw');
+  } catch (e) { }
+}
+function newDrawId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, n => n.toString(16).padStart(2, '0')).join('');
+}
+
 async function doDraw(w, btn) {
+  if (drawing) return;
+  if (pendingDraw && pendingDraw.uid === ME?.id && pendingDraw.wheel_id !== w.id) {
+    toast('请先返回上次活动，重试以确认抽奖结果', 'danger');
+    return;
+  }
   drawing = true;
   btn.disabled = true;
+  $('#wheel-back').disabled = true;
   const disc = $('#wd-disc');
   const center = $('#wd-center');
   center.textContent = '…';
-  // 抽奖前刷新拉人活动状态：邀请次数以服务端为准，避免页面快照过期
-  PROMO = await api('promo').catch(() => PROMO);
-  const useCredit = !!(PROMO && (PROMO.events || []).some(e => e.joined && e.draw_credits > 0));
-  api('wheels/draw', {method: 'POST', json: {id: w.id, use_credit: useCredit}}).then(d => {
-    // 落点算法：指针在正上方(0°)，把中奖格中心转到指针下（含格内 ±30% 抖动）
-    const prizes = w.prizes || [];
-    let idx = prizes.findIndex(p => p.id === (d.prize && d.prize.id));
-    if (idx < 0) idx = 0;
-    let acc = 0, start = 0, pct = 0;
-    for (let i = 0; i < prizes.length; i++) {
-      const pp = prizes[i].percent ?? 0;
-      if (i === idx) { start = acc; pct = pp; break; }
-      acc += pp;
+  let finished = false;
+  let refreshActivity = false;
+  try {
+    if (!pendingDraw || pendingDraw.uid !== ME?.id) {
+      PROMO = await api('promo').catch(() => null);
+      const useCredit = !!(PROMO && (PROMO.events || []).some(e => e.joined && e.enabled && !e.expired && e.draw_credits > 0));
+      savePendingDraw({uid: ME?.id, wheel_id: w.id, request_id: newDrawId(), use_credit: useCredit, expected_cost: w.cost, requested_at: w.server_time || Math.floor(Date.now()/1000)});
     }
-    const jitter = (Math.random() - 0.5) * 0.6 * pct;
-    const finalDeg = 5 * 360 + (360 - (start + pct / 2 + jitter) * 3.6);
-    disc.style.transition = 'none';
-    disc.style.transform = 'rotate(0deg)';
-    void disc.offsetWidth;
-    disc.style.transition = 'transform 2.8s cubic-bezier(.15,.6,.2,1)';
-    disc.style.transform = 'rotate(' + finalDeg + 'deg)';
-    setTimeout(() => showDrawResult(d, w, btn), 2850);
-  }).catch(e => {
-    disc.style.transition = '';
-    disc.style.transform = '';
+    const d = await api('wheels/draw', {method:'POST', json:{id:w.id, request_id:pendingDraw.request_id,
+      use_credit:pendingDraw.use_credit, expected_cost:pendingDraw.expected_cost, requested_at:pendingDraw.requested_at}});
+    savePendingDraw(null);
+    const actual = d.wheel || w;
+    // 管理员可能在请求前改过奖项，按服务端本次快照绘制落点。
+    drawing = false;
+    openWheelDetail(actual);
+    drawing = true;
+    btn.disabled = true;
+    const prizes = actual.prizes || [];
+    const idx = prizes.findIndex(p => p.id === d.prize?.id);
+    if (idx >= 0) {
+      const start = prizes.slice(0,idx).reduce((sum,p) => sum + (p.percent || 0),0);
+      const pct = prizes[idx].percent || 0;
+      const jitter = (Math.random() - 0.5) * 0.6 * pct;
+      const finalDeg = 5 * 360 + (360 - (start + pct / 2 + jitter) * 3.6);
+      disc.style.transition = 'none';
+      disc.style.transform = 'rotate(0deg)';
+      void disc.offsetWidth;
+      disc.style.transition = 'transform 2.8s cubic-bezier(.15,.6,.2,1)';
+      disc.style.transform = 'rotate(' + finalDeg + 'deg)';
+      await new Promise(resolve => setTimeout(resolve,2850));
+    }
+    showPrizeModal(d,actual,btn);
+    finished = true;
+    run(refreshWallet);
+    run(loadPrizes);
+  } catch (e) {
+    // 明确的业务拒绝不会产生扣费；网络或服务器异常保留原 ID。
+    if (e.status === 400 || e.status === 402) savePendingDraw(null);
+    wheelModal('抽奖未完成', esc(e.message || '网络中断，请重试确认结果'), '关闭');
+    if (e.status === 400) refreshActivity = true;
+  } finally {
+    if (!finished) { disc.style.transition = ''; disc.style.transform = ''; }
     center.textContent = 'GO';
     drawing = false;
     btn.disabled = false;
-    wheelModal('抽奖失败', esc(e.message || '请求失败'), '知道了');
-  });
+    $('#wheel-back').disabled = false;
+    if (refreshActivity) { backToWheelList(); run(loadWheels); }
+  }
 }
 
-function showDrawResult(d, w, btn) {
-  const disc = $('#wd-disc');
-  disc.style.transition = '';
-  disc.style.transform = '';
-  $('#wd-center').textContent = 'GO';
-  drawing = false;
-  btn.disabled = false;
-  showPrizeModal(d, w, btn);
-  // 刷新钱包 + 奖品列表
-  run(async () => {
-    ME = await api('me');
-    $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
-    $('#ov-grant').textContent = '¥' + (ME.grant ?? 0).toFixed(4);
-    $('#ov-grant-total').textContent = '¥' + (ME.grant_total ?? 0).toFixed(4);
-    $('#ov-recharge').textContent = '¥' + (ME.recharge ?? 0).toFixed(4);
-    $('#ov-recharge-total').textContent = '¥' + (ME.recharge_total ?? 0).toFixed(4);
-  });
-  loadPrizes();
-}
+// 抽奖结果弹窗
 
-// 星空票据卡结果弹窗（仿 ZCode Trust Build 风）：星空底 + 飞光 + 白色票卡弹入
 let prizeStarsSeeded = false;
 
 function seedPrizeStars() {
@@ -1264,7 +1305,7 @@ function showPrizeModal(d, w, btn) {
   const valid = $('#prize-valid');
   amt.style.fontSize = '';
   if (p.type === 'recharge' || p.type === 'grant') {
-    const n = (p.amount ?? 0).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    const n = rewardMoney(p.amount);
     amt.innerHTML = '¥' + n;
     line.innerHTML = '<i class="bi bi-wallet2"></i>已存入' + (p.type === 'recharge' ? '充值' : '赠金') + '账本';
     valid.textContent = '资金即时到账 · 可在「概览」查看明细';
@@ -1283,8 +1324,8 @@ function showPrizeModal(d, w, btn) {
   } else {
     amt.innerHTML = '谢谢参与';
     amt.style.fontSize = '30px';
-    line.innerHTML = '<i class="bi bi-emoji-smile"></i>好运在下一抽';
-    valid.textContent = '感谢参与，再接再厉！';
+    line.innerHTML = '本次未中奖';
+    valid.textContent = '抽奖记录可在奖品中心查看';
   }
   $('#prize-title').textContent = won ? '「' + (p.label || '奖品') + '」领取成功' : '谢谢参与';
   const subTail = (p.type === 'model_unlimited' || p.type === 'model_quota')
@@ -1315,7 +1356,7 @@ async function loadPrizes() {
   for (const k of rows) {
     const tr = document.createElement('tr');
     const expired = k.expires_at > 0 && now >= k.expires_at;
-    const exhausted = k.quota > 0 && (k.used ?? 0) >= k.quota;
+    const exhausted = k.type === 'model_quota' && (k.used ?? 0) >= k.quota;
     const st = !k.enabled ? '<span class="badge bg-secondary">停用</span>'
       : expired ? '<span class="badge bg-danger">已过期</span>'
       : exhausted ? '<span class="badge bg-danger">已用尽</span>'
@@ -1323,7 +1364,7 @@ async function loadPrizes() {
     tr.innerHTML = '<td class="key-mono small">' + esc(k.key.slice(0, 14)) + '…</td>'
       + '<td class="small">' + (k.type === 'model_unlimited' ? '体验卡' : '专属额度') + '</td>'
       + '<td class="small mono">' + esc(k.model || '-') + '</td>'
-      + '<td class="small">' + (k.quota > 0 ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
+      + '<td class="small">' + (k.type === 'model_quota' ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
       + '<td class="small text-muted">' + (k.expires_at > 0 ? new Date(k.expires_at * 1000).toLocaleString() : '不限') + '</td>'
       + '<td>' + st + '</td>'
       + '<td class="text-end"></td>';

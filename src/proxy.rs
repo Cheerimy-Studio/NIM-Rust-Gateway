@@ -1241,7 +1241,6 @@ pub struct UserCtx {
 pub struct PrizeCtx {
     pub key: String,
     pub model: String,
-    pub concurrency: i64,
     pub metered: bool,
 }
 
@@ -1624,8 +1623,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     prize_ctx = Some(PrizeCtx {
                         key: b.clone(),
                         model: util::str_or(row.get("model"), ""),
-                        concurrency: util::int_or(row.get("concurrency"), 1),
-                        metered: util::f64_or(row.get("quota"), 0.0) > 0.0,
+                        metered: row.get("type").and_then(Value::as_str) == Some("model_quota"),
                     });
                 }
                 Err(e) => {
@@ -1701,10 +1699,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     let mut prize_guard: Option<PrizeGuard> = None;
     if let Some(pc) = &prize_ctx {
         // 模型锁定已在入口统一校验/改写（别名互通口径）
-        if !crate::wheel::prize_key_acquire(&pc.key, pc.concurrency) {
+        if let Err(message) = crate::wheel::prize_key_acquire(&pc.key) {
             return error_resp(
                 429,
-                &format!("该奖品 Key 并发已满（上限 {}），请稍后重试", pc.concurrency),
+                message,
                 "rate_limit_error",
                 None,
                 false,
@@ -1846,9 +1844,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
             let client = get_http(verify_tls, connect_to);
             let url = format!("{}/{}", upstreams::base_for(&key), wire_plan.upstream.path());
-            // 渠道开关「透传调用方 User-Agent」：开启时把下游客户端的 UA 原样
-            // 带给上游（默认关；关=不带 UA，保持既有行为）
-            // 开关挂在渠道（upstreams 行）上，pool key 行不携带该字段
+            // UA 透传由渠道配置控制。
             let pass_ua = upstreams::get_upstream(&util::str_or(key.get("upstream_id"), ""))
                 .and_then(|u| u.get("pass_client_ua").cloned())
                 .map(|v| util::truthy(&v))
@@ -2649,8 +2645,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     prize_ctx = Some(PrizeCtx {
                         key: b.clone(),
                         model: util::str_or(row.get("model"), ""),
-                        concurrency: util::int_or(row.get("concurrency"), 1),
-                        metered: util::f64_or(row.get("quota"), 0.0) > 0.0,
+                        metered: row.get("type").and_then(Value::as_str) == Some("model_quota"),
                     });
                 }
                 Err(e) => {
@@ -2747,10 +2742,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     let mut prize_guard: Option<PrizeGuard> = None;
     if let Some(pc) = &prize_ctx {
         // 模型锁定已在入口统一校验/改写（别名互通口径）
-        if !crate::wheel::prize_key_acquire(&pc.key, pc.concurrency) {
+        if let Err(message) = crate::wheel::prize_key_acquire(&pc.key) {
             return error_resp(
                 429,
-                &format!("该奖品 Key 并发已满（上限 {}），请稍后重试", pc.concurrency),
+                message,
                 "rate_limit_error",
                 None,
                 anthropic,
@@ -2887,9 +2882,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             let read_to = upstreams::override_for(&key, "request_timeout", util::cfg_int(&cfg, "request_timeout", 300));
             let client = get_http(verify_tls, connect_to);
             let url = format!("{}/{}", upstreams::base_for(&key), wire_plan.upstream.path());
-            // 渠道开关「透传调用方 User-Agent」：开启时把下游客户端的 UA 原样
-            // 带给上游（默认关；关=不带 UA，保持既有行为）
-            // 开关挂在渠道（upstreams 行）上，pool key 行不携带该字段
+            // UA 透传由渠道配置控制。
             let pass_ua = upstreams::get_upstream(&util::str_or(key.get("upstream_id"), ""))
                 .and_then(|u| u.get("pass_client_ua").cloned())
                 .map(|v| util::truthy(&v))
@@ -3741,6 +3734,8 @@ mod tests {
         gateway.abort();
         upstream_server.abort();
         crate::bridge::tests::gateway_matrix().await;
+        crate::store::reward_recovery_regressions();
+        crate::wheel::tests::reward_regressions();
         assert_eq!(pool::inflight_odd_releases(), odd_before);
         std::fs::remove_dir_all(dir).unwrap();
     }

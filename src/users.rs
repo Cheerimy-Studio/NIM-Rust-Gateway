@@ -253,8 +253,10 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
         // 欠款与充值记录是财务凭据，删除用户不应抹掉审计轨迹
         // （fund_logs 每用户上限 500 条，孤儿数据无害）
         if ok && op == "delete" {
-            if let Some(a) = db.get_mut("draw_logs").and_then(|l| l.as_array_mut()) {
-                a.retain(|r| util::str_or(r.get("user_id"), "") != user_id);
+            for table in ["draw_logs","draw_receipts"] {
+                if let Some(a) = db.get_mut(table).and_then(Value::as_array_mut) {
+                    a.retain(|r| util::str_or(r.get("user_id"), "") != user_id);
+                }
             }
             if let Some(a) = db.get_mut("prize_keys").and_then(|k| k.as_array_mut()) {
                 a.retain(|k| util::str_or(k.get("user_id"), "") != user_id);
@@ -646,39 +648,35 @@ pub fn user_draws_page(user_id: &str, page: i64, per: usize) -> (Vec<Value>, i64
 
 // ---------------------------------------------------------------- 签到
 
-/// 签到记录存储：data/db/signs/ 下每天一个文件 sign_YYYY-MM-DD.json（按天分片，
-/// 只存当天记录；过期文件可整删）。注意：仅允许在 store().update() 闭包内调用。
-pub fn sign_store_set(day: &str, user_id: &str, amount: f64) -> bool {
-    let dir = crate::store::signs_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return false;
-    }
-    let f = dir.join(format!("sign_{}.json", day));
-    let mut doc: Value = std::fs::read_to_string(&f)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    if let Some(o) = doc.as_object_mut() {
-        o.insert(user_id.to_string(), json!(util::round6(amount)));
-    }
-    // 写盘失败（磁盘满/权限）必须让调用方放弃入账：否则签到记录缺失，
-    // 用户可以反复签到重复领奖
-    let tmp = f.with_extension("json.tmp");
-    match std::fs::write(&tmp, serde_json::to_string(&doc).unwrap_or_default()) {
-        Ok(()) => std::fs::rename(&tmp, &f).is_ok(),
-        Err(_) => false,
+/// 兼容旧版每日文件。读取失败不能当作未签到，否则损坏文件会允许重复领奖。
+fn legacy_sign_get(day: &str, user_id: &str) -> Result<Option<f64>, String> {
+    let f = crate::store::signs_dir().join(format!("sign_{}.json", day));
+    let raw = match std::fs::read(f) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("签到记录读取失败，请联系管理员".into()),
+    };
+    let doc: Value = serde_json::from_slice(&raw).map_err(|_| "签到记录损坏，请联系管理员")?;
+    let obj = doc.as_object().ok_or("签到记录格式错误，请联系管理员")?;
+    match obj.get(user_id) {
+        None => Ok(None),
+        Some(v) => v.as_f64().filter(|a| a.is_finite() && *a >= 0.0).map(Some).ok_or_else(|| "签到金额记录无效，请联系管理员".into()),
     }
 }
 
-pub fn sign_store_get(day: &str, user_id: &str) -> Option<f64> {
-    let f = crate::store::signs_dir().join(format!("sign_{}.json", day));
-    let doc: Value = std::fs::read_to_string(&f).ok().and_then(|s| serde_json::from_str(&s).ok())?;
-    doc.get(user_id).and_then(|v| v.as_f64())
+/// 新签到标记和奖励保存在同一用户行；旧每日文件保持只读兼容。
+pub fn sign_record(db: &Value, uid: &str, day: &str) -> Result<Option<f64>, String> {
+    let user = db.get("users").and_then(Value::as_array).and_then(|a| a.iter().find(|u| u["id"] == uid)).ok_or("用户不存在")?;
+    let last_day = util::str_or(user.get("last_sign_day"), "");
+    if last_day.as_str() >= day {
+        return Ok(Some(util::f64_or(user.get("last_sign_amount"), 0.0)));
+    }
+    legacy_sign_get(day,uid)
 }
 
 /// 签到设置（config）：sign_enabled 默认关；sign_min/sign_max 默认 0.001/0.01。
 pub fn sign_config(cfg: &Value) -> (bool, f64, f64) {
-    let enabled = util::truthy(cfg.get("sign_enabled").unwrap_or(&Value::Bool(false)));
+    let enabled = cfg.get("sign_enabled").map(util::as_bool2).unwrap_or(false);
     let min = util::f64_or(cfg.get("sign_min"), 0.001).clamp(0.000001, 1000.0);
     let max = util::f64_or(cfg.get("sign_max"), 0.01).clamp(min, 1000.0);
     (enabled, min, max)
@@ -687,59 +685,25 @@ pub fn sign_config(cfg: &Value) -> (bool, f64, f64) {
 /// 用户签到：一天一次（按网关本地日），金额 = min..max 随机（6 位小数量化）入赠金账本。
 /// 返回 (ok, 消息, 金额)。
 pub fn sign_today(uid: &str) -> (bool, String, f64) {
-    let cfg_v = store().load();
-    let cfg = cfg_v.get("config").cloned().unwrap_or(json!({}));
-    let (enabled, min, max) = sign_config(&cfg);
-    if !enabled {
-        return (false, "签到未开启".into(), 0.0);
-    }
-    if get_user_by_id(uid).is_none() {
-        return (false, "用户不存在".into(), 0.0);
-    }
-    let day = crate::util::local_day(crate::util::now_i());
-    let span = (max - min).max(0.0);
-    let raw = min + rand::Rng::gen::<f64>(&mut rand::thread_rng()) * span;
-    let amount = util::round6(raw).clamp(0.000001, 1000.0);
-    // 查重、入账、落签到记录必须在同一个串行化临界区（store 互斥锁）里完成：
-    // 签到记录是独立文件，若在锁外查重/落盘，并发请求可重复领奖（先查后写的竞态）
-    let mut already = false;
-    let mut missing = false;
-    let mut credited = false;
-    store().update(|db| {
-        if sign_store_get(&day, uid).is_some() {
-            already = true;
-            return;
-        }
-        // 必须先落签到记录再入账：顺序反了的话，写盘失败时 credit 已进 memo
-        // 且必然落盘，用户重试一次就多发一次奖励，且这些入账完全没有流水。
-        // 记录成功而 credit 只在 memo 的情况：崩溃丢失一次签到额，可接受
-        if !sign_store_set(&day, uid, amount) {
-            return; // 写盘失败：整单放弃，用户可重试
-        }
-        let mut ok = false;
-        users_mut(db, |arr| {
-            if let Some(u) = find_user_mut(arr, uid) {
-                credit(u, "grant", amount);
-                ok = true;
-            }
-        });
-        if ok {
-            fund_log(db, uid, "sign", amount, 0.0, "每日签到");
-            credited = true;
-        } else {
-            // 用户不存在：记录已落盘，按已签到收口，避免悬空记录被反复重试
-            missing = true;
-        }
+    let result = store().reward_transaction(|db| {
+        let (enabled,min,max) = sign_config(db.get("config").unwrap_or(&Value::Null));
+        if !enabled { return Err("签到未开启".into()); }
+        let day = crate::util::local_day(crate::util::now_i());
+        let index = db.get("users").and_then(Value::as_array).and_then(|a| a.iter().position(|u|
+            u["id"] == uid && u.get("enabled").map(util::truthy).unwrap_or(false))).ok_or("用户不存在或已停用")?;
+        if sign_record(db,uid,&day)?.is_some() { return Err("今天已经签到过了".into()); }
+        // 以整数微元抽样，使配置两端都可取得，不受浮点量化边界影响。
+        let lo = (min * 1_000_000.0).round() as i64;
+        let hi = (max * 1_000_000.0).round() as i64;
+        let amount = rand::Rng::gen_range(&mut rand::thread_rng(), lo..=hi) as f64 / 1_000_000.0;
+        let user = &mut db["users"][index];
+        credit(user,"grant",amount);
+        user["last_sign_day"] = json!(day);
+        user["last_sign_amount"] = json!(amount);
+        fund_log(db,uid,"sign",amount,0.0,"每日签到");
+        Ok(amount)
     });
-    if !credited {
-        let msg = match (already, missing) {
-            (true, _) => "今天已经签到过了",
-            (_, true) => "用户不存在",
-            _ => "签到记录写入失败，请稍后重试",
-        };
-        return (false, msg.to_string(), 0.0);
-    }
-    (true, "签到成功".into(), amount)
+    match result { Ok(amount) => (true,"签到成功".into(),amount), Err(e) => (false,e,0.0) }
 }
 
 // ---------------------------------------------------------------- 邮箱注册与找回

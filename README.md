@@ -76,8 +76,9 @@ data/db/intercepted.json  拦截记录
 data/db/queue.json        排队
 data/db/metrics.json      统计、限速窗口、熔断与负缓存
 data/db/users.json        用户、调用 Key、调用日志、限速窗口
-data/db/wheels.json       抽奖活动、奖品 Key、抽奖记录
-data/db/signs/            签到记录（每天一个文件）
+data/db/wheels.json       抽奖活动、奖品 Key、抽奖记录、幂等回执
+data/db/signs/            旧版每日签到记录，新签到标记与余额同存 users.json
+data/db/reward_journal.json 奖励事务恢复日志，仅在提交与写回之间存在
 ```
 
 从旧版单文件升级：首次启动自动拆分迁移，原 `db.json` 改名 `db.json.migrated` 留存。
@@ -87,6 +88,7 @@ data/db/signs/            签到记录（每天一个文件）
 
 ```bash
 cargo test --locked --all-targets
+node tests/frontend-rewards.cjs
 ```
 
 测试覆盖跨网络分块的 UTF-8 / CRLF、工具调用转换、异常断流、真实 usage、
@@ -153,3 +155,17 @@ GET  /queue                    公开排队页
 ## 许可
 
 [AGPL-3.0](LICENSE)
+
+## 签到与抽奖
+
+签到标记、赠金和流水在同一奖励事务内提交；抽奖的扣费、发奖、抵扣次数与回执也统一提交。
+提交日志在分表写回前同步落盘，异常退出后先恢复未完成事务。旧版每日签到文件继续读取，损坏时拒绝领奖。
+日期按服务进程本地时区计算；使用北京时间时设置 `TZ=Asia/Shanghai`。
+
+抽奖请求可携带 `request_id`、`requested_at` 和 `expected_cost`。网页自动填写这些字段：
+同一用户的重复 ID 返回原回执，确认价格变化时拒绝扣费。回执保留最近 24 小时内最多 100 条；
+带请求时间的过期或已归档请求会拒绝重新抽取，避免网络重试再次扣费。自建客户端应保留同一 ID 和原请求时间重试。
+未提供这些字段的旧客户端仍可调用，但没有完整的重试与价格确认保护。
+
+用户端显示实际中奖概率，扇区大小仍由展示权重控制。奖品次数必须为正整数；有效时长、金额和权重会在保存时校验。
+奖品 Key 的在途请求预留剩余次数，失败释放，仅成功消耗额度。详细修复和兼容说明见 `docs/REWARDS-REVIEW-2026-10-18.md`。
