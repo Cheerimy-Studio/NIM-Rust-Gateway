@@ -88,7 +88,27 @@ function showLogin() {
   $('#login-view').style.display = 'flex';
   $('#panel-view').style.display = 'none';
   showLoginTab('main');
+  maybeShowNotice();
 }
+
+// 使用须知：登录/注册前先弹一次（同一浏览器确认过就不再打扰）
+function maybeShowNotice() {
+  const mask = document.getElementById('notice-mask');
+  if (!mask) return;
+  let seen = false;
+  try { seen = localStorage.getItem('yz-notice-ok') === '1'; } catch (e) { }
+  if (seen) return;
+  mask.style.display = 'flex';
+}
+(function bindNotice() {
+  const mask = document.getElementById('notice-mask');
+  if (!mask) return;
+  const go = document.getElementById('notice-go');
+  if (go) go.onclick = () => {
+    try { localStorage.setItem('yz-notice-ok', '1'); } catch (e) { }
+    mask.style.display = 'none';
+  };
+})();
 
 function showLoginTab(tab) {
   for (const t of ['main', 'register', 'forgot', 'reset']) {

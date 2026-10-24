@@ -103,6 +103,23 @@ a{text-decoration:none}
 .login-title{text-align:center;font-size:17px;font-weight:700;color:#1c2536;margin-bottom:4px}
 .login-sub{text-align:center;font-size:11px;color:#98a3b8;letter-spacing:1.6px;text-transform:uppercase;margin-bottom:22px}
 .login-err{display:none;color:#dc2626;font-size:13px;margin-bottom:10px}
+.notice-mask{display:none;position:fixed;inset:0;z-index:2000;background:rgba(4,10,22,.62);
+  backdrop-filter:blur(3px);align-items:center;justify-content:center;padding:20px}
+.notice-card{width:100%;max-width:420px;border-radius:16px;padding:30px 28px 24px;background:#fff;
+  box-shadow:0 28px 80px rgba(2,8,20,.55)}
+.notice-title{text-align:center;font-size:16px;font-weight:700;color:#1c2536;margin-bottom:18px;
+  letter-spacing:6px;text-indent:6px}
+.notice-body{font-size:13.5px;color:#3d4a5f;line-height:1.9}
+.notice-body p{margin:0 0 12px}
+.notice-body ul{margin:0 0 12px;padding-left:1.2em}
+.notice-body li{margin-bottom:6px}
+.notice-body strong{color:#1c2536}
+.notice-foot{font-size:12px;color:#8a94a6;margin:14px 0 18px;text-align:center}
+.notice-go{width:100%;border:none;border-radius:10px;padding:.6rem;font-size:14px;font-weight:600;color:#fff;
+  background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35);cursor:pointer}
+.notice-go:hover{filter:brightness(1.05)}
+.notice-leave{display:block;text-align:center;margin-top:12px;font-size:12.5px;color:#98a3b8;text-decoration:none}
+.notice-leave:hover{color:#64748b}
 @media(max-width:860px){
   .layout{flex-direction:column}
   .sidebar{width:100%;height:auto;position:static}
@@ -383,7 +400,7 @@ body{overflow-x:clip}
   <div class="login-card">
     <div class="login-mark">言</div>
     <div class="login-title">言灵中转</div>
-    <div class="login-sub">用户中心 · USER PORTAL</div>
+    <div class="login-sub">用户中心</div>
     <div class="login-err" id="login-err"></div>
     <div id="login-tab-main">
       <div class="mb-3"><label class="form-label small fw-semibold">账号 / 邮箱</label>
@@ -428,6 +445,23 @@ body{overflow-x:clip}
   </div>
 </div>
 
+<div class="notice-mask" id="notice-mask">
+  <div class="notice-card">
+    <div class="notice-title">使用须知</div>
+    <div class="notice-body">
+      <p>这里是 <strong>NIM-Rust-Gateway 的内部压测环境</strong>，不对外提供服务。</p>
+      <ul>
+        <li>数据随时可能清空，别在这里存放任何重要内容</li>
+        <li>仅限受邀人员使用，没收到邀请请不要注册、不要调用</li>
+        <li>接口与额度只用于压测验证，别拿去跑生产业务</li>
+        <li>地址不要外传</li>
+      </ul>
+      <p>点「继续」即视为已知悉上述内容。</p>
+    </div>
+    <button class="notice-go" id="notice-go">继续</button>
+    <a class="notice-leave" href="/">离开</a>
+  </div>
+</div>
 <div id="panel-view" style="display:none">
 <div class="layout">
 <aside class="sidebar">
