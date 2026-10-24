@@ -580,12 +580,16 @@ pub fn anthropic_to_chat(req: &Value) -> Result<Value, String> {
                         return Err(format!("协议适配不支持 Messages 内容块 {}；不会丢弃内容历史", t));
                     }
                     if t == "thinking" {
-                        // 带签名的思考历史：转成 chat 协议的 reasoning_content
-                        // 继续携带（signature 是 Anthropic 侧字段，chat 无对应形式）
-                        reasoning_parts.push(util::str_or(
-                            bo.get("thinking").filter(|x| !x.is_null()),
-                            "",
-                        ));
+                        // 带签名的思考历史：assistant 消息转成 chat 协议的
+                        // reasoning_content 继续携带（signature 是 Anthropic 侧
+                        // 字段，chat 无对应形式）；非 assistant 消息里出现
+                        // thinking 属协议违规，干净忽略（不半跟踪导致消息丢失）
+                        if role == "assistant" {
+                            reasoning_parts.push(util::str_or(
+                                bo.get("thinking").filter(|x| !x.is_null()),
+                                "",
+                            ));
+                        }
                         continue;
                     }
                     if t == "redacted_thinking" {

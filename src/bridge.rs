@@ -361,21 +361,10 @@ fn choice(req: &Value, anthropic: bool) -> Result<Option<Value>, String> {
 }
 fn response_request(req: &Value) -> Result<Value, String> {
     single_choice(req)?;
-    for field in [
-        "stop",
-        "seed",
-        "top_k",
-        "presence_penalty",
-        "frequency_penalty",
-        "logit_bias",
-    ] {
-        if req
-            .get(field)
-            .is_some_and(|v| !v.is_null() && v != &json!(0))
-        {
-            return Err(format!("Responses 上游不支持跨协议参数 {}", field));
-        }
-    }
+    // stop / seed / top_k / penalties / logit_bias 在 Responses 协议没有
+    // 对应字段：静默不携带（可选生成提示；Responses 也没有 stop 语义）。
+    // assistant 历史里的 reasoning_content 不携带：Responses 的 reasoning
+    // 项需要服务端加密内容，上游会重新推理。
     let mut input = Vec::new();
     for m in req
         .get("messages")
@@ -457,18 +446,12 @@ fn response_request(req: &Value) -> Result<Value, String> {
 }
 fn message_request(req: &Value) -> Result<Value, String> {
     single_choice(req)?;
-    for field in [
-        "response_format",
-        "reasoning_effort",
-        "seed",
-        "presence_penalty",
-        "frequency_penalty",
-        "logit_bias",
-    ] {
-        if req.get(field).is_some_and(|v| !v.is_null()) {
-            return Err(format!("Messages 上游不支持跨协议参数 {}", field));
-        }
-    }
+    // response_format / reasoning_effort / seed / penalties / logit_bias 在
+    // Messages 协议没有对应字段：静默不携带（都是可选生成提示，丢弃不破坏
+    // 请求语义）。此前对存在即硬 400 —— ZCode 恒注入 reasoning_effort，
+    // 会让整个 Messages 上游渠道不可用。
+    // assistant 历史里的 reasoning_content 同样不携带：Messages 的 thinking
+    // 块必须带服务端签名的 signature，无法在网关侧伪造；上游会重新推理。
     let mut messages: Vec<Value> = Vec::new();
     let mut system = Vec::new();
     for m in req
@@ -1316,6 +1299,39 @@ pub(crate) mod tests {
             reqwest::Response::from(axum::http::Response::new(reqwest::Body::from(vec![255])));
         assert!(read_text_limit(response, 16).await.is_err());
     }
+    #[test]
+    fn optional_generation_params_are_dropped_not_rejected_for_native_upstreams() {
+        // ZCode 恒注入 reasoning_effort：跨到 Messages / Responses 上游时
+        // 必须静默丢弃而不是 400（否则整个渠道不可用）
+        let chat = json!({
+            "model":"m","messages":[{"role":"user","content":"hi"}],
+            "stream":false,"max_tokens":100,
+            "reasoning_effort":"max","seed":7,
+            "presence_penalty":0.1,"frequency_penalty":0.2,"logit_bias":{"x":1},
+            "response_format":{"type":"text"},
+            "temperature":0.7,"stop":["a"],"top_k":5,
+        });
+        let (wire, plan) = Plan::prepare("chat/completions", "messages", &chat).unwrap();
+        assert_eq!(plan.upstream, Protocol::Messages);
+        for absent in ["reasoning_effort","seed","presence_penalty","frequency_penalty","logit_bias","response_format","stop"] {
+            assert!(wire.get(absent).is_none(), "{} should be dropped", absent);
+        }
+        assert_eq!(wire["temperature"], json!(0.7));
+        // top_k 是 Messages 原生字段，保留
+        assert_eq!(wire["top_k"], json!(5));
+        let (wire, plan) = Plan::prepare("chat/completions", "responses", &chat).unwrap();
+        assert_eq!(plan.upstream, Protocol::Responses);
+        for absent in ["stop","seed","top_k","presence_penalty","frequency_penalty","logit_bias"] {
+            assert!(wire.get(absent).is_none(), "{} should be dropped", absent);
+        }
+        // reasoning_effort 对 Responses 有原生承载（reasoning.effort），应保留
+        let (wire, _) = Plan::prepare("chat/completions", "responses", &json!({
+            "model":"m","messages":[{"role":"user","content":"hi"}],
+            "reasoning_effort":"high"
+        })).unwrap();
+        assert_eq!(wire["reasoning"]["effort"], "high");
+    }
+
     #[test]
     fn native_features_degrade_without_errors_and_cache_usage_roundtrips() {
         // 无 file_id 的输入文件/图片引用仍显式拒绝（无法转换内容本体）
