@@ -2020,10 +2020,21 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             take_account(ep_tag, &model, est, &cfg, &tok, &ctx.ip).await
         };
         if !taken.ok {
-            // 降级链：当前成员在所有渠道不可路由（404）且还有后续成员 → 推进
+            // 降级链：当前成员在所有渠道不可路由（404）且还有后续成员 → 推进。
+            // 先落一条失败日志再推进：管理员要在日志里看到每个成员为何被跳过
             if taken.status == 404 {
                 if let Some(c) = &chain {
                     if chain_pos + 1 < c.members.len() {
+                        pool::arelease(
+                            String::new(),
+                            false,
+                            taken.status,
+                            taken.message.clone(),
+                            None,
+                            Some(release_log(ep_tag, &model, taken.status, 0, &taken.message, attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
+                            0,
+                        )
+                        .await;
                         advance_member = true;
                         continue;
                     }
@@ -3139,10 +3150,20 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             take_account(ep, &model, est, &cfg, &tok, &ctx.ip).await
         };
         if !taken.ok {
-            // 降级链：当前成员不可路由且还有后续成员 → 推进
+            // 降级链：当前成员不可路由且还有后续成员 → 推进（先落日志再换）
             if taken.status == 404 {
                 if let Some(c) = &chain {
                     if chain_pos + 1 < c.members.len() {
+                        pool::arelease(
+                            String::new(),
+                            false,
+                            taken.status,
+                            taken.message.clone(),
+                            None,
+                            Some(release_log(ep, &model, taken.status, 0, &taken.message, attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
+                            0,
+                        )
+                        .await;
                         advance_member = true;
                         continue;
                     }
