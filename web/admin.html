@@ -529,7 +529,7 @@ details.upgrp[open]{background:#fff}
                 <button type="button" id="tdef-add" class="btn btn-sm btn-outline-primary">添加</button>
               </div>
               <div id="tdef-list" class="pover-list small"></div>
-            <div class="small text-muted mt-1">模型名支持子串匹配（如 <code>m3</code> 命中 <code>m3.1-flash</code>）或 <code>*</code> 通配。强度 <code>off</code> 剥离该模型的全部思考参数——上游不支持思考时选这个，省去 400 重试。未匹配的模型不做调整。</div>
+            <div class="small text-muted mt-1">模型名按完整名称精确匹配（下拉框选的就是完整模型名），也可用 <code>*</code> 通配兜底；未匹配的模型不做调整。强度 <code>off</code> 剥离该模型的全部思考参数——上游不支持思考时选这个，省去 400 重试。即使不配置，网关在 400 后也会自动剥离并记住该渠道+模型（6 小时），后续请求发送前直接生效。</div>
             </div>
           </div>
         </div>

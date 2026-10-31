@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 use tokio_stream::wrappers::ReceiverStream;
 
 const REGEX_SCAN_MAX: usize = 8000;
-const HB: f64 = 10.0; // 心跳间隔：必须远小于中间代理空闲超时（nginx 默认 60s）
+// 心跳间隔：必须远小于中间代理空闲超时（nginx 默认 60s、EdgeOne 实测约 10s）。
+// 5s 而不是 10s：腾讯 EdgeOne 对「10s 内无任何响应字节」直接返回 520，
+// 10s 心跳刚好卡在边界上，ZCode 流式请求会间歇性 520。
+const HB: f64 = 5.0;
 const QUEUE_POLL_MAX: f64 = 3.0;
 const QUEUE_MAX_WAITING: i64 = 200;
 static WAITING: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
@@ -48,6 +51,54 @@ fn waiting_dec(model: &str) {
 fn waiting_get(model: &str) -> i64 {
     let g = WAITING.lock().unwrap();
     g.as_ref().and_then(|m| m.get(model)).copied().unwrap_or(0)
+}
+
+/// 「该渠道 + 上游模型不接受思考参数」学习表：任一 400 自愈（剥离思考参数）
+/// 重试成功后记住，后续请求发送前直接剥离。否则 ZCode 每轮都注入
+/// enable_thinking/reasoning，每个请求都要先吃一次 400 再重试（m3.1-flash 实测）。
+/// 键 = upstream_id \0 上游模型名；值 = 过期时间（epoch 秒）。
+/// 只记成功样本，6 小时后自然过期，避免一次误判永久削掉思考能力。
+static THINKING_STRIP_LEARNED: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
+const THINKING_LEARN_TTL: i64 = 6 * 3600;
+const THINKING_LEARN_MAX: usize = 512;
+
+fn epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn thinking_key(key: &Value, up_model: &str) -> String {
+    format!("{}\u{0}{}", util::str_or(key.get("upstream_id"), ""), up_model)
+}
+
+fn thinking_strip_learned(key: &Value, up_model: &str) -> bool {
+    let mut g = THINKING_STRIP_LEARNED.lock().unwrap();
+    let Some(m) = g.as_mut() else { return false };
+    let k = thinking_key(key, up_model);
+    let now = epoch_secs();
+    match m.get(&k) {
+        Some(exp) if *exp > now => true,
+        Some(_) => {
+            m.remove(&k);
+            false
+        }
+        None => false,
+    }
+}
+
+fn learn_thinking_strip(composed: &str) {
+    let mut g = THINKING_STRIP_LEARNED.lock().unwrap();
+    let m = g.get_or_insert_with(HashMap::new);
+    let now = epoch_secs();
+    m.retain(|_, exp| *exp > now);
+    if m.len() >= THINKING_LEARN_MAX {
+        if let Some(k) = m.keys().next().cloned() {
+            m.remove(&k);
+        }
+    }
+    m.insert(composed.to_string(), now + THINKING_LEARN_TTL);
 }
 
 // ---------------------------------------------------------------- 配置缓存
@@ -2000,6 +2051,8 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     let mut last: Option<Value> = None;
     let mut last_key: Option<Value> = None;
     let mut downgraded = false;
+    // 本轮请求的「剥离思考参数能救」候选（渠道+模型）；重试成功才落学习表
+    let mut pending_learn: Option<String> = None;
     let mut reuse_key: Option<Value> = None;
     let mut same_key_tried: HashSet<String> = HashSet::new();
     let mut rl_left = util::cfg_int(&cfg, "max_retries", 2).max(1);
@@ -2091,7 +2144,12 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         let tdefs_pro = convert::parse_thinking_defaults(
             &upstreams::upstream_value(&key, "thinking_defaults", ""));
         if !tdefs_pro.is_empty() {
-            convert::downgrade_thinking(&mut routed_req, &model, &tdefs_pro);
+            convert::apply_thinking_default(&mut routed_req, &model, &tdefs_pro);
+        }
+        // 已学习过「该渠道+上游模型不吃思考参数」：发送前直接剥离，
+        // 省掉每轮 ZCode 请求都先吃一次 400 + 重试
+        if convert::has_thinking_params(&routed_req) && thinking_strip_learned(&key, &up_model) {
+            convert::strip_thinking_params(&mut routed_req);
         }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             endpoint, &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
@@ -2150,7 +2208,9 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 // 上游响应头可能几十秒不返回（推理模型实测 128s）：分片等待，
                 // 等不到就转「边发心跳边等响应头」的兜底流
                 let ttfb_cfg = util::cfg_int(&cfg, "ttfb_timeout", 0) as f64;
-                let commit_after = if ttfb_cfg <= 0.0 { 12.0 } else { 12.0_f64.min(ttfb_cfg) };
+                // 3s 就必须先提交 200 + 心跳：EdgeOne 等 CDN 约 10s 收不到
+                // 源站响应头就 520（ZCode 流式实测），原先 12s 兜底来不及
+                let commit_after = if ttfb_cfg <= 0.0 { 3.0 } else { 3.0_f64.min(ttfb_cfg) };
                 let fut2 = client.execute(built.unwrap());
                 let mut pinned = Box::pin(fut2);
                 let mut waited = 0.0;
@@ -2242,6 +2302,15 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         }
         let mut r = if stream { wire_plan.stream(got_resp.unwrap()) } else { got_resp.unwrap() };
         rstatus = r.status().as_u16() as i64;
+        // 上一轮「剥离思考参数」的重试结果：仍 400 = 假设不成立，撤销学习；
+        // 2xx = 剥离有效，记住该渠道+模型，后续请求发送前直接剥离
+        if rstatus == 400 {
+            pending_learn = None;
+        } else if (200..400).contains(&rstatus) {
+            if let Some(composed) = pending_learn.take() {
+                learn_thinking_strip(&composed);
+            }
+        }
         // 上游 Retry-After（秒）：尊重上游限速窗口——账号冷却取 max(指数, 上游值)
         let upstream_retry_after = r
             .headers()
@@ -2255,7 +2324,9 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             // 预读首帧：只为识别立即返回的 SSE 错误事件以便换号/降级重试。
             // 等一小段；上游推理慢时立刻转入心跳透传，绝不能把客户端干等几十秒。
             let ttfb_to = util::cfg_int(&cfg, "ttfb_timeout", 0) as f64;
-            let pre_to = if ttfb_to <= 0.0 { 8.0 } else { 8.0_f64.min(ttfb_to) };
+            // 首帧预读只用于抓「立即返回的 SSE 错误」：2s 足够。8s 会让
+            // 「上游响应头 3s + 预读 8s」超过 EdgeOne 的 10s 源站超时 → 520
+            let pre_to = if ttfb_to <= 0.0 { 2.0 } else { 2.0_f64.min(ttfb_to) };
             let mut first_chunk: Option<Bytes> = None;
             let mut pre_timed_out = false;
             let mut pre_err = String::new();
@@ -2352,6 +2423,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     }
                     let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
                     if convert::downgrade_thinking(&mut req, &model, &tdefs) {
+                        pending_learn = Some(thinking_key(&key, &up_model));
                         drop(r);
                         reuse_key = Some(key);
                         continue 'attempts;
@@ -2492,6 +2564,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             downgraded = true;
             let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
             if convert::downgrade_thinking(&mut req, &model, &tdefs) {
+                pending_learn = Some(thinking_key(&key, &up_model));
                 reuse_key = Some(key.clone());
                 continue;
             }
@@ -2505,7 +2578,27 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         }
         if rstatus == 400 && attempt < max_attempts && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
+            let had_think = convert::has_thinking_params(&req);
+            let think_err = {
+                let low = rbody.to_lowercase();
+                low.contains("thinking") || low.contains("reasoning")
+            };
             if convert::strip_unsupported_params(&mut req, &rbody) {
+                if had_think && think_err {
+                    pending_learn = Some(thinking_key(&key, &up_model));
+                }
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        // 上游 400 不点名参数（很多中转只回一句「请求参数错误」）：只要请求里
+        // 还带着思考参数，就做一次「剥离 + 原号重试」。ZCode 对 MiniMax 系列
+        // 每轮都注入 enable_thinking / reasoning，这是 m3.1-flash 必 400 的根因；
+        // 重试成功后会记住该渠道+模型，后续请求不再先吃一次 400。
+        if rstatus == 400 && attempt < max_attempts && !downgraded && convert::has_thinking_params(&req) {
+            downgraded = true;
+            if convert::strip_thinking_params(&mut req) {
+                pending_learn = Some(thinking_key(&key, &up_model));
                 reuse_key = Some(key.clone());
                 continue;
             }
@@ -3146,6 +3239,8 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     let mut last: Option<Value> = None;
     let mut last_key: Option<Value> = None;
     let mut downgraded = false;
+    // 本轮请求的「剥离思考参数能救」候选（渠道+模型）；重试成功才落学习表
+    let mut pending_learn: Option<String> = None;
     let mut reuse_key: Option<Value> = None;
     let mut same_key_tried: HashSet<String> = HashSet::new();
     let mut rl_left = util::cfg_int(&cfg, "max_retries", 2).max(1);
@@ -3230,7 +3325,11 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         let tdefs_pro = convert::parse_thinking_defaults(
             &upstreams::upstream_value(&key, "thinking_defaults", ""));
         if !tdefs_pro.is_empty() {
-            convert::downgrade_thinking(&mut routed_req, &model, &tdefs_pro);
+            convert::apply_thinking_default(&mut routed_req, &model, &tdefs_pro);
+        }
+        // 已学习过「该渠道+上游模型不吃思考参数」：发送前直接剥离
+        if convert::has_thinking_params(&routed_req) && thinking_strip_learned(&key, &up_model) {
+            convert::strip_thinking_params(&mut routed_req);
         }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             "chat/completions", &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
@@ -3287,7 +3386,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             }
             if stream && built.is_ok() {
                 let ttfb_cfg = util::cfg_int(&cfg, "ttfb_timeout", 0) as f64;
-                let commit_after = if ttfb_cfg <= 0.0 { 12.0 } else { 12.0_f64.min(ttfb_cfg) };
+                // 3s 就必须先提交 200 + 心跳：EdgeOne 等 CDN 约 10s 收不到
+                // 源站响应头就 520（ZCode 流式实测），原先 12s 兜底来不及
+                let commit_after = if ttfb_cfg <= 0.0 { 3.0 } else { 3.0_f64.min(ttfb_cfg) };
                 let fut2 = client.execute(built.unwrap());
                 let mut pinned = Box::pin(fut2);
                 let mut waited = 0.0;
@@ -3374,6 +3475,15 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         }
         let mut r = if stream { wire_plan.stream(got_resp.unwrap()) } else { got_resp.unwrap() };
         rstatus = r.status().as_u16() as i64;
+        // 上一轮「剥离思考参数」的重试结果：仍 400 = 假设不成立，撤销学习；
+        // 2xx = 剥离有效，记住该渠道+模型，后续请求发送前直接剥离
+        if rstatus == 400 {
+            pending_learn = None;
+        } else if (200..400).contains(&rstatus) {
+            if let Some(composed) = pending_learn.take() {
+                learn_thinking_strip(&composed);
+            }
+        }
         // 上游 Retry-After（秒）：尊重上游限速窗口——账号冷却取 max(指数, 上游值)
         let upstream_retry_after = r
             .headers()
@@ -3385,7 +3495,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             .unwrap_or(0);
         if stream && (200..400).contains(&rstatus) {
             let ttfb_to = util::cfg_int(&cfg, "ttfb_timeout", 0) as f64;
-            let pre_to = if ttfb_to <= 0.0 { 8.0 } else { 8.0_f64.min(ttfb_to) };
+            // 首帧预读只用于抓「立即返回的 SSE 错误」：2s 足够。8s 会让
+            // 「上游响应头 3s + 预读 8s」超过 EdgeOne 的 10s 源站超时 → 520
+            let pre_to = if ttfb_to <= 0.0 { 2.0 } else { 2.0_f64.min(ttfb_to) };
             let mut first_chunk: Option<Bytes> = None;
             let mut pre_timed_out = false;
             let pre_deadline = Instant::now() + Duration::from_secs_f64(pre_to);
@@ -3481,6 +3593,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     }
                     let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
                     if convert::downgrade_thinking(&mut chat_req, &model, &tdefs) {
+                        pending_learn = Some(thinking_key(&key, &up_model));
                         drop(r);
                         reuse_key = Some(key);
                         continue 'attempts;
@@ -3614,6 +3727,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             downgraded = true;
             let tdefs = convert::parse_thinking_defaults(&upstreams::upstream_value(&key, "thinking_defaults", ""));
             if convert::downgrade_thinking(&mut chat_req, &model, &tdefs) {
+                pending_learn = Some(thinking_key(&key, &up_model));
                 reuse_key = Some(key.clone());
                 continue;
             }
@@ -3627,7 +3741,24 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         }
         if rstatus == 400 && attempt < max_attempts && convert::is_unsupported_param_error(&rbody, rstatus) && !downgraded {
             downgraded = true;
+            let had_think = convert::has_thinking_params(&chat_req);
+            let think_err = {
+                let low = rbody.to_lowercase();
+                low.contains("thinking") || low.contains("reasoning")
+            };
             if convert::strip_unsupported_params(&mut chat_req, &rbody) {
+                if had_think && think_err {
+                    pending_learn = Some(thinking_key(&key, &up_model));
+                }
+                reuse_key = Some(key.clone());
+                continue;
+            }
+        }
+        // 上游 400 不点名参数：带思考参数就剥离一次再试（同 chat 直通）
+        if rstatus == 400 && attempt < max_attempts && !downgraded && convert::has_thinking_params(&chat_req) {
+            downgraded = true;
+            if convert::strip_thinking_params(&mut chat_req) {
+                pending_learn = Some(thinking_key(&key, &up_model));
                 reuse_key = Some(key.clone());
                 continue;
             }

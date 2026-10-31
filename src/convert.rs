@@ -937,80 +937,100 @@ const THINKING_DROP_KEYS: &[&str] = &[
 ];
 const THINKING_KWARG_KEYS: &[&str] = &["thinking", "enable_thinking", "clear_thinking"];
 
-/// 思考参数报错后自动降级。返回是否做了改动。
-pub fn downgrade_thinking(body: &mut Value, model: &str, defaults: &HashMap<String, String>) -> bool {
-    let Some(obj) = body.as_object_mut() else { return false };
+/// 匹配模型对应的默认思考强度：先精确匹配（后台下拉框选的就是完整模型名），
+/// 再 `*` 通配兜底。未命中返回 None。
+fn match_thinking_effort(model: &str, defaults: &HashMap<String, String>) -> Option<String> {
     let m = model.to_lowercase();
-    let mut default_effort: Option<&String> = None;
-    for (pat, eff) in defaults {
-        // 精确匹配（后台下拉框选的就是完整模型名）；`*` = 渠道级兜底
-        if pat == "*" || m == pat.as_str() {
-            default_effort = Some(eff);
-            break;
-        }
-    }
+    defaults.get(&m).cloned().or_else(|| defaults.get("*").cloned())
+}
+
+/// 剥离全部思考相关参数（含 chat_template_kwargs 内层）。返回是否做了改动。
+pub fn strip_thinking_params(body: &mut Value) -> bool {
+    let Some(obj) = body.as_object_mut() else { return false };
     let mut changed = false;
-    if let Some(eff) = default_effort {
-        if eff == "off" {
-            // off = 该上游/模型不支持思考参数：全部剥离（含 chat_template_kwargs）
-            for k in THINKING_DROP_KEYS {
-                if obj.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
-                    changed = true;
-                }
-            }
-            if obj.get("chat_template_kwargs").map(|v| v.is_object()).unwrap_or(false) {
-                let ctk = obj.get_mut("chat_template_kwargs").unwrap().as_object_mut().unwrap();
-                for k in THINKING_KWARG_KEYS {
-                    if ctk.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
-                        changed = true;
-                    }
-                }
-                if ctk.is_empty() {
-                    obj.remove("chat_template_kwargs");
-                }
-            }
-            return changed;
-        }
-        for k in EFFORT_KEYS {
-            if let Some(v) = obj.get_mut(*k) {
-                if util::str_or(Some(v), "") != *eff {
-                    *v = Value::from(eff.clone());
-                    changed = true;
-                }
-            }
-        }
-        if let Some(reasoning) = obj.get_mut("reasoning").and_then(|r| r.as_object_mut()) {
-            if let Some(e) = reasoning.get("effort").filter(|x| util::truthy(x)) {
-                if util::str_or(Some(e), "") != *eff {
-                    reasoning.insert("effort".into(), Value::from(eff.clone()));
-                    changed = true;
-                }
-            }
-        }
-        if !changed && !EFFORT_KEYS.iter().any(|k| obj.contains_key(*k)) {
-            obj.insert("reasoning_effort".into(), Value::from(eff.clone()));
+    for k in THINKING_DROP_KEYS {
+        if obj.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
             changed = true;
         }
-    } else {
-        for k in THINKING_DROP_KEYS {
-            if obj.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
+    }
+    if obj.get("chat_template_kwargs").map(|v| v.is_object()).unwrap_or(false) {
+        let ctk = obj.get_mut("chat_template_kwargs").unwrap().as_object_mut().unwrap();
+        for k in THINKING_KWARG_KEYS {
+            if ctk.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
                 changed = true;
             }
         }
-        let has_ctk = obj.get("chat_template_kwargs").map(|v| v.is_object()).unwrap_or(false);
-        if has_ctk {
-            let ctk = obj.get_mut("chat_template_kwargs").unwrap().as_object_mut().unwrap();
-            for k in THINKING_KWARG_KEYS {
-                if ctk.remove(*k).map(|v| !v.is_null()).unwrap_or(false) {
-                    changed = true;
-                }
-            }
-            if ctk.is_empty() {
-                obj.remove("chat_template_kwargs");
-            }
+        if ctk.is_empty() {
+            obj.remove("chat_template_kwargs");
         }
     }
     changed
+}
+
+/// 请求体里是否带着思考参数（400 后判断「剥离重试是否有意义」）。
+pub fn has_thinking_params(body: &Value) -> bool {
+    let Some(obj) = body.as_object() else { return false };
+    if THINKING_DROP_KEYS
+        .iter()
+        .any(|k| obj.get(*k).map(|v| !v.is_null()).unwrap_or(false))
+    {
+        return true;
+    }
+    obj.get("chat_template_kwargs")
+        .and_then(|v| v.as_object())
+        .map(|ctk| {
+            THINKING_KWARG_KEYS
+                .iter()
+                .any(|k| ctk.get(*k).map(|v| !v.is_null()).unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
+fn set_thinking_effort(body: &mut Value, eff: &str) -> bool {
+    if eff == "off" {
+        // off = 该上游/模型不支持思考参数：全部剥离（含 chat_template_kwargs）
+        return strip_thinking_params(body);
+    }
+    let Some(obj) = body.as_object_mut() else { return false };
+    let mut changed = false;
+    for k in EFFORT_KEYS {
+        if let Some(v) = obj.get_mut(*k) {
+            if util::str_or(Some(v), "") != eff {
+                *v = Value::from(eff);
+                changed = true;
+            }
+        }
+    }
+    if let Some(reasoning) = obj.get_mut("reasoning").and_then(|r| r.as_object_mut()) {
+        if let Some(e) = reasoning.get("effort").filter(|x| util::truthy(x)) {
+            if util::str_or(Some(e), "") != eff {
+                reasoning.insert("effort".into(), Value::from(eff));
+                changed = true;
+            }
+        }
+    }
+    if !changed && !EFFORT_KEYS.iter().any(|k| obj.contains_key(*k)) {
+        obj.insert("reasoning_effort".into(), Value::from(eff));
+        changed = true;
+    }
+    changed
+}
+
+/// 主动应用渠道思考默认值：只有配置命中该模型（或 `*`）才动请求体；
+/// 未配置的模型原样放行（后台提示「未匹配的模型不做调整」）。
+pub fn apply_thinking_default(body: &mut Value, model: &str, defaults: &HashMap<String, String>) -> bool {
+    match match_thinking_effort(model, defaults) {
+        Some(eff) => set_thinking_effort(body, &eff),
+        None => false,
+    }
+}
+
+/// 思考参数报错后自动降级：未命中配置时剥离全部思考参数（400 自愈路径）。
+pub fn downgrade_thinking(body: &mut Value, model: &str, defaults: &HashMap<String, String>) -> bool {
+    match match_thinking_effort(model, defaults) {
+        Some(eff) => set_thinking_effort(body, &eff),
+        None => strip_thinking_params(body),
+    }
 }
 
 // ---------------------------------------------------------------- 请求体类型归一化
@@ -1481,5 +1501,69 @@ index aaa..bbb 100644
         println!("saved={} content_len={} has_marker={}", saved, content.len(), content.contains("tool output compacted"));
         assert!(saved > 0, "nothing saved, diff len={}", diff.len());
         assert!(content.contains("tool output compacted"));
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn defaults(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn proactive_default_leaves_unmatched_models_alone() {
+        // 渠道只配了 m3.1-flash=off：glm 的思考参数不得被顺手剥掉
+        let d = defaults(&[("m3.1-flash", "off")]);
+        let mut body = json!({"reasoning_effort": "high", "thinking": {"type": "enabled"}});
+        assert!(!apply_thinking_default(&mut body, "glm-5.3", &d));
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("thinking").is_some());
+
+        let mut body = json!({"enable_thinking": true, "reasoning": {"effort": "low"}});
+        assert!(apply_thinking_default(&mut body, "m3.1-flash", &d));
+        assert!(body.get("enable_thinking").is_none());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn wildcard_and_exact_match() {
+        let d = defaults(&[("*", "low"), ("glm-5.3", "max")]);
+        let mut body = json!({"reasoning_effort": "minimal"});
+        assert!(apply_thinking_default(&mut body, "glm-5.3", &d));
+        assert_eq!(body["reasoning_effort"], "max");
+        let mut body = json!({"reasoning_effort": "minimal"});
+        assert!(apply_thinking_default(&mut body, "other", &d));
+        assert_eq!(body["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn reactive_downgrade_strips_all_without_match() {
+        // 400 自愈路径：配置没命中也要剥（上游明确说思考参数不支持）
+        let d = defaults(&[("some-other-model", "low")]);
+        let mut body = json!({
+            "reasoning_effort": "high",
+            "thinking": {"type": "enabled"},
+            "chat_template_kwargs": {"thinking": true, "foo": 1},
+        });
+        assert!(downgrade_thinking(&mut body, "m3.1-flash", &d));
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["chat_template_kwargs"]["foo"], 1);
+        assert!(body["chat_template_kwargs"].get("thinking").is_none());
+    }
+
+    #[test]
+    fn has_thinking_params_sees_nested_kwargs() {
+        assert!(has_thinking_params(&json!({"enable_thinking": true})));
+        assert!(has_thinking_params(&json!({"reasoning": {"effort": "low"}})));
+        assert!(has_thinking_params(&json!({"chat_template_kwargs": {"thinking": true}})));
+        assert!(!has_thinking_params(&json!({"chat_template_kwargs": {"foo": true}})));
+        assert!(!has_thinking_params(&json!({"messages": []})));
     }
 }
