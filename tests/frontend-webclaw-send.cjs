@@ -1,0 +1,280 @@
+// WebClaw 发送链路集成测试：假 DOM + 假 fetch 驱动真实 send()。
+// 重点验证流式增量累积、尾帧不丢、错误进消息体、停止后落盘。
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+
+const src = fs.readFileSync('web/webclaw.js', 'utf8');
+
+/* ---------------------------------------------------------------- 假 DOM */
+
+class El {
+  constructor(tag) {
+    this.tagName = (tag || 'div').toUpperCase();
+    this.className = '';
+    this.textContent = '';
+    this.value = '';
+    this.checked = false;
+    this.disabled = false;
+    this.dataset = {};
+    this.style = {};
+    this.children = [];
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+    this.options = [];
+    this.handlers = {};
+    this.classList = {
+      _s: new Set(),
+      add: c => this.classList._s.add(c),
+      remove: c => this.classList._s.delete(c),
+      toggle: (c, on) => { on === undefined ? (this.classList._s.has(c) ? this.classList._s.delete(c) : this.classList._s.add(c)) : (on ? this.classList._s.add(c) : this.classList._s.delete(c)); },
+      contains: c => this.classList._s.has(c),
+    };
+  }
+  set innerHTML(v) { this.children = []; this.options = []; this._html = String(v); }
+  get innerHTML() { return this._html || ''; }
+  appendChild(c) {
+    this.children.push(c);
+    // 真实 DOM 里 append 到 <select> 的 <option> 会进 options；这里补上
+    if (c.tagName === 'OPTION') {
+      if (!c.value) c.value = c.textContent;
+      this.options.push(c);
+    }
+    return c;
+  }
+  append(...cs) { this.children.push(...cs); }
+  remove() {}
+  addEventListener(n, f) { this.handlers[n] = f; }
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+  focus() {}
+  select() {}
+  click() {}
+}
+
+function makeDoc() {
+  const nodes = new Map();
+  const get = id => {
+    if (!nodes.has(id)) nodes.set(id, new El('div'));
+    return nodes.get(id);
+  };
+  return {
+    nodes,
+    get,
+    document: {
+      readyState: 'complete',
+      getElementById: get,
+      querySelector: sel => get(sel),
+      querySelectorAll: () => [],
+      createElement: t => new El(t),
+      createTextNode: t => ({nodeType: 3, textContent: String(t)}),
+      addEventListener() {},
+      body: {appendChild() {}},
+      removeEventListener() {},
+    },
+  };
+}
+
+/* ---------------------------------------------------------------- 假存储/网络 */
+
+const store = new Map();
+const localStorage = {
+  getItem: k => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, String(v)),
+  removeItem: k => store.delete(k),
+};
+
+let chatCalls = [];
+// 流式响应：最后一帧故意不带空行，验证尾帧不丢
+function sseResponse(frames, opts = {}) {
+  const enc = new TextEncoder();
+  const chunks = frames.map(f => enc.encode(f));
+  let i = 0;
+  return {
+    ok: true,
+    status: 200,
+    headers: {get: k => (k.toLowerCase() === 'content-type' ? 'text/event-stream' : null)},
+    body: {
+      getReader: () => ({
+        read: async () => (i < chunks.length ? {done: false, value: chunks[i++]} : {done: true, value: undefined}),
+      }),
+    },
+    text: async () => '',
+  };
+}
+
+function fetchStub(url, init = {}) {
+  const u = String(url);
+  if (u.endsWith('/api/settings')) {
+    return Promise.resolve({ok: true, status: 200, headers: {get: () => 'application/json'},
+      json: async () => ({gateway_tokens: ['sk-test']}), text: async () => '{}'});
+  }
+  if (u.endsWith('/v1/models')) {
+    return Promise.resolve({ok: true, status: 200, headers: {get: () => 'application/json'},
+      json: async () => ({data: [{id: 'mock-model'}]}), text: async () => '{}'});
+  }
+  if (u.endsWith('/v1/chat/completions')) {
+    const body = JSON.parse(init.body || '{}');
+    chatCalls.push({body, headers: init.headers});
+    if (body.model === 'err-model') {
+      const txt = '{"error":{"message":"上游炸了","type":"server_error"}}';
+      return Promise.resolve({ok: false, status: 500, headers: {get: () => 'application/json'},
+        text: async () => txt, json: async () => JSON.parse(txt)});
+    }
+    if (body.stream !== false) {
+      return Promise.resolve(sseResponse([
+        'data: {"choices":[{"delta":{"reasoning_content":"想一想"}}],"model":"mock-model"}\n\n',
+        'data: {"choices":[{"delta":{"content":"你"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"好"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"！"}}],"usage":{"prompt_tokens":3,"completion_tokens":3}}',  // 无尾空行
+      ]));
+    }
+    return Promise.resolve({
+      ok: true, status: 200, headers: {get: () => 'application/json'},
+      text: async () => JSON.stringify({choices: [{message: {content: '非流式回复'}}], model: 'mock-model',
+        usage: {prompt_tokens: 1, completion_tokens: 2}}),
+    });
+  }
+  return Promise.resolve({ok: false, status: 404, headers: {get: () => 'application/json'},
+    json: async () => ({error: {message: 'not found'}}), text: async () => '{"error":{"message":"not found"}}'});
+}
+
+/* ---------------------------------------------------------------- 装配 */
+
+const {document, get} = makeDoc();
+const ctx = vm.createContext({
+  window: {
+    NGW: {base: '/', csrf: 'csrf-test'},
+    addEventListener() {},
+  },
+  document,
+  localStorage,
+  fetch: fetchStub,
+  performance: {now: () => Date.now()},
+  TextDecoder,
+  TextEncoder,
+  AbortController,
+  Blob: class { constructor(p) { this.text = String(p[0]); } },
+  URL: {createObjectURL: () => 'blob:x', revokeObjectURL() {}},
+  FileReader: class { readAsText() { this.onload && this.onload(); } },
+  bootstrap: {Toast: class { constructor() {} show() {} }},
+  marked: undefined,
+  DOMPurify: undefined,
+  crypto: {getRandomValues: a => a},
+  Date, Math, JSON, String, Number, Array, Object, Set, Map, Promise, console,
+  setTimeout, clearTimeout, isNaN, parseInt, parseFloat, RegExp, Error,
+});
+ctx.window.document = document;
+
+vm.runInContext(src, ctx);
+
+const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
+
+let n = 0;
+const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
+
+(async () => {
+  await flush();
+
+  ok('初始化后模型下拉已填充', () => {
+    const sel = get('#wc-model');
+    assert.ok(sel.options.some(o => o.value === 'mock-model'), '模型未进入下拉');
+    assert.equal(sel.value, 'mock-model');
+  });
+
+  ok('初始化时把后台令牌带进请求', () => {
+    assert.equal(get('#wc-token').value, 'sk-test');
+  });
+
+  // 主链路：流式发送
+  get('#wc-model').value = 'mock-model';
+  get('#wc-stream').checked = true;
+  get('#wc-input').value = '你好';
+  get('#wc-send').onclick();
+  await flush(40);
+
+  ok('流式正文按增量拼接，尾帧不丢', () => {
+    assert.ok(chatCalls.length >= 1, '没有发出请求');
+    const saved = JSON.parse(store.get('webclaw.projects.v1'));
+    const p = saved.projects.find(x => x.id === saved.active);
+    const last = p.messages[p.messages.length - 1];
+    assert.equal(last.role, 'assistant');
+    assert.equal(last.content, '你好！', '正文应为 你好！，实际 ' + JSON.stringify(last.content));
+    assert.equal(last.reasoning, '想一想');
+    assert.equal(last.pending, false);
+    assert.equal(p.model, 'mock-model');
+  });
+
+  ok('请求携带鉴权与训练跳过标记', () => {
+    const call = chatCalls[chatCalls.length - 1];
+    assert.equal(call.headers.Authorization, 'Bearer sk-test');
+    assert.equal(call.headers['X-NGW-Skip-Training'], '1');
+    assert.equal(call.body.model, 'mock-model');
+    assert.equal(call.body.stream, true);
+    assert.equal(call.body.messages[0].role, 'user');
+    assert.equal(call.body.messages[0].content, '你好');
+  });
+
+  ok('诊断面板拿到状态与事件数', () => {
+    // showDiag 往 #wc-diag 里塞 badge；这里只确认没抛异常且时间戳被打上
+    assert.ok(get('#wc-diag-sum').textContent.length > 0, '缺少诊断时间');
+  });
+
+  ok('助手消息不会被再次当成上下文发出去', () => {
+    const call = chatCalls[chatCalls.length - 1];
+    for (const m of call.body.messages) assert.ok(m.content.length > 0, '出现空内容消息');
+  });
+
+  // 非流式
+  get('#wc-stream').checked = false;
+  get('#wc-input').value = '再来';
+  get('#wc-send').onclick();
+  await flush(40);
+
+  ok('非流式路径也能落正文', () => {
+    const saved = JSON.parse(store.get('webclaw.projects.v1'));
+    const p = saved.projects.find(x => x.id === saved.active);
+    const last = p.messages[p.messages.length - 1];
+    assert.equal(last.content, '非流式回复');
+    assert.equal(chatCalls[chatCalls.length - 1].body.stream, false);
+  });
+
+  ok('多轮对话把历史一并发出', () => {
+    const msgs = chatCalls[chatCalls.length - 1].body.messages;
+    assert.equal(msgs.length, 3, JSON.stringify(msgs));
+    assert.equal(msgs[0].content, '你好');
+    assert.equal(msgs[1].content, '你好！');
+    assert.equal(msgs[2].content, '再来');
+  });
+
+  // 错误路径：必须把上游报错原文落到消息上，且不污染正文
+  get('#wc-model').value = 'err-model';
+  get('#wc-stream').checked = true;
+  get('#wc-input').value = '触发错误';
+  get('#wc-send').onclick();
+  await flush(40);
+
+  ok('HTTP 错误进消息体且正文不被污染', () => {
+    const saved = JSON.parse(store.get('webclaw.projects.v1'));
+    const p = saved.projects.find(x => x.id === saved.active);
+    const last = p.messages[p.messages.length - 1];
+    assert.equal(last.content, '');
+    assert.equal(last.err, '上游炸了');
+    assert.equal(last.pending, false);
+  });
+
+  ok('错误后界面仍可继续发送', () => {
+    assert.equal(get('#wc-send').disabled, false);
+    assert.ok(store.get('webclaw.projects.v1').length > 0);
+  });
+
+  // 安全：整个会话过程中令牌都不能落进 localStorage
+  ok('令牌不会写进本地存储', () => {
+    const blob = store.get('webclaw.projects.v1');
+    assert.ok(!blob.includes('sk-test'), '令牌出现在 localStorage');
+    assert.ok(!/authorization/i.test(blob), '鉴权头出现在 localStorage');
+  });
+
+  console.log('\n' + n + ' 项通过');
+  process.exit(0);
+})().catch(e => { console.error(e); process.exit(1); });

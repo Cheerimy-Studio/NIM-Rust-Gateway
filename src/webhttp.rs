@@ -38,6 +38,8 @@ pub mod web_assets {
     pub const QUEUE_HTML: &str = include_str!("../web/queue.html");
     pub const USER_HTML: &str = include_str!("../web/user.html");
     pub const USER_JS: &str = include_str!("../web/user.js");
+    pub const WEBCLAW_HTML: &str = include_str!("../web/webclaw.html");
+    pub const WEBCLAW_JS: &str = include_str!("../web/webclaw.js");
 }
 
 pub fn cors_headers() -> Vec<(String, String)> {

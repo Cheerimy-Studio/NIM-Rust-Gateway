@@ -89,6 +89,9 @@ data/db/reward_journal.json 奖励事务恢复日志，仅在提交与写回之�
 ```bash
 cargo test --locked --all-targets
 node tests/frontend-rewards.cjs
+node tests/frontend-webclaw.cjs
+node tests/frontend-webclaw-send.cjs
+python tests/webclaw_e2e.py
 ```
 
 测试覆盖跨网络分块的 UTF-8 / CRLF、工具调用转换、异常断流、真实 usage、
@@ -100,6 +103,50 @@ CI 在 Linux 和 Windows 上运行测试。
 `finish_reason` 且没有残缺事件时关闭连接，才视为正常结束。中断、错误事件与残缺
 JSON 会返回协议对应的流内错误，记为失败且不扣费。网关不会依据中英混排密度或
 正文中的特殊 token 示例判定“乱码”而截断回复。
+
+## WebClaw 测试台
+
+`/webclaw` 是独立的模型测试页（后台侧栏「数据 → WebClaw 测试台」直接进入），从原来的
+后台内嵌面板拆出，与 `/admin` 共用同一道登录校验。
+
+- **项目式对话**：左侧维护多个项目，每个项目独立保存模型、系统提示、流式开关与完整对话；
+  可新建、切换、重命名、删除。
+- **完全本地**：项目存在浏览器的 `localStorage`（键 `webclaw.projects.v1`），不上传网关。
+  换设备或清缓存前请先导出。
+- **一键导出**：侧栏「导出全部」把全部项目导成一个文件；「导出项目」只导当前项目。
+  文件名形如 `webclaw-<项目名>-<YYYYMMDD-HHMM>.json`，项目名里的路径字符会被替换。
+- **导入**：支持整包、单个项目、裸数组与单对象四种输入；可选「合并」或「覆盖」。
+  导入一律重建内部 id，重名会自动加「（导入）」「（导入 2）」后缀直到唯一。
+- **流式**：按完整 SSE 帧解析（CRLF / LF / CR 三种行尾都认），上游不发末尾空行时
+  最后一帧仍然计入；可随时「停止」中断。
+- **诊断**：每次请求显示状态码、首字节、总耗时、token、事件数、模型映射与原始事件流。
+
+文件格式（`version` 固定为 1，`kind` 区分整包与单体）：
+
+```json
+{
+  "app": "webclaw",
+  "version": 1,
+  "kind": "bundle",
+  "exported_at": "2026-11-01T05:30:00.000Z",
+  "projects": [
+    {
+      "name": "默认项目",
+      "model": "mock-model",
+      "system": "",
+      "stream": true,
+      "created_at": 1761975000000,
+      "updated_at": 1761975000000,
+      "messages": [
+        {"role": "user", "content": "你好", "reasoning": "", "err": "", "at": 1761975000000},
+        {"role": "assistant", "content": "你好！", "reasoning": "", "err": "", "at": 1761975001000}
+      ]
+    }
+  ]
+}
+```
+
+导入时不接受 `user` / `assistant` 以外的角色，空消息会被丢弃；未完成的请求不会写进文件。
 
 ## 独立选择上游接口
 
@@ -145,6 +192,7 @@ POST /v1/responses             含流式事件转换
 POST /v1/messages              Anthropic，含流式事件转换
 GET  /v1/models、/v1/models/{id}
 GET  /admin                    管理后台
+GET  /webclaw                  WebClaw 模型测试台
 GET  /user                     用户中心
 GET  /queue                    公开排队页
 ```

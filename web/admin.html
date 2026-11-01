@@ -148,41 +148,6 @@ summary{user-select:none}
 .toast{border-radius:var(--r-md);box-shadow:0 8px 28px rgba(16,24,40,.18)}
 
 
-.tchat{min-height:240px;max-height:46vh;overflow:auto;padding:14px 16px}
-.tmsg{max-width:82%;white-space:pre-wrap;word-break:break-word;padding:.52rem .8rem;
-  border-radius:var(--r-lg);font-size:13px;line-height:1.55;box-shadow:0 1px 2px rgba(15,23,42,.06)}
-.tmsg.me{background:linear-gradient(135deg,#3576f0,#2a5ce0);color:#fff;border-bottom-right-radius:4px}
-.tmsg.ai{background:#f4f7fb;color:var(--txt);border:1px solid #e8eef7;border-bottom-left-radius:4px}
-.tmsg.pending{opacity:.6}
-
-.tmsg .md>:first-child{margin-top:0}
-.tmsg .md>:last-child{margin-bottom:0}
-.tmsg .md p{margin:.35em 0}
-.tmsg .md h1,.tmsg .md h2,.tmsg .md h3,.tmsg .md h4{font-size:1.02em;font-weight:700;margin:.6em 0 .3em}
-.tmsg .md ul,.tmsg .md ol{padding-left:1.35em;margin:.35em 0}
-.tmsg .md li{margin:.15em 0}
-.tmsg .md pre{background:#0d1526;color:#dbe5f5;padding:10px 12px;border-radius:var(--r-sm);
-  font-size:12px;line-height:1.5;overflow-x:auto;margin:.5em 0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05)}
-.tmsg .md pre code{background:none;padding:0;color:inherit;font-size:inherit}
-.tmsg .md code{background:rgba(13,21,38,.08);padding:.12em .38em;border-radius:var(--r-xs);font-size:.88em}
-.tmsg .md blockquote{border-left:3px solid var(--acc);margin:.45em 0;padding:.05em .8em;color:#5b6b84}
-.tmsg .md table{border-collapse:collapse;margin:.5em 0;font-size:.92em}
-.tmsg .md th,.tmsg .md td{border:1px solid #d8e0ec;padding:.28em .6em}
-.tmsg .md th{background:rgba(47,111,237,.07)}
-.tmsg .md a{color:#2f5bc7;text-decoration:underline}
-.tmsg .md hr{border:0;border-top:1px solid #dde5f0;margin:.6em 0}
-
-.tmsg .think{border:1px dashed #ccd8e8;border-radius:var(--r-sm);margin-bottom:.55em;
-  padding:8px 11px;background:rgba(47,111,237,.045)}
-.tmsg .think-hd{font-size:11px;font-weight:600;color:#98a3b8;letter-spacing:.6px;margin-bottom:4px}
-.tmsg .think-body{font-size:12.5px;color:#64748b;line-height:1.55}
-.tmsg .think-body>:first-child{margin-top:0}
-.tmsg .think-body>:last-child{margin-bottom:0}
-.tmsg .think-body p{margin:.3em 0}
-.tmsg .think-body pre{background:#0d1526;color:#cfe0f5;padding:8px 10px;border-radius:var(--r-xs);font-size:11.5px;overflow-x:auto;margin:.4em 0}
-.tmsg .think-body pre code{background:none;padding:0;color:inherit}
-.tmsg .think-body code{background:rgba(13,21,38,.07);padding:.1em .3em;border-radius:var(--r-xs);font-size:.9em}
-.traw{max-height:220px;overflow:auto;margin:6px 0}
 .kpanel .mini{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
 .kpanel .chip{background:#fff;border:1px solid var(--line);border-radius:var(--r-sm);padding:6px 11px;font-size:12px;min-width:96px;
   box-shadow:0 1px 2px rgba(16,24,40,.04)}
@@ -257,7 +222,7 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-pane="wheels"><i class="bi bi-database"></i>大转盘</a>
     <a href="javascript:void(0)" data-pane="intercept"><i class="bi bi-slash-circle"></i>拦截</a>
     <div class="nav-label">数据</div>
-    <a href="javascript:void(0)" data-pane="test"><i class="bi bi-chat-dots"></i>模型测试</a>
+    <a href="/webclaw" target="_blank" rel="noopener"><i class="bi bi-chat-dots"></i>WebClaw 测试台</a>
     <a href="javascript:void(0)" data-pane="training"><i class="bi bi-collection"></i>训练资料</a>
     <a href="javascript:void(0)" data-pane="sessions"><i class="bi bi-journal-text"></i>会话日志</a>
     <div class="nav-label">系统</div>
@@ -856,43 +821,6 @@ details.upgrp[open]{background:#fff}
 </section>
 
 
-<section class="pane" id="pane-test">
-  <h2 class="pane-title">模型测试</h2>
-  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-    <select id="test-model" class="form-select form-select-sm" style="min-width:240px"></select>
-    <input id="test-system" class="form-control form-control-sm" placeholder="系统提示" style="max-width:220px">
-    <div class="form-check ms-1">
-      <input class="form-check-input" type="checkbox" id="test-stream" checked>
-      <label class="form-check-label small" for="test-stream">流式</label>
-    </div>
-    <button id="test-reload" class="btn btn-sm btn-outline-secondary">刷新模型</button>
-    <button id="test-clear" class="btn btn-sm btn-outline-secondary">清空对话</button>
-    <span class="small text-muted ms-auto" id="test-hint"></span>
-  </div>
-  <div class="card mb-2">
-    <div class="card-body tchat" id="test-chat">
-      <span class="text-muted small">选择模型后输入消息开始测试。</span>
-    </div>
-  </div>
-  <div class="d-flex gap-2">
-    <textarea id="test-input" class="form-control form-control-sm" rows="2"
-      placeholder="Enter 发送，Shift+Enter 换行"></textarea>
-    <button id="test-send" class="btn btn-primary px-4">发送</button>
-  </div>
-  <div class="card mt-3">
-    <div class="card-header py-1 small d-flex justify-content-between">
-      <span>最近链路诊断</span>
-      <span class="text-muted" id="test-diag-sum"></span>
-    </div>
-    <div class="card-body py-2">
-      <div id="test-diag" class="small text-muted">尚未发起请求</div>
-      <details class="mt-2 d-none" id="test-raw-wrap">
-        <summary class="small text-primary" style="cursor:pointer">原始事件流</summary>
-        <pre id="test-raw" class="small traw"></pre>
-      </details>
-    </div>
-  </div>
-</section>
 
 
 

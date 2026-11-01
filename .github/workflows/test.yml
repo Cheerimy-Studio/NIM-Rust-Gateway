@@ -23,4 +23,9 @@ jobs:
         run: |
           node --check web/admin.js
           node --check web/user.js
+          node --check web/webclaw.js
           node tests/frontend-rewards.cjs
+      - name: Check WebClaw project file format and send path
+        run: |
+          node tests/frontend-webclaw.cjs
+          node tests/frontend-webclaw-send.cjs

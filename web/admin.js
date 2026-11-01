@@ -142,7 +142,6 @@ const LOADERS = {
   intercept: () => loadIntercept(),
   logs: () => loadLogs(),
   queue: () => loadQueue(),
-  test: () => loadTestModels(),
   training: () => loadTraining(),
   sessions: () => loadSessions(),
   settings: () => loadSettings(),
@@ -1559,234 +1558,6 @@ $('#int-test').onclick = guard(async () => {
   toast(d.matched ? '命中' : '不命中', d.matched ? 'success' : 'warning');
 });
 
-let testToken = null;   
-let testMsgs = [];      
-let testBusy = false;
-
-async function testEnsureToken() {
-  if (testToken !== null) return testToken;
-  try {
-    const s = await api('settings');
-    const toks = s.gateway_tokens || [];
-    const first = toks[0];
-    testToken = (first && (first.t || first)) || '';
-  } catch (e) { testToken = ''; }
-  const hint = $('#test-hint');
-  if (hint) {
-    hint.textContent = testToken
-      ? '令牌 ' + String(testToken).slice(0, 12) + '…'
-      : '未配置网关令牌（网关为开放模式）';
-  }
-  return testToken;
-}
-
-async function loadTestModels() {
-  const sel = $('#test-model');
-  if (!sel) return;
-  const keep = sel.value;
-  const tok = await testEnsureToken();
-  const models = [];
-  try {
-    const r = await fetch(B + 'v1/models', { headers: tok ? { Authorization: 'Bearer ' + tok } : {} });
-    const d = await r.json();
-    for (const m of (d.data || [])) if (m && m.id) models.push(m.id);
-  } catch (e) {  }
-  if (!models.length) {
-    try {
-      const d = await api('upstreams');
-      for (const u of (d.rows || [])) {
-        for (const m of (u.models || [])) models.push(m);
-        for (const k of Object.keys(u.model_map || {})) models.push(k);
-      }
-    } catch (e) {  }
-  }
-  const uniq = [...new Set(models)];
-  sel.innerHTML = '';
-  if (!uniq.length) { sel.appendChild(el('option', '', '（无可用模型，请先配置渠道）')); return; }
-  for (const m of uniq) sel.appendChild(el('option', '', m));   
-  sel.value = keep && uniq.includes(keep) ? keep : uniq[0];
-}
-
-
-const mdRender = (text, node) => {
-  if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-    node.innerHTML = DOMPurify.sanitize(marked.parse(text, {breaks: true, gfm: true}), {ADD_ATTR: ['target']});
-    node.querySelectorAll('a').forEach(a => { a.target = '_blank'; a.rel = 'noopener noreferrer'; });
-  } else {
-    node.textContent = text;
-  }
-};
-
-function testRender() {
-  const box = $('#test-chat');
-  if (!box) return;
-  box.innerHTML = '';
-  if (!testMsgs.length) {
-    box.appendChild(el('span', 'text-muted small', '选择模型后输入消息开始测试。'));
-    return;
-  }
-  for (const m of testMsgs) {
-    const mine = m.role === 'user';
-    const row = el('div', 'mb-2 d-flex ' + (mine ? 'justify-content-end' : 'justify-content-start'));
-    const b = el('div', 'tmsg ' + (mine ? 'me' : 'ai'));
-    if (mine) {
-      b.textContent = m.content || '';   
-    } else {
-      if (m.reasoning) {
-        const th = el('div', 'think');
-        th.appendChild(el('div', 'think-hd', '思考'));
-        const tb = el('div', 'think-body');
-        mdRender(m.reasoning, tb);
-        th.appendChild(tb);
-        b.appendChild(th);
-      }
-      const body = el('div', 'md');
-      if (m.content) {
-        mdRender(m.content, body);
-      } else {
-        body.textContent = m.pending ? '…' : '（内容为空）';
-      }
-      b.appendChild(body);
-    }
-    if (m.pending) b.classList.add('pending');
-    row.appendChild(b);
-    box.appendChild(row);
-  }
-  box.scrollTop = box.scrollHeight;
-}
-
-function testDiag(d) {
-  const box = $('#test-diag');
-  const sum = $('#test-diag-sum');
-  const wrap = $('#test-raw-wrap');
-  if (!box) return;
-  box.innerHTML = '';
-  const chip = (label, val, cls) => {
-    const s = el('span', 'badge me-2 mb-1 ' + (cls || 'text-bg-light'), label + ' ' + val);
-    box.appendChild(s);
-  };
-  const okStatus = d.status >= 200 && d.status < 400;
-  chip('状态', d.status, okStatus ? 'text-bg-success' : 'text-bg-danger');
-  chip('首字', d.ttfb == null ? '-' : Math.round(d.ttfb) + 'ms');
-  chip('总耗时', Math.round(d.total) + 'ms');
-  chip('令牌', (d.inTok || 0) + '↑ ' + (d.outTok || 0) + '↓');
-  if (d.events != null) chip('事件', d.events + ' 个');
-  if (d.up && d.up !== d.model) chip('映射', d.model + ' ↳ ' + d.up, 'text-bg-info');
-  if (d.format) chip('Content-Type', d.format, 'text-bg-light');
-  if (d.err) {
-    const e = el('div', 'mt-1 text-danger', '错误：' + d.err);
-    box.appendChild(e);
-  }
-  if (sum) sum.textContent = d.at;
-  const raw = $('#test-raw');
-  if (raw && wrap) {
-    raw.textContent = d.raw || '';
-    wrap.classList.toggle('d-none', !d.raw);
-  }
-}
-
-async function testSend() {
-  if (testBusy) return;
-  const model = $('#test-model') && $('#test-model').value;
-  const input = $('#test-input');
-  const text = input ? input.value.trim() : '';
-  if (!model || !text) return;
-  testBusy = true;
-  const btn = $('#test-send');
-  if (btn) btn.disabled = true;
-
-  testMsgs.push({role: 'user', content: text});
-  input.value = '';
-  const reply = {role: 'assistant', content: '', reasoning: '', pending: true};
-  testMsgs.push(reply);
-  testRender();
-
-  const stream = $('#test-stream').checked;
-  const sys = ($('#test-system') && $('#test-system').value.trim()) || '';
-  const messages = sys ? [{role: 'system', content: sys}, ...testMsgs.filter(m => !m.pending)] : testMsgs.filter(m => !m.pending);
-  const tok = await testEnsureToken();
-  const headers = {'Content-Type': 'application/json', 'X-NGW-Skip-Training': '1'};
-  if (tok) headers.Authorization = 'Bearer ' + tok;
-
-  const t0 = performance.now();
-  let ttfb = null, events = 0, inTok = 0, outTok = 0, upModel = '', format = '', err = '', raw = [], status = 0;
-  try {
-    const r = await fetch(B + 'v1/chat/completions', {
-      method: 'POST', headers,
-      body: JSON.stringify({model, messages, stream}),
-    });
-    status = r.status;
-    format = (r.headers.get('content-type') || '').split(';')[0];
-    if (!stream) {
-      const txt = await r.text();
-      raw.push(txt);
-      let j = null;
-      try { j = JSON.parse(txt); } catch (e) {  }
-      ttfb = performance.now() - t0;
-      if (j) {
-        if (j.error) err = (j.error.message || JSON.stringify(j.error)).slice(0, 300);
-        reply.content = ((j.choices || [{}])[0].message || {}).content || '';
-        reply.reasoning = ((j.choices || [{}])[0].message || {}).reasoning_content || '';
-        upModel = j.model || '';
-        inTok = (j.usage || {}).prompt_tokens || 0;
-        outTok = (j.usage || {}).completion_tokens || 0;
-      } else {
-        err = txt.slice(0, 300);
-      }
-    } else if (r.body) {
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, {stream: true});
-        let i;
-        while ((i = buf.indexOf('\n\n')) >= 0) {
-          const frame = buf.slice(0, i);
-          buf = buf.slice(i + 2);
-          for (const line of frame.split('\n')) {
-            if (!line.startsWith('data:')) continue;
-            const payload = line.slice(5).trim();
-            raw.push(payload);
-            if (payload === '[DONE]') continue;
-            if (ttfb === null) ttfb = performance.now() - t0;
-            events++;
-            let j = null;
-            try { j = JSON.parse(payload); } catch (e) { continue; }
-            if (j.error) { err = (j.error.message || JSON.stringify(j.error)).slice(0, 300); continue; }
-            const delta = ((j.choices || [{}])[0] || {}).delta || {};
-            if (typeof delta.content === 'string') reply.content += delta.content;
-            if (typeof delta.reasoning_content === 'string') reply.reasoning += delta.reasoning_content;
-            if (j.model) upModel = j.model;
-            if (j.usage) {
-              inTok = j.usage.prompt_tokens || inTok;
-              outTok = j.usage.completion_tokens || outTok;
-            }
-            testRender();
-          }
-        }
-      }
-    } else {
-      err = '无响应体（HTTP ' + status + '）';
-    }
-  } catch (e) {
-    err = String(e && e.message || e).slice(0, 300);
-  }
-  reply.pending = false;
-  testRender();
-  testDiag({
-    status, ttfb, total: performance.now() - t0, events, inTok, outTok,
-    model, up: upModel, format, err, raw: raw.join('\n'),
-    at: new Date().toLocaleTimeString('zh-CN', {hour12: false}),
-  });
-  testBusy = false;
-  if (btn) btn.disabled = false;
-}
-
-$('#test-reload').onclick = () => { testToken = null; loadTestModels(); };
-$('#test-clear').onclick = () => { testMsgs = []; testRender(); };
-$('#test-send').onclick = testSend;
 $('#gen-updtok').onclick = () => {
   const arr = new Uint8Array(24);
   crypto.getRandomValues(arr);
@@ -1807,13 +1578,13 @@ $('#btn-rollback').onclick = guard(async () => {
   toast(r.note || '已回滚,网关正在重启');
   setTimeout(() => location.reload(), 3000);
 });
-$('#test-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); testSend(); }
-});
 
 
 document.addEventListener('DOMContentLoaded', () => {
-  $$('.sidebar nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); activate(a.dataset.pane); }));
+  $$('.sidebar nav a').forEach(a => {
+    if (!a.dataset.pane) return;   // 外链（WebClaw 测试台）交给浏览器原生跳转
+    a.addEventListener('click', e => { e.preventDefault(); activate(a.dataset.pane); });
+  });
   $('#btn-logout').onclick = guard(async () => { await api('logout', {method: 'POST'}); location.href = B + 'admin'; });
   bindImport(); bindSettings(); bindUpstreams(); bindBatch();
   refreshBatchUps();

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>模型测试 · WebClaw</title>
+<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+<script defer src="https://cdn.bootcdn.net/ajax/libs/marked/4.3.0/marked.min.js"></script>
+<script defer src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
+<style>
+:root{--acc:#2f6fed;--bg:#f3f5f9;--line:#e7ecf3;--txt:#1c2536;--mut:#68758a;
+  --r-xs:6px;--r-sm:8px;--r-md:10px;--r:12px;--r-lg:14px;--r-pill:999px;--ring:0 0 0 3px rgba(47,111,237,.12)}
+*{scrollbar-width:thin}
+body{margin:0;background:var(--bg);color:var(--txt);font-size:14px;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+a{text-decoration:none}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#c6d0de;border-radius:6px}
+::-webkit-scrollbar-thumb:hover{background:#9fadc2}
+
+.layout{display:flex;min-height:100vh}
+.sidebar{width:236px;background:linear-gradient(180deg,#0e1729 0%,#0b1120 100%);color:#8d9bb2;flex-shrink:0;
+  display:flex;flex-direction:column;position:sticky;top:0;height:100vh;border-right:1px solid rgba(255,255,255,.045)}
+.brand{display:flex;align-items:center;gap:11px;padding:15px 15px;border-bottom:1px solid rgba(255,255,255,.06)}
+.brand .mark{width:31px;height:31px;border-radius:var(--r-md);flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;font-weight:800;font-size:15px;
+  box-shadow:0 3px 10px rgba(37,99,235,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.brand .bt{color:#fff;font-weight:700;font-size:14px;letter-spacing:.2px;line-height:1.2}
+.brand .bt small{display:block;font-weight:500;font-size:10px;color:#5d6b83;letter-spacing:1.2px;text-transform:uppercase;margin-top:2px}
+
+.side-body{flex:1;display:flex;flex-direction:column;min-height:0;padding:10px}
+.nav-label{font-size:10px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;color:#57657d;padding:10px 10px 6px}
+.side-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;padding:8px 10px;border:1px solid rgba(255,255,255,.13);
+  border-radius:var(--r-sm);background:rgba(255,255,255,.04);color:#cdd8e8;font-size:12.5px;font-weight:600;transition:all .13s ease}
+.side-btn:hover{background:rgba(255,255,255,.09);color:#fff;border-color:rgba(255,255,255,.2)}
+.side-btn.primary{background:linear-gradient(135deg,#3576f0,#2a5ce0);border-color:transparent;color:#fff;
+  box-shadow:0 3px 10px rgba(37,99,235,.35)}
+.side-btn.primary:hover{background:linear-gradient(135deg,#2a5ce0,#1f4fd0)}
+.side-row{display:flex;gap:6px;margin-top:8px}
+.side-row .side-btn{padding:7px 6px;font-size:12px}
+
+.proj-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px;margin:8px -4px 0;padding:0 4px;min-height:60px}
+.proj{position:relative;padding:7px 9px;border-radius:var(--r-sm);cursor:pointer;color:#96a4ba;transition:background .13s ease,color .13s ease}
+.proj:hover{background:rgba(255,255,255,.05);color:#e3eaf5}
+.proj.active{background:linear-gradient(90deg,rgba(47,111,237,.3),rgba(47,111,237,.05));color:#fff}
+.proj.active::before{content:"";position:absolute;left:-4px;top:7px;bottom:7px;width:3px;border-radius:3px;background:var(--acc)}
+.proj .nm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:52px}
+.proj .mt{font-size:11px;color:#5d6b83;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.proj.active .mt{color:#8ea6cd}
+.proj .ops{position:absolute;right:4px;top:5px;display:flex;gap:0;opacity:0;transition:opacity .13s ease}
+.proj:hover .ops,.proj.active .ops{opacity:1}
+.proj .ops button{border:0;background:transparent;color:#7c8ba4;padding:2px 4px;border-radius:5px;line-height:1;font-size:11.5px}
+.proj .ops button:hover{color:#fff;background:rgba(255,255,255,.12)}
+.proj .ops button.del:hover{color:#fca5a5;background:rgba(248,113,113,.16)}
+.proj-empty{font-size:12px;color:#57657d;text-align:center;padding:16px 0}
+.side-note{font-size:11px;color:#57657d;line-height:1.5;padding:10px 10px 4px}
+
+.sidebar .foot{padding:8px 10px;border-top:1px solid rgba(255,255,255,.06)}
+.sidebar .foot a{color:#8d9bb2;font-size:13px;border-radius:var(--r-sm);padding:7px 11px;display:inline-flex;align-items:center;gap:6px;transition:all .13s ease}
+.sidebar .foot a:hover{color:#e3eaf5;background:rgba(255,255,255,.06)}
+
+.content{flex:1;padding:20px 24px;min-width:0;display:flex;flex-direction:column;gap:10px}
+.pane-title{font-size:17px;font-weight:700;margin:0 0 4px;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+.pane-title::before{content:"";width:3px;height:15px;border-radius:2px;background:linear-gradient(180deg,#4d86f2,#2a5ce0);flex-shrink:0}
+.pane-title .sub{font-size:11.5px;font-weight:500;color:#98a3b8;letter-spacing:.3px;margin-left:2px}
+
+.card{border:1px solid var(--line);border-radius:var(--r);background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.card-header{background:#fff;border-bottom:1px solid var(--line);font-weight:600;font-size:13px;color:#2c3a52;
+  border-radius:var(--r) var(--r) 0 0;padding:.55rem .9rem}
+
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.toolbar .form-select-sm{min-width:230px;max-width:340px}
+.toolbar #wc-system{max-width:200px}
+.toolbar .spacer{flex:1}
+.btn-sm{font-size:12.5px}
+.btn-primary{background:linear-gradient(135deg,#3576f0,#2a5ce0);border:none}
+.btn-primary:hover{background:linear-gradient(135deg,#2a5ce0,#1f4fd0)}
+.form-control-sm,.form-select-sm{font-size:13px;border-color:#dde4ee}
+.form-control-sm:focus,.form-select-sm:focus{border-color:var(--acc);box-shadow:var(--ring)}
+
+.cred{display:flex;gap:6px;align-items:center}
+.cred .form-control-sm{max-width:360px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.cred .hint{font-size:11.5px;color:#98a3b8}
+
+.chat{flex:1;min-height:260px;max-height:calc(100vh - 340px);overflow:auto;padding:14px 16px}
+.chat-empty{font-size:12.5px;color:#98a3b8}
+.tmsg{max-width:78%;white-space:pre-wrap;word-break:break-word;padding:.5rem .78rem;
+  border-radius:var(--r-lg);font-size:13px;line-height:1.55;box-shadow:0 1px 2px rgba(15,23,42,.05)}
+.tmsg.me{background:linear-gradient(135deg,#3576f0,#2a5ce0);color:#fff;border-bottom-right-radius:4px}
+.tmsg.ai{background:#f7f9fc;color:var(--txt);border:1px solid #e8eef7;border-bottom-left-radius:4px}
+.tmsg.pending{opacity:.65}
+.tmsg .md>:first-child{margin-top:0}
+.tmsg .md>:last-child{margin-bottom:0}
+.tmsg .md p{margin:.35em 0}
+.tmsg .md h1,.tmsg .md h2,.tmsg .md h3,.tmsg .md h4{font-size:1.02em;font-weight:700;margin:.6em 0 .3em}
+.tmsg .md ul,.tmsg .md ol{padding-left:1.35em;margin:.35em 0}
+.tmsg .md li{margin:.15em 0}
+.tmsg .md pre{background:#0d1526;color:#dbe5f5;padding:10px 12px;border-radius:var(--r-sm);
+  font-size:12px;line-height:1.5;overflow-x:auto;margin:.5em 0}
+.tmsg .md pre code{background:none;padding:0;color:inherit;font-size:inherit}
+.tmsg .md code{background:rgba(13,21,38,.08);padding:.12em .38em;border-radius:var(--r-xs);font-size:.88em}
+.tmsg .md blockquote{border-left:3px solid var(--acc);margin:.45em 0;padding:.05em .8em;color:#5b6b84}
+.tmsg .md table{border-collapse:collapse;margin:.5em 0;font-size:.92em}
+.tmsg .md th,.tmsg .md td{border:1px solid #d8e0ec;padding:.28em .6em}
+.tmsg .md th{background:rgba(47,111,237,.07)}
+.tmsg .md a{color:#2f5bc7;text-decoration:underline}
+.tmsg .md hr{border:0;border-top:1px solid #dde5f0;margin:.6em 0}
+.tmsg .think{border:1px dashed #ccd8e8;border-radius:var(--r-sm);margin-bottom:.55em;padding:8px 11px;background:rgba(47,111,237,.045)}
+.tmsg .think-hd{font-size:11px;font-weight:600;color:#98a3b8;letter-spacing:.6px;margin-bottom:4px}
+.tmsg .think-body{font-size:12.5px;color:#64748b;line-height:1.55}
+.tmsg .think-body>:first-child{margin-top:0}
+.tmsg .think-body>:last-child{margin-bottom:0}
+.tmsg .err{margin-top:.3em;font-size:12px;color:#dc2626;white-space:pre-wrap}
+
+.composer{display:flex;gap:8px;align-items:flex-end}
+.composer textarea{flex:1;resize:vertical;min-height:58px;font-size:13px}
+.composer .btn{flex-shrink:0}
+
+.diag-body{padding:.5rem .9rem .7rem}
+.diag-chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:3px 9px;border-radius:var(--r-pill);
+  background:#f4f7fb;border:1px solid #e8eef7;color:#5b6b84;font-variant-numeric:tabular-nums}
+.chip b{font-weight:700;color:#2c3a52}
+.chip.ok{background:#effaf3;border-color:#cdebd8;color:#15803d}
+.chip.bad{background:#fff4f4;border-color:#f6d5d5;color:#b91c1c}
+.chip.info{background:#eef4ff;border-color:#d3e2fb;color:#1d4ed8}
+.diag-err{margin-top:6px;font-size:12px;color:#dc2626;white-space:pre-wrap;word-break:break-word}
+.diag-empty{font-size:12px;color:#98a3b8}
+.traw{max-height:200px;overflow:auto;margin:6px 0 0;font-size:11.5px;white-space:pre-wrap;word-break:break-all;
+  background:#0d1526;color:#cfe0f5;border-radius:var(--r-sm);padding:9px 11px}
+
+.toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:60}
+.toast-item{padding:9px 14px;border-radius:9px;color:#fff;font-size:13px;max-width:380px;
+  box-shadow:0 8px 26px rgba(16,24,40,.22);background:#16a34a;transition:opacity .2s ease,transform .2s ease}
+.toast-item.danger{background:#dc2626}
+.toast-item.warning{background:#d97706}
+.toast-item.out{opacity:0;transform:translateY(6px)}
+
+.mask{position:fixed;inset:0;background:rgba(9,16,30,.5);display:flex;align-items:center;justify-content:center;z-index:70;padding:20px}
+.dialog{width:100%;max-width:420px;background:#fff;border-radius:14px;padding:18px 18px 14px;box-shadow:0 24px 70px rgba(2,8,20,.4)}
+.dialog-title{font-size:15px;font-weight:700;color:#1c2536;margin-bottom:8px}
+.dialog-body{font-size:13px;color:#5b6b84;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.dialog-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+
+@media (max-width:860px){
+  .layout{flex-direction:column}
+  .sidebar{width:100%;height:auto;position:static}
+  .proj-list{max-height:180px}
+  .content{padding:14px}
+  .chat{max-height:46vh}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><span class="mark">W</span><span class="bt">WebClaw<small>模型测试</small></span></div>
+    <div class="side-body">
+      <div class="nav-label">项目</div>
+      <button id="wc-new" class="side-btn primary"><i class="bi bi-plus-lg"></i>新建项目</button>
+      <div class="proj-list" id="wc-projects"></div>
+      <div class="side-row">
+        <button id="wc-export-all" class="side-btn" title="全部项目导出为一个文件">导出全部</button>
+        <button id="wc-import" class="side-btn" title="导入之前导出的文件">导入</button>
+      </div>
+      <div class="side-note">项目存在本机浏览器，不随网关同步。换设备请先导出。</div>
+    </div>
+    <div class="foot"><a href="/admin"><i class="bi bi-arrow-left"></i>返回后台</a></div>
+  </aside>
+
+  <main class="content">
+    <h2 class="pane-title">模型测试<span class="sub" id="wc-hint"></span></h2>
+
+    <div class="toolbar">
+      <select id="wc-model" class="form-select form-select-sm"></select>
+      <input id="wc-system" class="form-control form-control-sm" placeholder="系统提示" autocomplete="off">
+      <div class="form-check m-0">
+        <input class="form-check-input" type="checkbox" id="wc-stream" checked>
+        <label class="form-check-label small" for="wc-stream">流式</label>
+      </div>
+      <button id="wc-reload" class="btn btn-sm btn-outline-secondary">刷新模型</button>
+      <button id="wc-clear" class="btn btn-sm btn-outline-secondary">清空对话</button>
+      <span class="spacer"></span>
+      <button id="wc-export-one" class="btn btn-sm btn-outline-primary">导出本项目</button>
+    </div>
+
+    <div class="cred">
+      <input id="wc-token" type="password" class="form-control form-control-sm" placeholder="网关令牌（留空按开放模式）"
+        autocomplete="off" spellcheck="false">
+      <button id="wc-token-reveal" class="btn btn-sm btn-outline-secondary" title="显示/隐藏令牌"><i class="bi bi-eye"></i></button>
+      <button id="wc-token-fetch" class="btn btn-sm btn-outline-secondary" title="读取后台第一个访问令牌">取后台令牌</button>
+    </div>
+
+    <div class="card chat" id="wc-chat"></div>
+
+    <div class="composer">
+      <textarea id="wc-input" class="form-control form-control-sm" rows="2"
+        placeholder="Enter 发送，Shift+Enter 换行"></textarea>
+      <button id="wc-send" class="btn btn-primary px-4">发送</button>
+      <button id="wc-stop" class="btn btn-outline-danger" disabled>停止</button>
+    </div>
+
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span>最近一次请求</span>
+        <span class="text-muted small" id="wc-diag-sum"></span>
+      </div>
+      <div class="diag-body">
+        <div id="wc-diag" class="diag-chips"><span class="diag-empty">尚未发起请求</span></div>
+        <details class="mt-2 d-none" id="wc-raw-wrap">
+          <summary class="small text-primary" style="cursor:pointer">原始事件流</summary>
+          <pre id="wc-raw" class="traw"></pre>
+        </details>
+      </div>
+    </div>
+  </main>
+</div>
+
+<input type="file" id="wc-import-file" accept="application/json,.json" hidden>
+<script>window.NGW = {base: "/", csrf: "{{CSRF}}"};</script>
+<script src="/assets/webclaw.js?v={{VERSION}}"></script>
+</body>
+</html>

@@ -37,6 +37,7 @@ fn page(name: &str, csrf: &str) -> String {
         "login.html" => web_assets::LOGIN_HTML,
         "landing.html" => web_assets::LANDING_HTML,
         "queue.html" => web_assets::QUEUE_HTML,
+        "webclaw.html" => web_assets::WEBCLAW_HTML,
         _ => "",
     };
     raw.replace("{{CSRF}}", csrf)
@@ -149,6 +150,36 @@ async fn h_admin(headers: HeaderMap) -> Response {
     }
     let csrf = csrf_token(&cfg);
     html_resp("admin.html", &csrf, true)
+}
+
+async fn h_webclaw(headers: HeaderMap) -> Response {
+    // 与 /admin 同一道门：页面内要调后台 API 读令牌与渠道，未登录就没有意义
+    let cfg = store().load();
+    let cfg = cfg.get("config").cloned().unwrap_or(json!({}));
+    let expected = session_cookie(&cfg);
+    let session = admin::cookie_get(&headers, "ngw_session").unwrap_or_default();
+    if session.is_empty() || !constant_eq(&session, &expected) {
+        return html_resp("login.html", "", true);
+    }
+    html_resp("webclaw.html", &csrf_token(&cfg), true)
+}
+
+async fn h_webclaw_js() -> Response {
+    let mut resp = web_assets::WEBCLAW_JS.to_string().into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/javascript"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    // 与 admin.js 同口径：升级后浏览器不能拿旧缓存，否则新增的导入导出点了没反应
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    resp
 }
 
 pub fn constant_eq(a: &str, b: &str) -> bool {
@@ -1233,10 +1264,12 @@ fn build_router() -> Router {
         // 页面与公开接口
         .route("/", get(h_root))
         .route("/admin", get(h_admin))
+        .route("/webclaw", get(h_webclaw))
         .route("/queue", get(h_queue_page))
         .route("/api/presets", get(h_presets))
         .route("/api/queue/public", get(h_queue_public))
         .route("/assets/admin.js", get(h_admin_js))
+        .route("/assets/webclaw.js", get(h_webclaw_js))
         // 管理 API
         .route("/api/login", post(h_login))
         .route("/api/logout", post(h_logout))
