@@ -84,7 +84,6 @@ a{text-decoration:none}
 .cred{display:flex;gap:6px;align-items:center}
 .cred .form-control-sm{max-width:360px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
 .cred .hint{font-size:11.5px;color:#98a3b8}
-
 .chat{flex:1;min-height:260px;max-height:calc(100vh - 340px);overflow:auto;padding:14px 16px}
 .chat-empty{font-size:12.5px;color:#98a3b8}
 .tmsg{max-width:78%;white-space:pre-wrap;word-break:break-word;padding:.5rem .78rem;
@@ -189,9 +188,10 @@ a{text-decoration:none}
 
     <div class="cred">
       <input id="wc-token" type="password" class="form-control form-control-sm" placeholder="网关令牌（留空按开放模式）"
-        autocomplete="off" spellcheck="false">
+        autocomplete="new-password" spellcheck="false" data-lpignore="true">
       <button id="wc-token-reveal" class="btn btn-sm btn-outline-secondary" title="显示/隐藏令牌"><i class="bi bi-eye"></i></button>
       <button id="wc-token-fetch" class="btn btn-sm btn-outline-secondary" title="读取后台第一个访问令牌">取后台令牌</button>
+      <span class="hint" id="wc-scope"></span>
     </div>
 
     <div class="card chat" id="wc-chat"></div>
@@ -220,7 +220,7 @@ a{text-decoration:none}
 </div>
 
 <input type="file" id="wc-import-file" accept="application/json,.json" hidden>
-<script>window.NGW = {base: "/", csrf: "{{CSRF}}"};</script>
+<script>window.NGW = {base: "/", csrf: "{{CSRF}}", mode: "{{MODE}}", who: "{{WHO}}"};</script>
 <script src="/assets/webclaw.js?v={{VERSION}}"></script>
 </body>
 </html>

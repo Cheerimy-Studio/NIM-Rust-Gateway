@@ -77,9 +77,9 @@ try:
     # 1) 未登录：必须被挡回登录页，不能泄露测试台
     r = anon.get("/webclaw")
     add(
-        "未登录被挡回登录页",
-        r.status_code == 200 and 'id="login-form"' in r.text and "wc-chat" not in r.text,
-        "st=%s" % r.status_code,
+        "未登录被引导到用户中心登录",
+        r.status_code in (302, 303, 307, 308) and r.headers.get("location", "").endswith("/user"),
+        "st=%s loc=%s" % (r.status_code, r.headers.get("location")),
     )
 
     # 2) 登录
@@ -168,6 +168,68 @@ try:
         "admin.js 外链导航不被拦截",
         "if (!a.dataset.pane) return;" in rja.text,
         "否则点击 /webclaw 无反应",
+    )
+
+    # 6) 用户中心也必须能进 WebClaw，且用户侧看不到后台能力
+    add(
+        "管理员页注入 admin 模式",
+        'mode: "admin"' in rw.text and 'who: "admin"' in rw.text,
+        "模式与身份由服务端注入",
+    )
+    ru = a.get("/user")
+    add(
+        "用户中心已改为外链 WebClaw",
+        ru.status_code == 200
+        and 'href="/webclaw"' in ru.text
+        and "t-send" not in ru.text,
+        "st=%s" % ru.status_code,
+    )
+    rju = a.get("/assets/user.js?v=1.7.0")
+    add(
+        "user.js 无残留测试台逻辑",
+        "tSend" not in rju.text and "t-chat" not in rju.text,
+        "已整体迁出",
+    )
+    add(
+        "user.js 外链导航不被拦截",
+        "if (!a.dataset.p) return;" in rju.text,
+        "否则点击 /webclaw 无反应",
+    )
+
+    # 建一个普通用户并登录，验证同一个页面在用户身份下可用
+    u = httpx.Client(base_url=base, timeout=30)
+    r = a.post("/api/users", json={"username": "wcuser", "password": "wc-user-pass", "balance": 10})
+    add("创建测试用户", r.status_code == 200, "st=%s" % r.status_code)
+    r = u.post("/api/user/login", json={"username": "wcuser", "password": "wc-user-pass"})
+    add("普通用户登录", r.status_code == 200, "st=%s" % r.status_code)
+    u.headers["X-CSRF"] = r.json().get("csrf", "")
+    rw2 = u.get("/webclaw")
+    add(
+        "用户身份可打开 WebClaw",
+        rw2.status_code == 200 and 'mode: "user"' in rw2.text and 'id="wc-chat"' in rw2.text,
+        "st=%s" % rw2.status_code,
+    )
+    add(
+        "用户侧身份独立分区",
+        'who: ""' not in rw2.text and 'who: "admin"' not in rw2.text,
+        "存储键不会与管理员共用",
+    )
+    # 用户会话拿不到后台接口：这是不能让普通用户越过的那条线
+    add(
+        "用户会话无法读取后台设置",
+        u.get("/api/settings").status_code == 401,
+        "st=%s" % u.get("/api/settings").status_code,
+    )
+    rk = u.post("/api/user/test-key")
+    add(
+        "用户可取自己的测试 Key",
+        rk.status_code == 200 and str(rk.json().get("key", "")).startswith("sk-"),
+        "st=%s" % rk.status_code,
+    )
+    add(
+        "用户可见模型来自模型广场",
+        u.get("/api/user/models").status_code == 200,
+        "st=%s" % u.get("/api/user/models").status_code,
     )
 
 finally:

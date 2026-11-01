@@ -3,7 +3,12 @@
 
 const B = (window.NGW && window.NGW.base) || '/';
 const CSRF = (window.NGW && window.NGW.csrf) || '';
-const LS_KEY = 'webclaw.projects.v1';
+// 管理员在后台打开 /webclaw，普通用户在用户中心打开；两者令牌来源与可见模型不同
+const MODE = (window.NGW && window.NGW.mode) === 'user' ? 'user' : 'admin';
+const WHO = (window.NGW && window.NGW.who) || 'admin';
+// 按身份分键：同一台机器上换了账号也不会看到上一个人的项目
+const LS_KEY = 'webclaw.projects.v1::' + WHO;
+const LEGACY_KEY = 'webclaw.projects.v1';
 
 // 上限：全部用于挡住异常输入（超大导入 / 超长回复）把页面拖死
 const MAX_RAW = 400;                 // 原始事件最多保留多少条
@@ -209,8 +214,17 @@ function normalizeStored(raw) {
 }
 
 function loadState() {
+  let text = localStorage.getItem(LS_KEY);
+  if (text === null && MODE === 'admin') {
+    // 1.7.50 的键没有身份作用域；管理员沿用旧数据，避免升级后项目「消失」
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy !== null) {
+      text = legacy;
+      try { localStorage.setItem(LS_KEY, legacy); } catch (e) { /* 配额满就只读一次 */ }
+    }
+  }
   let raw = null;
-  try { raw = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (e) { raw = null; }
+  try { raw = JSON.parse(text || 'null'); } catch (e) { raw = null; }
   const st = {version: 1, active: '', projects: []};
   if (raw && typeof raw === 'object') {
     st.active = typeof raw.active === 'string' ? raw.active : '';
@@ -508,28 +522,39 @@ function tokenHint() {
   const hint = $('#wc-hint');
   if (!hint) return;
   const t = tokenValue();
-  hint.textContent = t ? '令牌 ' + t.slice(0, 8) + '…' : '开放模式';
+  if (t) { hint.textContent = '令牌 ' + t.slice(0, 8) + '…'; return; }
+  hint.textContent = MODE === 'user' ? '未取到 Key' : '开放模式';
 }
 
 async function ensureToken(force) {
   if (force) tokenCache = null;
   if (tokenCache !== null) return tokenCache;
-  const typed = tokenValue();
+  // 用户侧不接受手填/浏览器回填的值：Key 只能由服务端签发，避免陈旧值被当成令牌用
+  const typed = MODE === 'user' ? '' : tokenValue();
   if (typed) { tokenCache = typed; tokenHint(); return tokenCache; }
   try {
-    const s = await api('settings');
-    const toks = (s && s.gateway_tokens) || [];
-    const first = toks[0];
-    const t = first ? (first.t || first) : '';
-    tokenCache = typeof t === 'string' ? t : '';
+    if (MODE === 'user') {
+      // 用户侧只能取自己名下的测试 Key；绝不碰后台令牌配置
+      const d = await api('user/test-key', {method: 'POST'});
+      tokenCache = (d && typeof d.key === 'string') ? d.key : '';
+    } else {
+      const s = await api('settings');
+      const toks = (s && s.gateway_tokens) || [];
+      const first = toks[0];
+      const t = first ? (first.t || first) : '';
+      tokenCache = typeof t === 'string' ? t : '';
+    }
   } catch (e) {
     tokenCache = '';
-    if (/未登录|会话已过期|HTTP 401/.test((e && e.message) || '')) {
-      toast('后台会话已过期，重新登录后再试', 'danger');
+    if (/未登录|会话已过期|已被停用|HTTP 401/.test((e && e.message) || '')) {
+      toast('登录状态已失效，重新登录后再试', 'danger');
     }
   }
   const input = $('#wc-token');
-  if (input && !input.value.trim() && tokenCache) input.value = tokenCache;
+  if (input && tokenCache) {
+    // 用户模式以服务端签发为准，覆盖任何残留值（含浏览器密码管理器回填）
+    if (MODE === 'user' || !input.value.trim()) input.value = tokenCache;
+  }
   tokenHint();
   return tokenCache;
 }
@@ -539,29 +564,39 @@ async function loadModels(preferred) {
   if (!sel) return;
   const keep = preferred || sel.value;
   const models = new Set();
-  const tok = tokenValue() || tokenCache || '';
-  try {
-    const r = await fetch(B + 'v1/models', {
-      headers: tok ? {Authorization: 'Bearer ' + tok} : {},
-      credentials: 'same-origin',
-    });
-    if (r.ok) {
-      const d = await r.json();
-      for (const m of (d.data || [])) if (m && m.id) models.add(m.id);
-    }
-  } catch (e) { /* 网关不可达时退回渠道配置 */ }
-  if (!models.size) {
+
+  if (MODE === 'user') {
+    // 用户只看模型广场（含定价与免费标记），不接触渠道配置
     try {
-      const d = await api('upstreams');
-      for (const u of (d.rows || [])) {
-        for (const m of (u.models || [])) models.add(m);
-        for (const k of Object.keys(u.model_map || {})) models.add(k);
+      const d = await api('user/models');
+      for (const r of (d.rows || [])) if (r && r.model) models.add(r.model);
+    } catch (e) { /* 会话失效时留空，下面按无模型提示 */ }
+  } else {
+    const tok = tokenValue() || tokenCache || '';
+    try {
+      const r = await fetch(B + 'v1/models', {
+        headers: tok ? {Authorization: 'Bearer ' + tok} : {},
+        credentials: 'same-origin',
+      });
+      if (r.ok) {
+        const d = await r.json();
+        for (const m of (d.data || [])) if (m && m.id) models.add(m.id);
       }
-    } catch (e) { /* 未登录后台时没有渠道信息 */ }
+    } catch (e) { /* 网关不可达时退回渠道配置 */ }
+    if (!models.size) {
+      try {
+        const d = await api('upstreams');
+        for (const u of (d.rows || [])) {
+          for (const m of (u.models || [])) models.add(m);
+          for (const k of Object.keys(u.model_map || {})) models.add(k);
+        }
+      } catch (e) { /* 未登录后台时没有渠道信息 */ }
+    }
   }
+
   sel.innerHTML = '';
   if (!models.size) {
-    sel.appendChild(el('option', '', '无可用模型，先配置渠道'));
+    sel.appendChild(el('option', '', '无可用模型'));
     return;
   }
   for (const m of models) sel.appendChild(el('option', '', m));
@@ -908,6 +943,26 @@ async function handleImport(file) {
 
 /* ---------------------------------------------------------------- 初始化 */
 
+function applyMode() {
+  const scope = $('#wc-scope');
+  const fetchBtn = $('#wc-token-fetch');
+  const tokenInput = $('#wc-token');
+  if (MODE === 'user') {
+    // 用户侧没有「后台令牌」这个概念：按钮换成取自己的 Key，并提示计费口径
+    if (fetchBtn) {
+      fetchBtn.textContent = '取我的 Key';
+      fetchBtn.title = '签发/复用你名下用于测试的 Key';
+    }
+    if (tokenInput) {
+      tokenInput.placeholder = '你的 API Key（自动获取）';
+      tokenInput.readOnly = true;   // 只由服务端签发，避免手填或回填出错
+    }
+    if (scope) scope.textContent = '调用计入余额与限流';
+  } else {
+    if (scope) scope.textContent = '';
+  }
+}
+
 function bindUI() {
   const list = $('#wc-projects');
   list.addEventListener('click', e => {
@@ -951,7 +1006,8 @@ function bindUI() {
   $('#wc-token-fetch').onclick = guard(async () => {
     tokenCache = null;
     await ensureToken(true);
-    toast(tokenValue() ? '已取后台令牌' : '后台未配置令牌');
+    if (tokenValue()) toast(MODE === 'user' ? '已取到你的 Key' : '已取后台令牌');
+    else toast(MODE === 'user' ? '取 Key 失败，检查登录状态' : '后台未配置令牌', 'warning');
   });
 
   $('#wc-token-reveal').onclick = () => {
@@ -1010,6 +1066,7 @@ function bindUI() {
 
 async function init() {
   state = loadState();
+  applyMode();
   bindUI();
   renderAll();
   tokenHint();

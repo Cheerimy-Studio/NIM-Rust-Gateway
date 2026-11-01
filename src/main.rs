@@ -152,16 +152,63 @@ async fn h_admin(headers: HeaderMap) -> Response {
     html_resp("admin.html", &csrf, true)
 }
 
+/// WebClaw 外壳页：mode/who 由服务端注入，前端据此决定取谁的令牌、看哪些模型。
+/// who 会进 localStorage 键名，只保留安全字符，避免把用户输入拼进页面。
+fn webclaw_shell(csrf: &str, mode: &str, who: &str) -> Response {
+    let safe_who: String = who
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect();
+    let body = web_assets::WEBCLAW_HTML
+        .replace("{{CSRF}}", csrf)
+        .replace("{{VERSION}}", VERSION)
+        .replace("{{MODE}}", mode)
+        .replace("{{WHO}}", &safe_who);
+    let mut resp = body.into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    resp
+}
+
 async fn h_webclaw(headers: HeaderMap) -> Response {
-    // 与 /admin 同一道门：页面内要调后台 API 读令牌与渠道，未登录就没有意义
     let cfg = store().load();
     let cfg = cfg.get("config").cloned().unwrap_or(json!({}));
-    let expected = session_cookie(&cfg);
-    let session = admin::cookie_get(&headers, "ngw_session").unwrap_or_default();
-    if session.is_empty() || !constant_eq(&session, &expected) {
-        return html_resp("login.html", "", true);
+
+    // 后台会话优先：管理员看到全量模型，令牌取后台配置
+    let admin_session = admin::cookie_get(&headers, "ngw_session").unwrap_or_default();
+    if !admin_session.is_empty() && constant_eq(&admin_session, &session_cookie(&cfg)) {
+        return webclaw_shell(&csrf_token(&cfg), "admin", "admin");
     }
-    html_resp("webclaw.html", &csrf_token(&cfg), true)
+
+    // 用户会话：只用自己的 Key 和自己可见的模型，绝不读后台配置
+    let secret = crate::util::str_or(cfg.get("session_secret"), "");
+    let user_cookie = admin::cookie_get(&headers, "ngw_user").unwrap_or_default();
+    if !user_cookie.is_empty() {
+        if let Some(uid) = users::user_session_id(&secret, &user_cookie) {
+            if users::auth_user(&uid).is_some() {
+                let csrf = users::user_csrf_token(&secret, &uid);
+                return webclaw_shell(&csrf, "user", &uid);
+            }
+        }
+    }
+
+    // 都没登录：交回用户中心登录（那里才是普通用户的入口）
+    axum::response::Redirect::to("/user").into_response()
 }
 
 async fn h_webclaw_js() -> Response {

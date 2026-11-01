@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const src = fs.readFileSync('web/webclaw.js', 'utf8');
+const LS_KEY = 'webclaw.projects.v1::admin';
 
 /* ---------------------------------------------------------------- 假 DOM */
 
@@ -144,7 +145,7 @@ function fetchStub(url, init = {}) {
 const {document, get} = makeDoc();
 const ctx = vm.createContext({
   window: {
-    NGW: {base: '/', csrf: 'csrf-test'},
+    NGW: {base: '/', csrf: 'csrf-test', mode: 'admin', who: 'admin'},
     addEventListener() {},
   },
   document,
@@ -195,7 +196,7 @@ const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
 
   ok('流式正文按增量拼接，尾帧不丢', () => {
     assert.ok(chatCalls.length >= 1, '没有发出请求');
-    const saved = JSON.parse(store.get('webclaw.projects.v1'));
+    const saved = JSON.parse(store.get(LS_KEY));
     const p = saved.projects.find(x => x.id === saved.active);
     const last = p.messages[p.messages.length - 1];
     assert.equal(last.role, 'assistant');
@@ -232,7 +233,7 @@ const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
   await flush(40);
 
   ok('非流式路径也能落正文', () => {
-    const saved = JSON.parse(store.get('webclaw.projects.v1'));
+    const saved = JSON.parse(store.get(LS_KEY));
     const p = saved.projects.find(x => x.id === saved.active);
     const last = p.messages[p.messages.length - 1];
     assert.equal(last.content, '非流式回复');
@@ -255,7 +256,7 @@ const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
   await flush(40);
 
   ok('HTTP 错误进消息体且正文不被污染', () => {
-    const saved = JSON.parse(store.get('webclaw.projects.v1'));
+    const saved = JSON.parse(store.get(LS_KEY));
     const p = saved.projects.find(x => x.id === saved.active);
     const last = p.messages[p.messages.length - 1];
     assert.equal(last.content, '');
@@ -265,14 +266,95 @@ const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
 
   ok('错误后界面仍可继续发送', () => {
     assert.equal(get('#wc-send').disabled, false);
-    assert.ok(store.get('webclaw.projects.v1').length > 0);
+    assert.ok(store.get(LS_KEY).length > 0);
   });
 
   // 安全：整个会话过程中令牌都不能落进 localStorage
   ok('令牌不会写进本地存储', () => {
-    const blob = store.get('webclaw.projects.v1');
+    const blob = store.get(LS_KEY);
     assert.ok(!blob.includes('sk-test'), '令牌出现在 localStorage');
     assert.ok(!/authorization/i.test(blob), '鉴权头出现在 localStorage');
+  });
+
+  /* ---------------------------------------------------- 用户模式（mode=user） */
+
+  // 用户侧只允许碰自己的接口；后台接口一旦被调用就是越权
+  const userCalls = [];
+  const userStore = new Map();
+  const userDoc = makeDoc();
+  const userCtx = vm.createContext({
+    window: {NGW: {base: '/', csrf: 'ucsrf-test', mode: 'user', who: 'u8_abc'}, addEventListener() {}},
+    document: userDoc.document,
+    localStorage: {
+      getItem: k => (userStore.has(k) ? userStore.get(k) : null),
+      setItem: (k, v) => userStore.set(k, String(v)),
+      removeItem: k => userStore.delete(k),
+    },
+    fetch: (url, init = {}) => {
+      const u = String(url);
+      userCalls.push(u);
+      if (u.includes('/api/user/test-key')) {
+        return Promise.resolve({ok: true, status: 200, headers: {get: () => 'application/json'},
+          json: async () => ({key: 'sk-usr-test'}), text: async () => '{}'});
+      }
+      if (u.includes('/api/user/models')) {
+        return Promise.resolve({ok: true, status: 200, headers: {get: () => 'application/json'},
+          json: async () => ({rows: [{model: 'user-model', free: true, price: 0}]}), text: async () => '{}'});
+      }
+      if (u.endsWith('/v1/chat/completions')) {
+        userCalls.push('CHAT');
+        const body = JSON.parse(init.body || '{}');
+        return Promise.resolve({ok: true, status: 200, headers: {get: () => 'application/json'},
+          text: async () => JSON.stringify({choices: [{message: {content: '用户侧回复'}}], model: body.model})});
+      }
+      return Promise.resolve({ok: false, status: 404, headers: {get: () => 'application/json'},
+        json: async () => ({error: {message: 'not found'}}), text: async () => '{"error":{"message":"not found"}}'});
+    },
+    performance: {now: () => Date.now()},
+    TextDecoder, TextEncoder, AbortController,
+    Blob: class { constructor(p) { this.text = String(p[0]); } },
+    URL: {createObjectURL: () => 'blob:u', revokeObjectURL() {}},
+    FileReader: class { readAsText() { this.onload && this.onload(); } },
+    bootstrap: {Toast: class { constructor() {} show() {} }},
+    marked: undefined, DOMPurify: undefined,
+    crypto: {getRandomValues: a => a},
+    Date, Math, JSON, String, Number, Array, Object, Set, Map, Promise, console,
+    setTimeout, clearTimeout, isNaN, parseInt, parseFloat, RegExp, Error,
+  });
+  userCtx.window.document = userDoc.document;
+  vm.runInContext(src, userCtx);
+  await flush(30);
+
+  ok('用户模式取自己的 Key，不读后台配置', () => {
+    assert.equal(userDoc.get('#wc-token').value, 'sk-usr-test');
+    assert.ok(userCalls.some(u => u.includes('/api/user/test-key')), '未调用 test-key');
+    assert.ok(!userCalls.some(u => u.includes('/api/settings')), '越权访问 /api/settings');
+    assert.ok(!userCalls.some(u => u.includes('/api/upstreams')), '越权访问 /api/upstreams');
+  });
+
+  ok('用户模式只显示模型广场里的模型', () => {
+    const sel = userDoc.get('#wc-model');
+    assert.ok(sel.options.some(o => o.value === 'user-model'), '未填充用户可见模型');
+    assert.equal(sel.options.length, 1, '混入了别的模型');
+  });
+
+  ok('用户模式发送走自己的 Key 并计费口径不变', async () => {});
+  userDoc.get('#wc-stream').checked = false;   // 该上下文用非流式桩
+  userDoc.get('#wc-input').value = '你好';
+  userDoc.get('#wc-send').onclick();
+  await flush(40);
+
+  ok('用户模式存储键按身份分区', () => {
+    assert.ok(userStore.has('webclaw.projects.v1::u8_abc'), '未按用户分区存储');
+    assert.ok(!userStore.has('webclaw.projects.v1::admin'), '写进了管理员的作用域');
+  });
+
+  ok('用户模式发送成功且不带后台令牌', () => {
+    const saved = JSON.parse(userStore.get('webclaw.projects.v1::u8_abc'));
+    const p = saved.projects.find(x => x.id === saved.active);
+    const last = p.messages[p.messages.length - 1];
+    assert.equal(last.content, '用户侧回复');
+    assert.ok(!userStore.get('webclaw.projects.v1::u8_abc').includes('sk-usr-test'), 'Key 落盘');
   });
 
   console.log('\n' + n + ' 项通过');

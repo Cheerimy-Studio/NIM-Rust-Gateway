@@ -476,7 +476,7 @@ body{overflow-x:clip}
     <a href="javascript:void(0)" data-p="prizes"><i class="bi bi-gift"></i>奖品中心</a>
     <a href="javascript:void(0)" data-p="logs"><i class="bi bi-list-ul"></i>调用日志</a>
     <a href="javascript:void(0)" data-p="models"><i class="bi bi-grid-3x3-gap"></i>模型广场</a>
-    <a href="javascript:void(0)" data-p="test"><i class="bi bi-chat-dots"></i>对话测试</a>
+    <a href="/webclaw" target="_blank" rel="noopener"><i class="bi bi-chat-dots"></i>对话测试</a>
   </nav>
   <div class="foot">
     <button id="btn-logout"><i class="bi bi-box-arrow-left"></i>退出登录</button>
@@ -647,28 +647,6 @@ body{overflow-x:clip}
   <h2 class="pane-title">模型广场</h2>
   <div class="hint mb-3">标有「免费」的模型余额为 0 也可调用；标价为单次成功调用的费用。</div>
   <div class="row g-3" id="model-cards"></div>
-</div>
-
-<div class="pane" id="pane-test">
-  <h2 class="pane-title">对话测试</h2>
-  <div class="hint mb-2">真实调用网关：与 API Key 同样计费、限速，调用记录进入「调用日志」；付费模型将扣除余额。</div>
-  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-    <select id="t-model" class="form-select form-select-sm" style="min-width:250px"></select>
-    <div class="form-check">
-      <input class="form-check-input" type="checkbox" id="t-stream" checked>
-      <label class="form-check-label small" for="t-stream">流式</label>
-    </div>
-    <button id="t-clear" class="btn btn-sm btn-outline-secondary">清空对话</button>
-    <span class="small text-muted ms-auto" id="t-diag"></span>
-  </div>
-  <div class="card mb-2">
-    <div class="card-body tchat" id="t-chat"><span class="hint">选择模型后输入消息开始测试。</span></div>
-  </div>
-  <div class="d-flex gap-2">
-    <textarea id="t-input" class="form-control form-control-sm" rows="2"
-      placeholder="输入消息后按 Enter 发送"></textarea>
-    <button id="t-send" class="btn btn-primary px-4">发送</button>
-  </div>
 </div>
 
 <div class="pane" id="pane-promo">
