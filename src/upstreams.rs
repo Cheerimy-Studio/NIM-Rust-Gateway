@@ -555,9 +555,11 @@ pub fn apply_model_limits(body: &mut Value, model: &str, limits: &HashMap<String
 pub fn migrate_transparent_once() {
     let empty_listed = {
         let db = store().load();
+        // 哨兵键判断是否跑过：config 的默认值合并会让 transparent_upstream
+        // 键永远存在（load 时填默认），不能用「键是否存在」当判断
         let already = db
             .get("config")
-            .map(|c| c.get("transparent_upstream").is_some())
+            .map(|c| c.get("transparent_migrated").map(util::truthy).unwrap_or(false))
             .unwrap_or(false);
         if already {
             return;
@@ -581,10 +583,12 @@ pub fn migrate_transparent_once() {
     }
     store().update(|db| {
         if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
-            if cfg.contains_key("transparent_upstream") {
+            if cfg.get("transparent_migrated").map(util::truthy).unwrap_or(false) {
                 return;
             }
+            // 存在未列模型的启用渠道 → 保持旧行为；否则维持默认（隐藏）
             cfg.insert("transparent_upstream".into(), Value::from(true));
+            cfg.insert("transparent_migrated".into(), Value::from(true));
         }
     });
     eprintln!("[migrate] 渠道存在未列模型的透传配置：已保持旧行为（任意模型名可调）。");
