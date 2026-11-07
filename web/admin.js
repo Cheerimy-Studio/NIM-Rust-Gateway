@@ -1292,8 +1292,9 @@ function chainLoad(text) {
 }
 
 // 收集 + 校验，返回序列化文本；有硬伤抛 Error（guard 统一 toast），可疑项落到 #chain-err
-function chainDump() {
-  const errBox = $('#chain-err');
+// 收集 + 校验（纯函数）：错误=必须改才能保存；警告=能存但链可能不对外展示
+// （成员没接入时，链会按口径从 /v1/models 与模型广场消失）
+function chainCollect() {
   const warns = [], errors = [];
   const rows = [];
   for (const tr of $('#chain-rows').querySelectorAll('tr')) {
@@ -1326,12 +1327,28 @@ function chainDump() {
       if (cand && cand.routable === false) warns.push(`${tag} 的成员 ${mem} 当前不可路由（隐藏原名或未列入渠道模型），请求到它会跳过`);
     }
   }
+  return { rows, errors, warns };
+}
+
+function chainDump() {
+  const errBox = $('#chain-err');
+  const { rows, errors, warns } = chainCollect();
   if (errBox) errBox.textContent = warns.join('；');
   if (errors.length) throw new Error('模型路由：' + errors[0] + (errors.length > 1 ? `（共 ${errors.length} 处问题）` : ''));
   return rows.map(r => {
     const suffix = r.rr ? (r.sticky === 3 ? ' | rr' : ` | rr${r.sticky}`) : '';
     return `${r.name} = ${r.members.join(', ')}${suffix}`;
   }).join('\n');
+}
+
+// 只读校验：编辑与加载时把问题摆到明面——尤其是「成员没接入导致链不对外」
+let chainValT = null;
+function chainValidateDisplay() {
+  const errBox = $('#chain-err');
+  if (!errBox || !$('#chain-rows')) return;
+  if (!$('#chain-rows').querySelector('.chain-name')) { errBox.textContent = ''; return; }
+  const { errors, warns } = chainCollect();
+  errBox.textContent = errors.concat(warns).join('；');
 }
 
 // ---------------- 模型接入（上游模型 / 别名 / 上限 / 降级链） ----------------
@@ -1351,9 +1368,11 @@ async function loadCatalog() {
   if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
   renderCatalog();
   chainLoadCandidates();
-  loadPrices();
+  // 定价接口失败不能拖垮链编辑器/接入表的加载
+  await run(() => loadPrices());
   const c = await run(() => api('settings'));
   if (c) chainLoad(c.model_chains || '');
+  chainValidateDisplay();
 }
 
 function renderCatalog() {
@@ -1388,6 +1407,7 @@ function renderCatalog() {
       const tps = parseInt(tr.querySelector('.cat-tps').value, 10) || 0;
       const price = parseFloat(tr.querySelector('.cat-price').value) || 0;
       if (alias && /[=|#]/.test(alias)) throw new Error('别名不能包含 = | # 字符');
+      if (alias && CHAIN_CANDS.some(m => m.chain && m.name === alias)) throw new Error('别名与模型路由重名，会让其中一个不可达');
       await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out, tps, price}});
       toast(alias ? '已接入：' + alias : '已隐藏');
       loadCatalog();
@@ -1451,6 +1471,10 @@ function bindCatalog() {
     loadCatalog();
   });
   $('#chain-add').onclick = () => chainAddRow({});
+  $('#chain-rows').addEventListener('input', () => {
+    clearTimeout(chainValT);
+    chainValT = setTimeout(chainValidateDisplay, 350);
+  });
   $('#chain-save').onclick = guard(async () => {
     const text = chainDump();
     await api('settings', {method: 'POST', json: {config: {model_chains: text}}});

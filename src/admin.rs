@@ -1039,6 +1039,78 @@ fn upstream_alias_rows(db: &Value) -> Vec<Value> {
     rows
 }
 
+/// 模型路由文本校验（与前端 chainDump 同口径）：
+/// 结构（名字/成员数/字符集/重名/嵌套）+ 链名不得遮蔽已接入的模型名。
+pub fn validate_model_chains(db: &Value, text: &str) -> Result<(), String> {
+    let mut taken: Vec<String> = Vec::new();
+    for u in db.get("upstreams").and_then(|x| x.as_array()).unwrap_or(&vec![]) {
+        if let Some(ms) = u.get("models").and_then(|m| m.as_array()) {
+            for m in ms {
+                let n = util::str_or(Some(m), "");
+                if !n.is_empty() && !taken.contains(&n) {
+                    taken.push(n);
+                }
+            }
+        }
+        if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
+            for k in mm.keys() {
+                if !taken.contains(k) {
+                    taken.push(k.clone());
+                }
+            }
+        }
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for (idx, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else {
+            return Err(format!("模型路由第 {} 行缺少「=」", idx + 1));
+        };
+        let name = line[..eq].trim().to_string();
+        let tag = if name.is_empty() { format!("第 {} 行", idx + 1) } else { name.clone() };
+        if name.is_empty() {
+            return Err(format!("模型路由{}：路由名不能为空", tag));
+        }
+        if name.chars().count() > 80 || name.contains(['=', '|', '#']) {
+            return Err(format!("模型路由{}：路由名过长或含 = | # 字符", tag));
+        }
+        if seen.contains(&name) {
+            return Err(format!("模型路由{}：路由名重复", tag));
+        }
+        if taken.contains(&name) {
+            return Err(format!("模型路由{}：与已接入的模型/别名重名，会遮蔽原模型", tag));
+        }
+        seen.push(name);
+        let mut rest = line[eq + 1..].trim().to_string();
+        if let Some(bar) = rest.rfind('|') {
+            let flag = rest[bar + 1..].trim().to_lowercase();
+            if flag == "fb" || flag == "fallback" || flag.starts_with("rr") {
+                rest = rest[..bar].trim().to_string();
+            }
+        }
+        let members: Vec<String> = rest
+            .split(',')
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .collect();
+        if members.len() < 2 {
+            return Err(format!("模型路由{}：至少需要 2 个成员", tag));
+        }
+        for mem in &members {
+            if mem.chars().count() > 160 || mem.contains(['=', '|', '#']) {
+                return Err(format!("模型路由{}：成员 {} 含非法字符或过长", tag, util::char_prefix(mem, 40)));
+            }
+            if seen.contains(mem) {
+                return Err(format!("模型路由{}：成员 {} 是路由名，不支持嵌套", tag, mem));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 模型接入视图：每个启用渠道的上游模型（渠道ID/模型名）+ 现有别名/暴露状态/上限
 pub async fn upstream_models(headers: &HeaderMap) -> Response {
     if let Err(e) = require(headers, false) {
@@ -1079,6 +1151,15 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     // 会在下一次表单保存时把配置撕碎
     if alias.contains(['=', '>', '|', ',', '#']) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "别名不能包含 = > | , # 字符"}}))).into_response();
+    }
+    if !alias.is_empty() {
+        let cfg = store().load().get("config").cloned().unwrap_or(json!({}));
+        if crate::upstreams::parse_model_chains(&cfg)
+            .iter()
+            .any(|c| c.name == alias)
+        {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "别名与模型路由重名，会让其中一个不可达"}}))).into_response();
+        }
     }
     if ctx < 0 || out < 0 || ctx > 100_000_000 || out > 100_000_000 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "上限数值非法"}}))).into_response();
@@ -1393,6 +1474,12 @@ pub async fn settings_save(headers: &HeaderMap, body: Bytes) -> Response {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "请求体格式错误"}}))).into_response();
     };
     let incoming = body.get("config").cloned().unwrap_or(json!({}));
+    // 模型路由：保存前校验结构，链名遮蔽现有模型/嵌套在这里就拦下
+    if let Some(chains_text) = incoming.get("model_chains").and_then(|v| v.as_str()) {
+        if let Err(e) = validate_model_chains(&store().load(), chains_text) {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": e}}))).into_response();
+        }
+    }
     // 邮箱注册正则：保存前校验可编译，避免线上写出永远匹配失败的规则
     if let Some(re_pat) = incoming.get("reg_email_regex").and_then(|v| v.as_str()) {
         let t = re_pat.trim();
@@ -2694,4 +2781,48 @@ fn sign_settings_reject_invalid_and_inverted_ranges() {
     }
     assert!(validate_sign_settings(&current,&json!({"sign_min":0.000001,"sign_max":0.000001})).is_ok());
     assert!(validate_sign_settings(&current,&json!({"sign_enabled":false})).is_ok());
+}
+
+#[cfg(test)]
+mod chain_validate_tests {
+    use super::*;
+
+    fn db_with(models: &str, map: &str) -> Value {
+        // 真实存储里 models 是数组、model_map 是对象：按 parse 口径构造
+        let arr: Vec<Value> = models
+            .split(',')
+            .filter(|m| !m.trim().is_empty())
+            .map(|m| json!(m.trim()))
+            .collect();
+        let mut mo = serde_json::Map::new();
+        for pair in map.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() { continue; }
+            if let Some((k, v)) = pair.split_once('=') {
+                mo.insert(k.trim().to_string(), json!(v.trim()));
+            }
+        }
+        json!({
+            "upstreams": [{"id": "u1", "name": "T", "base": "https://x.test/v1", "enabled": true,
+                           "models": arr, "model_map": mo}],
+            "config": {}
+        })
+    }
+
+    #[test]
+    fn chain_validation_rejects_shadowing_and_structure() {
+        let db = db_with("openmock", "");
+        // 遮蔽已接入模型
+        assert!(validate_model_chains(&db, "openmock = a, b").is_err());
+        // 正常链通过
+        assert!(validate_model_chains(&db, "combo = openmock, other").is_ok());
+        // 结构问题
+        assert!(validate_model_chains(&db, "solo = only-one").is_err(), "成员不足");
+        assert!(validate_model_chains(&db, "x = a, b|zz").is_err(), "成员含非法字符");
+        assert!(validate_model_chains(&db, "dup = a, b\ndup = c, d").is_err(), "重复");
+        assert!(validate_model_chains(&db, "aa = a, b
+nested = aa, x").is_err(), "嵌套");
+        // 空文本 = 清空路由，合法
+        assert!(validate_model_chains(&db, "").is_ok());
+    }
 }
