@@ -478,9 +478,17 @@ pub fn models_alias_linked(a: &str, b: &str) -> bool {
 
 /// 解析模型参数上限：每行 `名字=ctx:上下文,out:输出` 或 `名字=上下文`（等价 ctx:N）。
 /// 键按客户端可见模型名精确匹配（小写）。0 = 不设限。
-pub fn parse_model_limits(cfg: &Value) -> HashMap<String, (i64, i64)> {
+/// 模型标注：上下文/最大输出上限（网关钳制）+ 预估出字速度（仅展示）。
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct ModelMeta {
+    pub ctx: i64,
+    pub out: i64,
+    pub tps: i64,
+}
+
+pub fn parse_model_limits(cfg: &Value) -> HashMap<String, ModelMeta> {
     let text = util::str_or(cfg.get("model_limits"), "");
-    let mut out: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut out: HashMap<String, ModelMeta> = HashMap::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -493,6 +501,7 @@ pub fn parse_model_limits(cfg: &Value) -> HashMap<String, (i64, i64)> {
         }
         let mut ctx = 0i64;
         let mut outn = 0i64;
+        let mut tps = 0i64;
         for part in line[eq + 1..].split(',') {
             let part = part.trim().to_lowercase();
             if part.is_empty() {
@@ -509,11 +518,12 @@ pub fn parse_model_limits(cfg: &Value) -> HashMap<String, (i64, i64)> {
             match k {
                 "ctx" | "context" => ctx = n,
                 "out" | "output" | "maxout" => outn = n,
+                "tps" | "speed" => tps = n,
                 _ => {}
             }
         }
-        if ctx > 0 || outn > 0 {
-            out.insert(name, (ctx, outn));
+        if ctx > 0 || outn > 0 || tps > 0 {
+            out.insert(name, ModelMeta { ctx, out: outn, tps });
         }
         if out.len() >= 500 {
             break;
@@ -524,10 +534,11 @@ pub fn parse_model_limits(cfg: &Value) -> HashMap<String, (i64, i64)> {
 
 /// 发送前按上限钳制请求体：输出上限直接 min；上下文上限扣除本请求估算
 /// prompt 后作为 max_tokens 上限。只降不升，没配限的模型原样放行。
-pub fn apply_model_limits(body: &mut Value, model: &str, limits: &HashMap<String, (i64, i64)>, est_prompt: i64) -> bool {
-    let Some((ctx, out)) = limits.get(&model.to_lowercase()).copied() else {
+pub fn apply_model_limits(body: &mut Value, model: &str, limits: &HashMap<String, ModelMeta>, est_prompt: i64) -> bool {
+    let Some(meta) = limits.get(&model.to_lowercase()).copied() else {
         return false;
     };
+    let (ctx, out) = (meta.ctx, meta.out);
     let Some(obj) = body.as_object_mut() else { return false };
     let mut changed = false;
     for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
@@ -1414,13 +1425,14 @@ mod limits_tests {
 
     #[test]
     fn parse_model_limits_forms_and_garbage() {
-        let cfg = serde_json::json!({"model_limits": "a=ctx:4096,out:1024\nb = 2048\nC=CTX:10\nbad line\nd=ctx:-5\ne=ctx:0,out:7\n# comment\n"});
+        let cfg = serde_json::json!({"model_limits": "a=ctx:4096,out:1024\nb = 2048\nC=CTX:10\nbad line\nd=ctx:-5\ne=ctx:0,out:7\nf=tps:120\n# comment\n"});
         let m = parse_model_limits(&cfg);
-        assert_eq!(m.get("a"), Some(&(4096, 1024)));
-        assert_eq!(m.get("b"), Some(&(2048, 0)), "裸数字=ctx");
-        assert_eq!(m.get("c"), Some(&(10, 0)), "键大小写不敏感");
+        assert_eq!(m.get("a").map(|x| (x.ctx, x.out)), Some((4096, 1024)));
+        assert_eq!(m.get("b").map(|x| (x.ctx, x.out)), Some((2048, 0)), "裸数字=ctx");
+        assert_eq!(m.get("c").map(|x| (x.ctx, x.out)), Some((10, 0)), "键大小写不敏感");
         assert!(!m.contains_key("d"));
-        assert_eq!(m.get("e"), Some(&(0, 7)), "ctx:0 忽略，out 保留");
+        assert_eq!(m.get("e").map(|x| (x.ctx, x.out)), Some((0, 7)), "ctx:0 忽略，out 保留");
+        assert_eq!(m.get("f").map(|x| x.tps), Some(120), "仅速度也成行");
     }
 
     #[test]

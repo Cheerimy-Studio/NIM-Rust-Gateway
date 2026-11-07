@@ -906,7 +906,7 @@ pub async fn settings_get(headers: &HeaderMap) -> Response {
 
 // ---------------------------------------------------------------- 模型接入（上游模型 → 别名 → 暴露）
 
-fn model_limits_set(text: &str, key: &str, ctx: i64, out: i64) -> String {
+fn model_limits_set(text: &str, key: &str, ctx: i64, out: i64, tps: i64) -> String {
     let low = key.to_lowercase();
     let mut kept: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -920,7 +920,7 @@ fn model_limits_set(text: &str, key: &str, ctx: i64, out: i64) -> String {
         }
         kept.push(t.to_string());
     }
-    if ctx > 0 || out > 0 {
+    if ctx > 0 || out > 0 || tps > 0 {
         let mut parts: Vec<String> = Vec::new();
         if ctx > 0 {
             parts.push(format!("ctx:{ctx}"));
@@ -928,9 +928,31 @@ fn model_limits_set(text: &str, key: &str, ctx: i64, out: i64) -> String {
         if out > 0 {
             parts.push(format!("out:{out}"));
         }
+        if tps > 0 {
+            parts.push(format!("tps:{tps}"));
+        }
         kept.push(format!("{key}={}", parts.join(",")));
     }
     kept.join("\n")
+}
+
+/// 别名改名/隐藏后，旧键的标注行永远没人读：一并清掉
+fn model_limits_remove(text: &str, keys: &[String]) -> String {
+    if keys.is_empty() {
+        return text.to_string();
+    }
+    let drop: Vec<String> = keys.iter().map(|k| k.to_lowercase()).collect();
+    text.lines()
+        .filter(|line| {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                return true;
+            }
+            let name = t.split('=').next().unwrap_or("").trim().to_lowercase();
+            !drop.contains(&name)
+        })
+        .collect::<Vec<&str>>()
+        .join("\n")
 }
 
 fn upstream_alias_rows(db: &Value) -> Vec<Value> {
@@ -1001,7 +1023,8 @@ fn upstream_alias_rows(db: &Value) -> Vec<Value> {
             let exposed = models_list.iter().any(|m| m == upstream)
                 || (!alias.is_empty() && models_list.iter().any(|m| m == &alias));
             let client = if alias.is_empty() { upstream.clone() } else { alias.clone() };
-            let (ctx, out) = limits.get(&client.to_lowercase()).copied().unwrap_or((0, 0));
+            let meta = limits.get(&client.to_lowercase()).copied().unwrap_or_default();
+            let (ctx, out, tps) = (meta.ctx, meta.out, meta.tps);
             let routable = crate::upstreams::channel_serves_model(u, &client, global_hide, transparent)
                 || models_list.iter().any(|m| m == upstream);
             let price = prices.get(&client).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1009,7 +1032,7 @@ fn upstream_alias_rows(db: &Value) -> Vec<Value> {
                 "channel_id": uid, "channel_name": uname,
                 "upstream": upstream, "alias": alias,
                 "exposed": exposed, "routable": routable,
-                "ctx": ctx, "out": out, "price": price,
+                "ctx": ctx, "out": out, "tps": tps, "price": price,
             }));
         }
     }
@@ -1043,6 +1066,7 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     let alias = util::str_or(body.get("alias"), "").trim().to_string();
     let ctx = util::int_or(body.get("ctx"), 0);
     let out = util::int_or(body.get("out"), 0);
+    let tps = util::int_or(body.get("tps"), 0);
     if ch_id.is_empty() || upstream.is_empty() || upstream.chars().count() > 160 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "参数缺失或模型名过长"}}))).into_response();
     }
@@ -1056,6 +1080,9 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     }
     if ctx < 0 || out < 0 || ctx > 100_000_000 || out > 100_000_000 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "上限数值非法"}}))).into_response();
+    }
+    if tps < 0 || tps > 1_000_000 {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "速度数值非法"}}))).into_response();
     }
     let mut err: Option<String> = None;
     store().update(|db| {
@@ -1102,11 +1129,19 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
             o.insert("models".into(), Value::Array(new_models.into_iter().map(Value::from).collect()));
             o.insert("model_map".into(), Value::Object(map));
         }
-        // 上限写进 config.model_limits，键 = 客户端可见名
+        // 标注写进 config.model_limits，键 = 客户端可见名；改名/隐藏后
+        // 旧别名键的行一并清掉（留着永远没人读，只会越积越脏）
         let client = if alias.is_empty() { upstream.clone() } else { alias.clone() };
         if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
             let text = util::str_or(cfg.get("model_limits"), "");
-            let new_text = model_limits_set(&text, &client, ctx, out);
+            // 此前以真名暴露（同名接入没有 map 键）也算旧键：改名后同样残留
+            let mut stale: Vec<String> = old_aliases.clone();
+            if models_list.iter().any(|m| m == &upstream) {
+                stale.push(upstream.clone());
+            }
+            stale.retain(|k| k.as_str() != client);
+            let text2 = model_limits_remove(&text, &stale);
+            let new_text = model_limits_set(&text2, &client, ctx, out, tps);
             cfg.insert("model_limits".into(), Value::from(new_text));
         }
     });

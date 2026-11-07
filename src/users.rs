@@ -1336,7 +1336,8 @@ pub fn model_square() -> Vec<Value> {
                 "free": !(price.is_finite() && price > 0.0),
                 "price": if price.is_finite() && price > 0.0 { json!(util::round6(price)) } else { json!(0) },
                 "health": health_pct,
-                "ctx": limits.get(&m.to_lowercase()).map(|(c, _)| *c).unwrap_or(0),
+                "ctx": limits.get(&m.to_lowercase()).map(|x| x.ctx).unwrap_or(0),
+                "tps": limits.get(&m.to_lowercase()).map(|x| x.tps).unwrap_or(0),
             })
         })
         .collect()

@@ -528,13 +528,23 @@ details.upgrp[open]{background:#fff}
       </span>
     </div>
     <div class="card-body">
+      <div class="d-flex gap-2 align-items-end flex-wrap mb-2">
+        <span class="small text-muted">勾选多行批量标注，留空的项保持原值：</span>
+        <input id="bat-ctx" type="number" min="0" class="form-control form-control-sm" style="width:130px" placeholder="上下文">
+        <input id="bat-out" type="number" min="0" class="form-control form-control-sm" style="width:130px" placeholder="输出上限">
+        <input id="bat-tps" type="number" min="0" class="form-control form-control-sm" style="width:130px" placeholder="预估速度 tok/s">
+        <button class="btn btn-sm btn-outline-primary" id="cat-apply" type="button">应用到选中</button>
+        <span class="form-text mb-0" id="cat-selinfo"></span>
+      </div>
       <div class="table-responsive">
         <table class="table table-sm align-middle mb-0">
           <thead><tr>
-            <th>渠道</th><th>上游模型</th><th style="width:220px">别名（客户端用名）</th>
-            <th style="width:110px" title="0=不限">上下文上限</th>
-            <th style="width:110px" title="0=不限">输出上限</th>
-            <th style="width:110px">状态</th><th style="width:70px"></th>
+            <th style="width:34px"><input type="checkbox" id="cat-selall" title="全选"></th>
+            <th>渠道</th><th>上游模型</th><th style="width:200px">别名（客户端用名）</th>
+            <th style="width:104px" title="0=不限">上下文上限</th>
+            <th style="width:104px" title="0=不限">输出上限</th>
+            <th style="width:104px" title="仅展示，给用户挑模型参考">预估速度</th>
+            <th style="width:104px">状态</th><th style="width:70px"></th>
           </tr></thead>
           <tbody id="cat-rows"></tbody>
         </table>

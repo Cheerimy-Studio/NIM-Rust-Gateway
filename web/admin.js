@@ -1371,28 +1371,76 @@ function renderCatalog() {
       ? '<span class="badge text-bg-success">已接入</span>'
       : '<span class="badge text-bg-secondary">隐藏</span>';
     tr.innerHTML =
+      '<td><input type="checkbox" class="cat-sel" data-key="' + esc(r.channel_id + '\u0000' + r.upstream) + '"></td>' +
       '<td class="small text-muted">' + esc(r.channel_name || r.channel_id) + '</td>' +
-      '<td class="font-monospace small" style="max-width:280px;word-break:break-all">' + esc(r.channel_id + '/' + r.upstream) + '</td>' +
+      '<td class="font-monospace small" style="max-width:260px;word-break:break-all">' + esc(r.channel_id + '/' + r.upstream) + '</td>' +
       '<td><input class="form-control form-control-sm font-monospace cat-alias" value="' + esc(r.alias || '') + '" placeholder="空=隐藏"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-ctx" value="' + (r.ctx || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-out" value="' + (r.out || 0) + '"></td>' +
+      '<td><input type="number" min="0" class="form-control form-control-sm cat-tps" value="' + (r.tps || 0) + '"></td>' +
       '<td>' + st + (r.price > 0 ? '<div class="small text-muted">¥' + r.price + '/次</div>' : '') + '</td>' +
       '<td class="text-end"><button class="btn btn-sm btn-primary cat-save">保存</button></td>';
     tr.querySelector('.cat-save').onclick = guard(async () => {
       const alias = tr.querySelector('.cat-alias').value.trim();
       const ctx = parseInt(tr.querySelector('.cat-ctx').value, 10) || 0;
       const out = parseInt(tr.querySelector('.cat-out').value, 10) || 0;
+      const tps = parseInt(tr.querySelector('.cat-tps').value, 10) || 0;
       if (alias && /[=|#]/.test(alias)) throw new Error('别名不能包含 = | # 字符');
-      await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out}});
+      await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out, tps}});
       toast(alias ? '已接入：' + alias : '已隐藏');
       loadCatalog();
     });
     tb.appendChild(tr);
   }
+  updateSelInfo();
+}
+
+function selectedRows() {
+  const picked = [];
+  for (const tr of $('#cat-rows').querySelectorAll('tr')) {
+    const box = tr.querySelector('.cat-sel');
+    if (!box || !box.checked) continue;
+    const [ch, up] = box.dataset.key.split('\u0000');
+    const r = CAT_ROWS.find(x => x.channel_id === ch && x.upstream === up);
+    if (r) picked.push({r, tr});
+  }
+  return picked;
+}
+
+function updateSelInfo() {
+  const n = selectedRows().length;
+  const el = $('#cat-selinfo');
+  if (el) el.textContent = n ? '已选 ' + n + ' 行' : '';
+}
+
+async function applyBatch() {
+  const picked = selectedRows();
+  if (!picked.length) throw new Error('先勾选要标注的行');
+  const bat = {
+    ctx: $('#bat-ctx').value.trim(),
+    out: $('#bat-out').value.trim(),
+    tps: $('#bat-tps').value.trim(),
+  };
+  if (bat.ctx === '' && bat.out === '' && bat.tps === '') throw new Error('三项都留空，没有可应用的值');
+  for (const {r} of picked) {
+    await api('upstream-models/op', {method: 'POST', json: {
+      channel_id: r.channel_id, upstream: r.upstream, alias: r.alias || '',
+      ctx: bat.ctx === '' ? (r.ctx || 0) : (parseInt(bat.ctx, 10) || 0),
+      out: bat.out === '' ? (r.out || 0) : (parseInt(bat.out, 10) || 0),
+      tps: bat.tps === '' ? (r.tps || 0) : (parseInt(bat.tps, 10) || 0),
+    }});
+  }
+  toast('已批量标注 ' + picked.length + ' 行');
+  loadCatalog();
 }
 
 function bindCatalog() {
   $('#cat-channel').onchange = renderCatalog;
+  $('#cat-selall').onchange = (e) => {
+    for (const box of $('#cat-rows').querySelectorAll('.cat-sel')) box.checked = e.target.checked;
+    updateSelInfo();
+  };
+  $('#cat-apply').onclick = guard(applyBatch);
   $('#cat-fetch').onclick = guard(async () => {
     const ch = $('#cat-channel').value;
     if (!ch) throw new Error('先在上面选一个渠道');
