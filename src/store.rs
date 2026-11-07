@@ -924,3 +924,9 @@ pub(crate) fn reward_recovery_regressions() {
     fs::remove_file(group_file(REWARD_JOURNAL)).unwrap();
     s.update(|db|*db=before);s.flush();
 }
+
+#[cfg(test)]
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}

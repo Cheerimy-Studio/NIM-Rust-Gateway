@@ -1067,6 +1067,8 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     let ctx = util::int_or(body.get("ctx"), 0);
     let out = util::int_or(body.get("out"), 0);
     let tps = util::int_or(body.get("tps"), 0);
+    // 价格可选：不传 = 不动现有定价（批量标注场景只发 ctx/out/tps）
+    let price_req: Option<f64> = body.get("price").and_then(|v| v.as_f64());
     if ch_id.is_empty() || upstream.is_empty() || upstream.chars().count() > 160 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "参数缺失或模型名过长"}}))).into_response();
     }
@@ -1083,6 +1085,11 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     }
     if tps < 0 || tps > 1_000_000 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "速度数值非法"}}))).into_response();
+    }
+    if let Some(price) = price_req {
+        if !(0.0..=100_000.0).contains(&price) {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "价格数值非法"}}))).into_response();
+        }
     }
     let mut err: Option<String> = None;
     store().update(|db| {
@@ -1129,9 +1136,23 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
             o.insert("models".into(), Value::Array(new_models.into_iter().map(Value::from).collect()));
             o.insert("model_map".into(), Value::Object(map));
         }
+        // 价格随行保存：>0 写入渠道 prices[客户端名]，0 = 免费（移除条目）；
+        // 请求没带 price 就保持原价不动
+        let client = if alias.is_empty() { upstream.clone() } else { alias.clone() };
+        if let Some(price) = price_req {
+            if let Some(o) = u.as_object_mut() {
+                let prices = o.entry("prices".to_string()).or_insert_with(|| json!({}));
+                if let Some(pm) = prices.as_object_mut() {
+                    if price > 0.0 {
+                        pm.insert(client.clone(), json!(util::round6(price)));
+                    } else {
+                        pm.remove(&client);
+                    }
+                }
+            }
+        }
         // 标注写进 config.model_limits，键 = 客户端可见名；改名/隐藏后
         // 旧别名键的行一并清掉（留着永远没人读，只会越积越脏）
-        let client = if alias.is_empty() { upstream.clone() } else { alias.clone() };
         if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
             let text = util::str_or(cfg.get("model_limits"), "");
             // 此前以真名暴露（同名接入没有 map 键）也算旧键：改名后同样残留

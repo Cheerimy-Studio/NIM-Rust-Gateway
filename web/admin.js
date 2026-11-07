@@ -149,7 +149,6 @@ const LOADERS = {
   docs: () => fillDocs(),
   users: loadUsers,
   promo: loadPromoAdmin,
-  prices: loadPrices,
   wheels: loadWheels
 };
 async function loadPromoAdmin() {
@@ -1310,11 +1309,11 @@ function chainDump() {
   for (const m of CHAIN_CANDS) if (m.chain) chainNames.add(m.name);
   const seenNames = new Set();
   for (const r of rows) {
-    const tag = r.name || '(空链名)';
-    if (!r.name) { errors.push('存在没有链名的路由'); continue; }
-    if (r.name.length > 80) errors.push(`${tag}：链名过长（>80 字符）`);
-    if (/[=|#]/.test(r.name)) errors.push(`${tag}：链名不能包含 = | # 字符`);
-    if (seenNames.has(r.name)) errors.push(`${tag}：链名重复`);
+    const tag = r.name || '(空路由名)';
+    if (!r.name) { errors.push('存在没有路由名的路由'); continue; }
+    if (r.name.length > 80) errors.push(`${tag}：路由名过长（>80 字符）`);
+    if (/[=|#]/.test(r.name)) errors.push(`${tag}：路由名不能包含 = | # 字符`);
+    if (seenNames.has(r.name)) errors.push(`${tag}：路由名重复`);
     seenNames.add(r.name);
     const shadow = CHAIN_CANDS.find(m => m.name === r.name && !m.chain);
     if (shadow) errors.push(`${tag}：与现有模型/别名重名，会遮蔽原模型`);
@@ -1352,6 +1351,7 @@ async function loadCatalog() {
   if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
   renderCatalog();
   chainLoadCandidates();
+  loadPrices();
   const c = await run(() => api('settings'));
   if (c) chainLoad(c.model_chains || '');
 }
@@ -1369,7 +1369,7 @@ function renderCatalog() {
     const tr = document.createElement('tr');
     const st = r.exposed
       ? '<span class="badge text-bg-success">已接入</span>'
-      : '<span class="badge text-bg-secondary">隐藏</span>';
+      : '<span class="badge text-bg-secondary">待接入</span>';
     tr.innerHTML =
       '<td><input type="checkbox" class="cat-sel" data-key="' + esc(r.channel_id + '\u0000' + r.upstream) + '"></td>' +
       '<td class="small text-muted">' + esc(r.channel_name || r.channel_id) + '</td>' +
@@ -1378,15 +1378,17 @@ function renderCatalog() {
       '<td><input type="number" min="0" class="form-control form-control-sm cat-ctx" value="' + (r.ctx || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-out" value="' + (r.out || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-tps" value="' + (r.tps || 0) + '"></td>' +
-      '<td>' + st + (r.price > 0 ? '<div class="small text-muted">¥' + r.price + '/次</div>' : '') + '</td>' +
+      '<td><input type="number" step="0.001" min="0" class="form-control form-control-sm cat-price" value="' + (r.price || 0) + '" title="0=免费"></td>' +
+      '<td>' + st + '</td>' +
       '<td class="text-end"><button class="btn btn-sm btn-primary cat-save">保存</button></td>';
     tr.querySelector('.cat-save').onclick = guard(async () => {
       const alias = tr.querySelector('.cat-alias').value.trim();
       const ctx = parseInt(tr.querySelector('.cat-ctx').value, 10) || 0;
       const out = parseInt(tr.querySelector('.cat-out').value, 10) || 0;
       const tps = parseInt(tr.querySelector('.cat-tps').value, 10) || 0;
+      const price = parseFloat(tr.querySelector('.cat-price').value) || 0;
       if (alias && /[=|#]/.test(alias)) throw new Error('别名不能包含 = | # 字符');
-      await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out, tps}});
+      await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out, tps, price}});
       toast(alias ? '已接入：' + alias : '已隐藏');
       loadCatalog();
     });

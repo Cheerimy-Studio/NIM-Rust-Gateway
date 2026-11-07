@@ -1298,7 +1298,7 @@ pub(crate) fn member_admission(kind: &str, balance: f64, paid: bool, model: &str
             403,
             "key_model_not_allowed",
             format!(
-                "该 Key 仅限调用{kind_name}模型（链成员模型 {} 不在允许范围内）",
+                "该 Key 仅限调用{kind_name}模型（路由成员模型 {} 不在允许范围内）",
                 util::char_prefix(model, 80)
             ),
         ));
@@ -1307,7 +1307,7 @@ pub(crate) fn member_admission(kind: &str, balance: f64, paid: bool, model: &str
         return Err((
             402,
             "insufficient_quota",
-            format!("余额不足，无法调用付费模型（链成员模型 {}，免费模型不受影响）", util::char_prefix(model, 80)),
+            format!("余额不足，无法调用付费模型（路由成员模型 {}，免费模型不受影响）", util::char_prefix(model, 80)),
         ));
     }
     Ok(())
@@ -2159,7 +2159,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                                 st,
                                 msg.clone(),
                                 None,
-                                Some(release_log(ep_tag, &model, st, 0, &format!("链成员跳过：{msg}"), attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
+                                Some(release_log(ep_tag, &model, st, 0, &format!("路由成员跳过：{msg}"), attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
                                 0, 0,
                             )
                             .await;
@@ -3395,7 +3395,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                                 st,
                                 msg.clone(),
                                 None,
-                                Some(release_log(ep, &model, st, 0, &format!("链成员跳过：{msg}"), attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
+                                Some(release_log(ep, &model, st, 0, &format!("路由成员跳过：{msg}"), attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
                                 0, 0,
                             )
                             .await;
@@ -4271,6 +4271,7 @@ mod tests {
 
     #[tokio::test]
     async fn pump_regression_with_real_http_accounting_and_cancellation() {
+        let _g = crate::store::test_lock();
         let dir = std::env::temp_dir().join(format!("nim-gateway-test-{}", util::rand_hex(8)));
         std::env::set_var("NGW_DATA_DIR", &dir);
         store().update(|db| {

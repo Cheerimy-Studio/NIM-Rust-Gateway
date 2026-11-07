@@ -1311,6 +1311,37 @@ pub fn model_square() -> Vec<Value> {
             }
         }
     }
+    // 模型路由（链名）同样是对外可调的名字：任一成员可路由才进广场，
+    // 价格取成员最低价（有免费成员即为免费）；上下文/速度按路由名自己的标注
+    {
+        let cfg = db.get("config").cloned().unwrap_or(Value::Null);
+        let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+        for c in crate::upstreams::parse_model_chains(&cfg) {
+            if order.contains(&c.name) {
+                continue;
+            }
+            let routable = transparent
+                || c.members.iter().any(|mem| {
+                    ups.iter().any(|u| {
+                        u.get("enabled").map(util::truthy).unwrap_or(false)
+                            && crate::upstreams::channel_serves_model(u, mem, global_hide, transparent)
+                    })
+                });
+            if !routable {
+                continue;
+            }
+            let mut price = f64::INFINITY;
+            for mem in &c.members {
+                if let Some(v) = best.get(mem) {
+                    if *v < price {
+                        price = *v;
+                    }
+                }
+            }
+            best.insert(c.name.clone(), price);
+            order.push(c.name.clone());
+        }
+    }
     // 健康度：从 up_recent 取各渠道该模型的最近成功率，取最优值
     let up_recent = db.get("up_recent").and_then(|r| r.as_object()).cloned().unwrap_or_default();
     let ups_list = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
@@ -1380,5 +1411,41 @@ mod tests {
         let mut db = json!({"user_logs":[{"user_id":"a","t":i64::MIN,"cost":0}]});
         split_legacy_user_logs(&mut db, (0, 0));
         assert_eq!(db["user_logs_free"], json!([]));
+    }
+}
+
+#[cfg(test)]
+mod square_tests {
+    use super::*;
+
+    #[test]
+    fn model_square_lists_routable_chains_with_member_min_price() {
+        let _g = crate::store::test_lock();
+        let db = store().load();
+        let saved_ups = db.get("upstreams").cloned();
+        let saved_chains = db.get("config").and_then(|c| c.get("model_chains")).cloned();
+        let saved_prices = db.get("config").and_then(|c| c.get("model_limits")).cloned();
+        store().update(|d| {
+            d["upstreams"] = serde_json::json!([
+                {"id":"u1","name":"T","base":"https://x.test/v1","enabled":true,
+                 "models":["alpha"],"prices":{"alpha":0.5}}
+            ]);
+            d["config"]["model_chains"] = serde_json::json!("combo = alpha, beta\nbroken = ghost1, ghost2");
+            d["config"]["transparent_upstream"] = serde_json::json!(false);
+        });
+        let rows = model_square();
+        let find = |n: &str| rows.iter().find(|x| x["model"] == n).cloned();
+        let a = find("alpha").expect("alpha listed");
+        assert_eq!(a["price"], 0.5);
+        let combo = find("combo").expect("可路由链进广场");
+        assert_eq!(combo["price"], 0.5, "链价=成员最低价");
+        assert_eq!(combo["free"], false);
+        assert!(find("broken").is_none(), "成员全不可路由的链不进广场");
+        assert!(find("ghost1").is_none());
+        store().update(|d| {
+            d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
+            if let Some(v) = saved_chains { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
+            if let Some(v) = saved_prices { d["config"]["model_limits"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_limits"); }
+        });
     }
 }

@@ -1387,6 +1387,7 @@ mod chain_tests {
 
     #[test]
     fn routing_candidates_marks_routable_and_chain() {
+        let _g = crate::store::test_lock();
         let db = store().load();
         let saved_ups = db.get("upstreams").cloned();
         let saved_cfg = db.get("config").and_then(|c| c.get("model_chains")).cloned();
@@ -1477,5 +1478,35 @@ mod limits_tests {
         // 透传开关恢复旧行为
         assert!(channel_serves_model(&empty, "anything", true, true));
         assert!(channel_serves_model(&nomodel_field, "anything", true, true));
+    }
+}
+
+#[cfg(test)]
+mod curated_tests {
+    use super::*;
+    use crate::store::store;
+
+    #[test]
+    fn curated_lists_chain_when_transparent_on() {
+        let _g = crate::store::test_lock();
+        let db = store().load();
+        let saved_ups = db.get("upstreams").cloned();
+        let saved = db.get("config").cloned();
+        store().update(|d| {
+            d["upstreams"] = serde_json::json!([
+                {"id":"u1","name":"T","base":"https://x.test/v1","enabled":true,
+                 "models":["lim2"],"model_map":{"lim2":"limcheck"}}
+            ]);
+            d["config"]["model_chains"] = serde_json::json!("plazachain = chfail, mock-model");
+            d["config"]["transparent_upstream"] = serde_json::json!(true);
+            d["config"]["hide_mapped_names"] = serde_json::json!(true);
+        });
+        let out = curated_models();
+        assert!(out.contains(&"lim2".to_string()), "lim2 in {:?}", out);
+        assert!(out.contains(&"plazachain".to_string()), "chain in {:?}", out);
+        store().update(|d| {
+            d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
+            if let Some(v) = saved { d["config"] = v; }
+        });
     }
 }
