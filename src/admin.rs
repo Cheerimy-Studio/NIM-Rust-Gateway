@@ -864,10 +864,12 @@ const STR_SETTINGS: &[&str] = &[
     "reg_email_regex",
     "reg_email_error_msg",
     "model_chains",
+    "model_limits",
 ];
 const BOOL_SETTINGS: &[&str] = &[
     "recovery_enabled",
     "tool_compact_enabled",
+    "transparent_upstream",
     "log_enabled",
     "verify_tls",
     "queue_enabled",
@@ -900,6 +902,303 @@ pub async fn settings_get(headers: &HeaderMap) -> Response {
     }
     let cfg = store().load().get("config").cloned().unwrap_or(json!({}));
     json_resp(cfg_without_secrets(&cfg))
+}
+
+// ---------------------------------------------------------------- 模型接入（上游模型 → 别名 → 暴露）
+
+fn model_limits_set(text: &str, key: &str, ctx: i64, out: i64) -> String {
+    let low = key.to_lowercase();
+    let mut kept: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let name = t.split('=').next().unwrap_or("").trim().to_lowercase();
+        if name == low {
+            continue;
+        }
+        kept.push(t.to_string());
+    }
+    if ctx > 0 || out > 0 {
+        let mut parts: Vec<String> = Vec::new();
+        if ctx > 0 {
+            parts.push(format!("ctx:{ctx}"));
+        }
+        if out > 0 {
+            parts.push(format!("out:{out}"));
+        }
+        kept.push(format!("{key}={}", parts.join(",")));
+    }
+    kept.join("\n")
+}
+
+fn upstream_alias_rows(db: &Value) -> Vec<Value> {
+    let cfg = db.get("config").cloned().unwrap_or(json!({}));
+    let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+    let transparent = crate::upstreams::transparent_upstream(&cfg);
+    let limits = crate::upstreams::parse_model_limits(&cfg);
+    let catalog = db.get("upstream_catalog").cloned().unwrap_or(json!({}));
+    let mut rows: Vec<Value> = Vec::new();
+    let Some(ups) = db.get("upstreams").and_then(|x| x.as_array()) else { return rows };
+    for u in ups {
+        if !u.get("enabled").map(|x| util::truthy(x)).unwrap_or(false) {
+            continue;
+        }
+        let uid = util::str_or(u.get("id"), "");
+        let uname = util::str_or(u.get("name"), "");
+        let models_list: Vec<String> = u
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|a| a.iter().map(|m| util::str_or(Some(m), "")).filter(|m| !m.is_empty()).collect())
+            .unwrap_or_default();
+        let map = u.get("model_map").and_then(|m| m.as_object()).cloned().unwrap_or_default();
+        let prices = u.get("prices").and_then(|m| m.as_object()).cloned().unwrap_or_default();
+        let cat_models: Vec<String> = catalog
+            .get(&uid)
+            .and_then(|c| c.get("models"))
+            .and_then(|m| m.as_array())
+            .map(|a| a.iter().map(|m| util::str_or(Some(m), "")).filter(|m| !m.is_empty()).collect())
+            .unwrap_or_default();
+        // 上游真名集合 = 映射目标 ∪ 上游目录 ∪ 清单里手列的真名（不是任何别名）
+        let mut ups_names: Vec<String> = Vec::new();
+        {
+            let push_name = |n: &str, names: &mut Vec<String>| {
+                if !n.is_empty() && names.len() < 800 && !names.iter().any(|x| x == n) {
+                    names.push(n.to_string());
+                }
+            };
+            for v in map.values() {
+                push_name(&util::str_or(Some(v), ""), &mut ups_names);
+            }
+            for m in &cat_models {
+                push_name(m, &mut ups_names);
+            }
+            for m in &models_list {
+                if !map.contains_key(m) {
+                    push_name(m, &mut ups_names);
+                }
+            }
+        }
+        ups_names.sort();
+        for upstream in &ups_names {
+            // 反查别名：优先取已在 models 清单里生效的
+            let mut alias = String::new();
+            for (k, v) in &map {
+                if util::str_or(Some(v), "") == *upstream && models_list.iter().any(|m| m == k) {
+                    alias = k.clone();
+                    break;
+                }
+            }
+            if alias.is_empty() {
+                for (k, v) in &map {
+                    if util::str_or(Some(v), "") == *upstream {
+                        alias = k.clone();
+                        break;
+                    }
+                }
+            }
+            let exposed = models_list.iter().any(|m| m == upstream)
+                || (!alias.is_empty() && models_list.iter().any(|m| m == &alias));
+            let client = if alias.is_empty() { upstream.clone() } else { alias.clone() };
+            let (ctx, out) = limits.get(&client.to_lowercase()).copied().unwrap_or((0, 0));
+            let routable = crate::upstreams::channel_serves_model(u, &client, global_hide, transparent)
+                || models_list.iter().any(|m| m == upstream);
+            let price = prices.get(&client).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            rows.push(json!({
+                "channel_id": uid, "channel_name": uname,
+                "upstream": upstream, "alias": alias,
+                "exposed": exposed, "routable": routable,
+                "ctx": ctx, "out": out, "price": price,
+            }));
+        }
+    }
+    rows
+}
+
+/// 模型接入视图：每个启用渠道的上游模型（渠道ID/模型名）+ 现有别名/暴露状态/上限
+pub async fn upstream_models(headers: &HeaderMap) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    let db = store().load();
+    let rows = upstream_alias_rows(&db);
+    let transparent = db
+        .get("config")
+        .map(|c| crate::upstreams::transparent_upstream(c))
+        .unwrap_or(false);
+    json_resp(json!({ "rows": rows, "transparent": transparent }))
+}
+
+/// 别名/隐藏 + 上下文/输出上限，一次行内保存
+pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "请求体格式错误"}}))).into_response();
+    };
+    let ch_id = util::str_or(body.get("channel_id"), "");
+    let upstream = util::str_or(body.get("upstream"), "").trim().to_string();
+    let alias = util::str_or(body.get("alias"), "").trim().to_string();
+    let ctx = util::int_or(body.get("ctx"), 0);
+    let out = util::int_or(body.get("out"), 0);
+    if ch_id.is_empty() || upstream.is_empty() || upstream.chars().count() > 160 {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "参数缺失或模型名过长"}}))).into_response();
+    }
+    if alias.chars().count() > 160 || alias.chars().any(char::is_control) || upstream.chars().any(char::is_control) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "别名含非法字符"}}))).into_response();
+    }
+    if ctx < 0 || out < 0 || ctx > 100_000_000 || out > 100_000_000 {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "上限数值非法"}}))).into_response();
+    }
+    let mut err: Option<String> = None;
+    store().update(|db| {
+        let Some(u) = db
+            .get_mut("upstreams")
+            .and_then(|x| x.as_array_mut())
+            .and_then(|a| a.iter_mut().find(|u| util::str_or(u.get("id"), "") == ch_id))
+        else {
+            err = Some("渠道不存在".into());
+            return;
+        };
+        let models_list = u.get("models").and_then(|m| m.as_array()).cloned().unwrap_or_default();
+        let mut new_models: Vec<String> = models_list
+            .iter()
+            .map(|m| util::str_or(Some(m), ""))
+            .filter(|m| !m.is_empty())
+            .collect();
+        let mut map = u.get("model_map").and_then(|m| m.as_object()).cloned().unwrap_or_default();
+        // 旧别名 = 当前指向该上游名的所有映射键
+        let old_aliases: Vec<String> = map
+            .iter()
+            .filter(|(_, v)| util::str_or(Some(v), "") == upstream)
+            .map(|(k, _)| k.clone())
+            .collect();
+        // 清掉旧暴露：映射键 + models 里对应的别名项 + 手列的上游真名本身
+        for k in &old_aliases {
+            map.remove(k);
+        }
+        new_models.retain(|m| m != &upstream && !old_aliases.contains(m));
+        if !alias.is_empty() {
+            if alias == upstream {
+                // 同名暴露：不加自映射，只进清单
+                if !new_models.contains(&upstream) {
+                    new_models.push(upstream.clone());
+                }
+            } else {
+                map.insert(alias.clone(), Value::from(upstream.clone()));
+                if !new_models.contains(&alias) {
+                    new_models.push(alias.clone());
+                }
+            }
+        }
+        if let Some(o) = u.as_object_mut() {
+            o.insert("models".into(), Value::Array(new_models.into_iter().map(Value::from).collect()));
+            o.insert("model_map".into(), Value::Object(map));
+        }
+        // 上限写进 config.model_limits，键 = 客户端可见名
+        let client = if alias.is_empty() { upstream.clone() } else { alias.clone() };
+        if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
+            let text = util::str_or(cfg.get("model_limits"), "");
+            let new_text = model_limits_set(&text, &client, ctx, out);
+            cfg.insert("model_limits".into(), Value::from(new_text));
+        }
+    });
+    if let Some(e) = err {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": e}}))).into_response();
+    }
+    store().flush();
+    crate::proxy::invalidate_cfg_cache();
+    let db = store().load();
+    let rows = upstream_alias_rows(&db)
+        .into_iter()
+        .find(|r| r["channel_id"] == json!(ch_id) && r["upstream"] == json!(upstream))
+        .unwrap_or(json!({}));
+    json_resp(json!({"ok": true, "row": rows}))
+}
+
+/// 从上游拉取模型目录（仅显式触发；结果缓存进 upstream_catalog，默认隐藏不暴露）
+pub async fn upstream_models_fetch(headers: &HeaderMap, body: Bytes) -> Response {
+    if let Err(e) = require(headers, true) {
+        return e;
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "请求体格式错误"}}))).into_response();
+    };
+    let ch_id = util::str_or(body.get("channel_id"), "");
+    let (base, apikey, auth_mode) = {
+        let db = store().load();
+        let Some(u) = db
+            .get("upstreams")
+            .and_then(|x| x.as_array())
+            .and_then(|a| a.iter().find(|u| util::str_or(u.get("id"), "") == ch_id))
+            .cloned()
+        else {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "渠道不存在"}}))).into_response();
+        };
+        let key = db
+            .get("keys")
+            .and_then(|x| x.as_array())
+            .and_then(|a| {
+                a.iter()
+                    .find(|k| util::str_or(k.get("upstream_id"), "") == ch_id && k.get("enabled").map(|x| util::truthy(x)).unwrap_or(false))
+            })
+            .map(|k| util::str_or(k.get("apikey"), ""))
+            .unwrap_or_default();
+        let mode = util::str_or(u.get("auth_mode"), "auto");
+        (util::str_or(u.get("base"), ""), key, mode)
+    };
+    if base.is_empty() {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "渠道缺少 Base URL"}}))).into_response();
+    }
+    let url = format!("{}/models", base.trim_end_matches('/'));
+    let client = crate::webhttp::get_http(true, 10);
+    let mut req = client.get(&url).timeout(std::time::Duration::from_secs(20));
+    req = if auth_mode == "x-api-key" {
+        req.header("x-api-key", &apikey)
+    } else {
+        req.bearer_auth(&apikey)
+    };
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": {"message": format!("上游不可达: {e}")}}))).into_response();
+        }
+    };
+    let status = resp.status().as_u16();
+    let Ok(text) = resp.text().await else {
+        return (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": {"message": "上游响应读取失败"}}))).into_response();
+    };
+    if !(200..300).contains(&status) {
+        let snippet: String = text.chars().take(160).collect();
+        return (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": {"message": format!("上游返回 HTTP {status}: {snippet}")}}))).into_response();
+    }
+    let Ok(v) = serde_json::from_slice::<Value>(text.as_bytes()) else {
+        return (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": {"message": "上游响应不是 JSON"}}))).into_response();
+    };
+    let mut models: Vec<String> = Vec::new();
+    if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
+        for m in data {
+            let id = util::str_or(m.get("id"), "");
+            if !id.is_empty() && id.chars().count() <= 160 && !models.contains(&id) && models.len() < 800 {
+                models.push(id);
+            }
+        }
+    }
+    if models.is_empty() {
+        return (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": {"message": "上游未返回任何模型"}}))).into_response();
+    }
+    models.sort();
+    let n = models.len();
+    store().update(|db| {
+        let cat = db.as_object_mut().unwrap().entry("upstream_catalog".to_string()).or_insert_with(|| json!({}));
+        if let Some(o) = cat.as_object_mut() {
+            o.insert(ch_id.clone(), json!({"models": models, "fetched_at": util::now_i()}));
+        }
+    });
+    store().flush();
+    json_resp(json!({"ok": true, "count": n}))
 }
 
 /// 模型路由编辑器候选清单：启用渠道的模型/别名 + 现有链名，附可路由标记

@@ -346,7 +346,7 @@ async function loadModels() {
     col.innerHTML = '<div class="card model-card h-100"><div class="card-body">'
       + '<div class="d-flex justify-content-between align-items-start mb-1">'
       + '<span class="mono fw-semibold" style="font-size:12.5px;word-break:break-all">' + esc(m.model) + '</span>' + badge
-      + '</div>' + health + '</div></div>';
+      + '</div>' + (m.ctx ? '<div class="small mt-1">上下文 ' + m.ctx + '</div>' : '') + health + '</div></div>';
     box.appendChild(col);
   }
 }

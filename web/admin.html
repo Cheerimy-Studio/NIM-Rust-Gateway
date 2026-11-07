@@ -214,6 +214,7 @@ details.upgrp[open]{background:#fff}
     <div class="nav-label">资源</div>
     <a href="javascript:void(0)" data-pane="keys"><i class="bi bi-key"></i>账号池</a>
     <a href="javascript:void(0)" data-pane="upstreams"><i class="bi bi-hdd-network"></i>上游</a>
+    <a href="javascript:void(0)" data-pane="catalog"><i class="bi bi-boxes"></i>模型接入</a>
     <a href="javascript:void(0)" data-pane="import"><i class="bi bi-upload"></i>导入</a>
     <a href="javascript:void(0)" data-pane="tokens"><i class="bi bi-shield-lock"></i>访问令牌</a>
     <a href="javascript:void(0)" data-pane="users"><i class="bi bi-people"></i>用户</a>
@@ -511,6 +512,65 @@ details.upgrp[open]{background:#fff}
   </div>
 </section>
 
+
+<section class="pane" id="pane-catalog">
+  <h2 class="pane-title">模型接入</h2>
+  <div class="hint mb-3">渠道里的模型默认不对外，客户端调不到。想开放哪个，就给它起个对外的名字（别名），客户端拿别名调用；把别名清空再保存，它就下线了。上下文/输出上限填 0 是不限，超了网关会自动往下压，省得上游直接报错。</div>
+  <div class="card mb-3"><div class="card-body py-2">
+    <div class="form-check form-switch">
+      <input class="form-check-input" type="checkbox" id="cat-transparent">
+      <label class="form-check-label small" for="cat-transparent">旧透传模式：渠道没列任何模型时，放行任意模型名（升级前的行为，老配置才需要开）</label>
+    </div>
+  </div></div>
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span><i class="bi bi-boxes me-2 text-muted"></i>上游模型</span>
+      <span class="d-flex gap-2">
+        <select class="form-select form-select-sm" id="cat-channel" style="min-width:180px"></select>
+        <button class="btn btn-sm btn-outline-primary" id="cat-fetch" type="button">拉取模型清单</button>
+      </span>
+    </div>
+    <div class="card-body">
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead><tr>
+            <th>渠道</th><th>上游模型</th><th style="width:220px">别名（客户端用名）</th>
+            <th style="width:110px" title="0=不限">上下文上限</th>
+            <th style="width:110px" title="0=不限">输出上限</th>
+            <th style="width:110px">状态</th><th style="width:70px"></th>
+          </tr></thead>
+          <tbody id="cat-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+      <div class="card mb-3" id="sec-chains">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-diagram-3 me-2 text-muted"></i>降级链</span>
+          <span>
+            <button class="btn btn-sm btn-outline-primary me-1" id="chain-add" type="button">加一条</button>
+            <button class="btn btn-sm btn-primary" id="chain-save" type="button">保存路由</button>
+          </span>
+        </div>
+        <div class="card-body">
+          <div class="form-text mb-2">链是对外的一个名字，背后按顺序试几个模型：前面的挂了就悄悄换下一个，用户只看到最终结果。fb 固定从第一个开始；rr 让几个模型轮着扛流量，数字表示同一起点连用几轮再换。链名别和上面接入的模型重名，成员从已接入的模型里挑。</div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-2" id="chain-table">
+              <thead><tr>
+                <th style="width:24%">链名（客户端调用名）</th>
+                <th>成员（按优先级，逗号分隔）</th>
+                <th style="width:110px">模式</th>
+                <th style="width:84px">粘滞轮数</th>
+                <th style="width:52px"></th>
+              </tr></thead>
+              <tbody id="chain-rows"></tbody>
+            </table>
+          </div>
+          <div class="form-text text-danger" id="chain-err"></div>
+          <datalist id="chain-cands"></datalist>
+        </div>
+      </div>
+</section>
 
 <section class="pane" id="pane-import">
   <h2 class="pane-title">导入</h2>
@@ -954,29 +1014,6 @@ details.upgrp[open]{background:#fff}
             <div class="col-md-6"><label class="form-label" for="set-mbl">全局黑名单</label>
               <textarea class="form-control form-control-sm font-monospace" id="set-mbl" rows="3" placeholder="模型ID，逗号或换行分隔"></textarea></div>
           </div>
-        </div>
-      </div>
-      <div class="card mb-3" id="sec-chains">
-        <div class="card-header d-flex justify-content-between align-items-center">
-          <span><i class="bi bi-diagram-3 me-2 text-muted"></i>模型路由（降级链）</span>
-          <button class="btn btn-sm btn-outline-primary" id="chain-add" type="button">添加路由</button>
-        </div>
-        <div class="card-body">
-          <div class="form-text mb-2">请求「链名」时按成员顺序路由：fb=故障回退（固定从第一个成员开始，失败静默换下一个）；rr/rrN=轮询（成员间分摊，N 为粘滞轮数）。正文开始输出前的失败对调用方不可见。链名不能与现有模型/别名重名，成员建议从候选里选（灰叹号=当前不可路由）。</div>
-          <div class="table-responsive">
-            <table class="table table-sm align-middle mb-2" id="chain-table">
-              <thead><tr>
-                <th style="width:24%">链名（客户端调用名）</th>
-                <th>成员（按优先级，逗号分隔）</th>
-                <th style="width:110px">模式</th>
-                <th style="width:84px">粘滞轮数</th>
-                <th style="width:52px"></th>
-              </tr></thead>
-              <tbody id="chain-rows"></tbody>
-            </table>
-          </div>
-          <div class="form-text text-danger" id="chain-err"></div>
-          <datalist id="chain-cands"></datalist>
         </div>
       </div>
       <div class="card mb-3" id="sec-privacy">

@@ -138,6 +138,7 @@ const LOADERS = {
   dash: () => loadOverview(),
   keys: () => loadKeys(),
   upstreams: () => loadUpstreams(),
+  catalog: () => loadCatalog(),
   tokens: () => loadTokens(),
   intercept: () => loadIntercept(),
   logs: () => loadLogs(),
@@ -1331,12 +1332,90 @@ function chainDump() {
   }).join('\n');
 }
 
+// ---------------- 模型接入（上游模型 / 别名 / 上限 / 降级链） ----------------
+let CAT_ROWS = [];
+
+async function loadCatalog() {
+  const d = await run(() => api('upstream-models'));
+  if (!d) return;
+  $('#cat-transparent').checked = !!d.transparent;
+  CAT_ROWS = d.rows || [];
+  const sel = $('#cat-channel');
+  const chans = [...new Set(CAT_ROWS.map(r => r.channel_id))];
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">全部渠道</option>' + chans.map(id => {
+    const r = CAT_ROWS.find(x => x.channel_id === id);
+    return '<option value="' + esc(id) + '">' + esc(r.channel_name || id) + '</option>';
+  }).join('');
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  renderCatalog();
+  chainLoadCandidates();
+  const c = await run(() => api('settings'));
+  if (c) chainLoad(c.model_chains || '');
+}
+
+function renderCatalog() {
+  const tb = $('#cat-rows');
+  tb.innerHTML = '';
+  const sel = $('#cat-channel').value;
+  const rows = CAT_ROWS.filter(r => !sel || r.channel_id === sel);
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="text-muted small text-center py-4">这里还没东西：点右上「拉取模型清单」，或到「上游」分页给渠道手填模型。</td></tr>';
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const st = r.exposed
+      ? '<span class="badge text-bg-success">已接入</span>'
+      : '<span class="badge text-bg-secondary">隐藏</span>';
+    tr.innerHTML =
+      '<td class="small text-muted">' + esc(r.channel_name || r.channel_id) + '</td>' +
+      '<td class="font-monospace small" style="max-width:280px;word-break:break-all">' + esc(r.channel_id + '/' + r.upstream) + '</td>' +
+      '<td><input class="form-control form-control-sm font-monospace cat-alias" value="' + esc(r.alias || '') + '" placeholder="空=隐藏"></td>' +
+      '<td><input type="number" min="0" class="form-control form-control-sm cat-ctx" value="' + (r.ctx || 0) + '"></td>' +
+      '<td><input type="number" min="0" class="form-control form-control-sm cat-out" value="' + (r.out || 0) + '"></td>' +
+      '<td>' + st + (r.price > 0 ? '<div class="small text-muted">¥' + r.price + '/次</div>' : '') + '</td>' +
+      '<td class="text-end"><button class="btn btn-sm btn-primary cat-save">保存</button></td>';
+    tr.querySelector('.cat-save').onclick = guard(async () => {
+      const alias = tr.querySelector('.cat-alias').value.trim();
+      const ctx = parseInt(tr.querySelector('.cat-ctx').value, 10) || 0;
+      const out = parseInt(tr.querySelector('.cat-out').value, 10) || 0;
+      if (alias && /[=|#]/.test(alias)) throw new Error('别名不能包含 = | # 字符');
+      await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out}});
+      toast(alias ? '已接入：' + alias : '已隐藏');
+      loadCatalog();
+    });
+    tb.appendChild(tr);
+  }
+}
+
+function bindCatalog() {
+  $('#cat-channel').onchange = renderCatalog;
+  $('#cat-fetch').onclick = guard(async () => {
+    const ch = $('#cat-channel').value;
+    if (!ch) throw new Error('先在上面选一个渠道');
+    const d = await api('upstream-models/fetch', {method: 'POST', json: {channel_id: ch}});
+    toast('拉到 ' + d.count + ' 个模型');
+    loadCatalog();
+  });
+  $('#cat-transparent').onchange = guard(async (e) => {
+    await api('settings', {method: 'POST', json: {config: {transparent_upstream: e.target.checked}}});
+    toast(e.target.checked ? '透传已开：没列模型的渠道放行任意模型名' : '透传已关：模型必须加别名才对外');
+    loadCatalog();
+  });
+  $('#chain-add').onclick = () => chainAddRow({});
+  $('#chain-save').onclick = guard(async () => {
+    const text = chainDump();
+    await api('settings', {method: 'POST', json: {config: {model_chains: text}}});
+    toast('路由已保存');
+    chainLoadCandidates();
+  });
+}
+
 async function loadSettings() {
   const c = await run(() => api('settings'));
   if (!c) return;
   for (const [id, key] of SET_FIELDS) $('#' + id).value = c[key] != null ? c[key] : '';
-  chainLoad(c.model_chains || '');
-  chainLoadCandidates();
   $('#set-logen').checked = !!c.log_enabled;
   $('#set-verify').checked = !!c.verify_tls;
   $('#set-queue').checked = !!c.queue_enabled;
@@ -1359,12 +1438,9 @@ async function loadSettings() {
 }
 
 function bindSettings() {
-  $('#chain-add').onclick = () => chainAddRow({});
   $('#settings-save').onclick = guard(async () => {
     const config = {};
     for (const [id, key] of SET_FIELDS) config[key] = $('#' + id).value;
-    // 模型路由：先校验再序列化（有硬伤会抛错，guard 统一 toast）
-    config.model_chains = chainDump();
     config.log_enabled = $('#set-logen').checked;
     config.verify_tls = $('#set-verify').checked;
     config.queue_enabled = $('#set-queue').checked;
@@ -1709,7 +1785,7 @@ document.addEventListener('DOMContentLoaded', () => {
     a.addEventListener('click', e => { e.preventDefault(); activate(a.dataset.pane); });
   });
   $('#btn-logout').onclick = guard(async () => { await api('logout', {method: 'POST'}); location.href = B + 'admin'; });
-  bindImport(); bindSettings(); bindUpstreams(); bindBatch();
+  bindImport(); bindSettings(); bindUpstreams(); bindBatch(); bindCatalog();
   refreshBatchUps();
   fillModelSelects();  
 

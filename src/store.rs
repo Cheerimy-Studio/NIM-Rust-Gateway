@@ -129,6 +129,8 @@ pub fn default_config() -> Vec<(&'static str, Value)> {
         ("model_whitelist", json!("")),
         ("model_blacklist", json!("")),
         ("model_chains", json!("")),
+        ("model_limits", json!("")),
+        ("transparent_upstream", json!(false)),
         ("recovery_enabled", json!(true)),
         ("recovery_max_ms", json!(600000)),
         ("tool_compact_enabled", json!(true)),

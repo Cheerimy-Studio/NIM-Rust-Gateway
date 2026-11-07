@@ -583,6 +583,7 @@ pub fn capable_channels(db: &Value, model: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let cfg = db.get("config").cloned().unwrap_or(Value::Null);
     let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+    let transparent = upstreams::transparent_upstream(&cfg);
     let ups: HashMap<String, &Value> = db
         .get("upstreams")
         .and_then(|x| x.as_array())
@@ -610,16 +611,11 @@ pub fn capable_channels(db: &Value, model: &str) -> Vec<String> {
         }
         if !model.is_empty() {
             if let Some(u) = up {
-                if upstreams::hidden_target(u, model, global_hide) {
+                if !upstreams::channel_serves_model(u, model, global_hide, transparent) {
                     continue;
                 }
-                let models = u.get("models").and_then(|m| m.as_array());
-                if let Some(ms) = models {
-                    if !ms.is_empty() && !ms.iter().any(|m| util::str_or(Some(m), "") == model) {
-                        continue;
-                    }
-                }
             }
+            // 渠道视图缺失（孤立账号）沿用旧行为：不做模型门，请求时自然失败
         }
         if !model.is_empty() && model_missing_fresh(db, &uid, model) {
             continue;

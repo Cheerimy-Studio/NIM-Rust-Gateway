@@ -1008,6 +1008,10 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
             .get("config")
             .map(|c| c.get("hide_mapped_names").map(util::truthy).unwrap_or(true))
             .unwrap_or(true);
+        let transparent_perm = db
+            .get("config")
+            .map(|c| upstreams::transparent_upstream(c))
+            .unwrap_or(false);
         if let Some(keys) = db.get("keys").and_then(|x| x.as_array()) {
             let ups: HashMap<String, Value> = db
                 .get("upstreams")
@@ -1031,13 +1035,7 @@ pub async fn take_account(ep: &str, model: &str, est_tokens: i64, cfg: &Value, t
                     continue;
                 }
                 if let Some(u) = up {
-                    if upstreams::hidden_target(u, model, global_hide) {
-                        continue;
-                    }
-                }
-                let models = up.and_then(|u| u.get("models").and_then(|m| m.as_array()));
-                if let Some(ms) = models {
-                    if !ms.is_empty() && !ms.iter().any(|m| util::str_or(Some(m), "") == model) {
+                    if !upstreams::channel_serves_model(u, model, global_hide, transparent_perm) {
                         continue;
                     }
                 }
@@ -1990,6 +1988,8 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         Err(message) => return error_resp(400, &message, "invalid_request_error", None, false),
     };
     let est = util::estimate_request_tokens(&body_text, Some(&req));
+    // 模型上下文/输出上限：按客户端可见名匹配，发送前钳制（只降不升）
+    let model_limits = upstreams::parse_model_limits(&cfg);
     let tok = util::str_or(entry.as_ref().and_then(|e| e.get("t")), "");
     // 链解析无条件执行（含奖品 Key 锁定链名场景），延迟初始化
     let chain: Option<upstreams::ModelChain>;
@@ -2244,6 +2244,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         // 省掉每轮 ZCode 请求都先吃一次 400 + 重试
         if convert::has_thinking_params(&routed_req) && thinking_strip_learned(&key, &up_model) {
             convert::strip_thinking_params(&mut routed_req);
+        }
+        // 模型上限钳制（ctx 扣除本请求 prompt 估算后作为输出上限）
+        if !model_limits.is_empty() {
+            upstreams::apply_model_limits(&mut routed_req, &model, &model_limits, est);
         }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             endpoint, &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,
@@ -3224,6 +3228,8 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         Err(message) => return error_resp(400, &message, "invalid_request_error", None, anthropic),
     };
     let est = util::estimate_request_tokens(&body_text, Some(&req));
+    // 模型上下文/输出上限：按客户端可见名匹配，发送前钳制（只降不升）
+    let model_limits = upstreams::parse_model_limits(&cfg);
     let reasoning_effort = {
         let sub = req
             .get("reasoning")
@@ -3465,6 +3471,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         // 已学习过「该渠道+上游模型不吃思考参数」：发送前直接剥离
         if convert::has_thinking_params(&routed_req) && thinking_strip_learned(&key, &up_model) {
             convert::strip_thinking_params(&mut routed_req);
+        }
+        // 模型上限钳制（同 chat 直通）
+        if !model_limits.is_empty() {
+            upstreams::apply_model_limits(&mut routed_req, &model, &model_limits, est);
         }
         let (mut wire_body, wire_plan) = match crate::bridge::Plan::prepare(
             "chat/completions", &upstreams::upstream_value(&key, "api_endpoint", "auto"), &routed_req,

@@ -1261,6 +1261,7 @@ pub fn user_logs_page(user_id: &str, kind: &str, page: i64, per: usize) -> (Vec<
 /// 模型广场：对外可用模型 + 价格（取各渠道最低价；无价 = 免费）。
 pub fn model_square() -> Vec<Value> {
     let db = store().load();
+    let limits = crate::upstreams::parse_model_limits(db.get("config").unwrap_or(&Value::Null));
     let ups = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
     let mut best: HashMap<String, f64> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -1329,6 +1330,7 @@ pub fn model_square() -> Vec<Value> {
                 "free": !(price.is_finite() && price > 0.0),
                 "price": if price.is_finite() && price > 0.0 { json!(util::round6(price)) } else { json!(0) },
                 "health": health_pct,
+                "ctx": limits.get(&m.to_lowercase()).map(|(c, _)| *c).unwrap_or(0),
             })
         })
         .collect()

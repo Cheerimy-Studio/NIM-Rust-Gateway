@@ -431,6 +431,18 @@ async fn h_routable_models(headers: HeaderMap) -> Response {
     admin::routable_models(&headers).await
 }
 
+async fn h_upstream_models(headers: HeaderMap) -> Response {
+    admin::upstream_models(&headers).await
+}
+
+async fn h_upstream_model_op(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstream_model_op(&headers, body).await
+}
+
+async fn h_upstream_models_fetch(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstream_models_fetch(&headers, body).await
+}
+
 async fn h_settings_save(headers: HeaderMap, body: Bytes) -> Response {
     admin::settings_save(&headers, body).await
 }
@@ -1160,6 +1172,9 @@ async fn main() {
     crate::users::migrate_legacy_logs_once();
     // 老用户行补账本字段与累计计数器（累计口径不再依赖会被裁剪的日志）
     crate::users::migrate_user_fields_once();
+    // 透传渠道兼容迁移：旧库「渠道没列模型=任意名可调」在升级后保持原样，
+    // 管理员在「模型接入」分页关闭开关才启用「默认隐藏、加别名才对外」
+    crate::upstreams::migrate_transparent_once();
     let mut port: u16 = 8100;
     let args: Vec<String> = std::env::args().collect();
     let mut it = args.iter().peekable();
@@ -1339,6 +1354,9 @@ fn build_router() -> Router {
         .route("/api/logs/clear", post(h_logs_clear))
         .route("/api/settings", get(h_settings_get).post(h_settings_save))
         .route("/api/routable-models", get(h_routable_models))
+        .route("/api/upstream-models", get(h_upstream_models))
+        .route("/api/upstream-models/op", post(h_upstream_model_op))
+        .route("/api/upstream-models/fetch", post(h_upstream_models_fetch))
         .route("/api/password", post(h_password))
         .route("/api/stats/reset", post(h_stats_reset))
         .route("/api/poolmap", get(h_poolmap))

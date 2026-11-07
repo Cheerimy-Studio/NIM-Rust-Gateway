@@ -474,6 +474,123 @@ pub fn models_alias_linked(a: &str, b: &str) -> bool {
     false
 }
 
+// ---------------------------------------------------------------- 模型上下文/输出上限
+
+/// 解析模型参数上限：每行 `名字=ctx:上下文,out:输出` 或 `名字=上下文`（等价 ctx:N）。
+/// 键按客户端可见模型名精确匹配（小写）。0 = 不设限。
+pub fn parse_model_limits(cfg: &Value) -> HashMap<String, (i64, i64)> {
+    let text = util::str_or(cfg.get("model_limits"), "");
+    let mut out: HashMap<String, (i64, i64)> = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let name = line[..eq].trim().to_lowercase();
+        if name.is_empty() || name.chars().count() > 160 {
+            continue;
+        }
+        let mut ctx = 0i64;
+        let mut outn = 0i64;
+        for part in line[eq + 1..].split(',') {
+            let part = part.trim().to_lowercase();
+            if part.is_empty() {
+                continue;
+            }
+            let (k, v) = match part.split_once(':') {
+                Some((k, v)) => (k.trim(), v.trim()),
+                None => ("ctx", part.as_str()),
+            };
+            let Ok(n) = v.parse::<i64>() else { continue };
+            if n <= 0 {
+                continue;
+            }
+            match k {
+                "ctx" | "context" => ctx = n,
+                "out" | "output" | "maxout" => outn = n,
+                _ => {}
+            }
+        }
+        if ctx > 0 || outn > 0 {
+            out.insert(name, (ctx, outn));
+        }
+        if out.len() >= 500 {
+            break;
+        }
+    }
+    out
+}
+
+/// 发送前按上限钳制请求体：输出上限直接 min；上下文上限扣除本请求估算
+/// prompt 后作为 max_tokens 上限。只降不升，没配限的模型原样放行。
+pub fn apply_model_limits(body: &mut Value, model: &str, limits: &HashMap<String, (i64, i64)>, est_prompt: i64) -> bool {
+    let Some((ctx, out)) = limits.get(&model.to_lowercase()).copied() else {
+        return false;
+    };
+    let Some(obj) = body.as_object_mut() else { return false };
+    let mut changed = false;
+    for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        let Some(v) = obj.get(key).and_then(|x| x.as_i64()) else { continue };
+        if v <= 0 {
+            continue;
+        }
+        let mut cap = out;
+        if ctx > 0 {
+            // 上下文 = prompt + 输出：给推理/模板留 16 token 余量
+            let room = (ctx - est_prompt - 16).max(1);
+            cap = if cap > 0 { cap.min(room) } else { room };
+        }
+        if cap > 0 && v > cap {
+            obj.insert(key.to_string(), Value::from(cap));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 透传开关迁移：旧库渠道 models 为空 = 任意名可调。升级后默认收紧为隐藏，
+/// 直接收紧会让现存透传渠道瞬间全部 404。首次升级时检测到这种渠道就自动
+/// 保持旧行为（开关置 true），管理员在「模型接入」分页关掉即启用新语义。
+pub fn migrate_transparent_once() {
+    let empty_listed = {
+        let db = store().load();
+        let already = db
+            .get("config")
+            .map(|c| c.get("transparent_upstream").is_some())
+            .unwrap_or(false);
+        if already {
+            return;
+        }
+        db.get("upstreams")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .any(|u| {
+                        u.get("enabled").map(|x| util::truthy(x)).unwrap_or(false)
+                            && u.get("models")
+                                .and_then(|m| m.as_array())
+                                .map(|ms| ms.is_empty())
+                                .unwrap_or(true)
+                    })
+            })
+            .unwrap_or(false)
+    };
+    if !empty_listed {
+        return;
+    }
+    store().update(|db| {
+        if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
+            if cfg.contains_key("transparent_upstream") {
+                return;
+            }
+            cfg.insert("transparent_upstream".into(), Value::from(true));
+        }
+    });
+    eprintln!("[migrate] 渠道存在未列模型的透传配置：已保持旧行为（任意模型名可调）。");
+    eprintln!("[migrate] 新语义是「上游模型默认隐藏，加别名才对外」；在后台「模型接入」分页关闭透传开关即生效。");
+}
+
 // ---------------------------------------------------------------- 模型降级链
 
 /// 一条命名链：请求链名时按序尝试成员，正文输出前的失败对调用方不可见。
@@ -571,12 +688,39 @@ pub fn chain_start(chain: &ModelChain) -> usize {
     entry.0
 }
 
+/// 渠道未列任何模型时是否放行任意模型名（旧行为=透传）。
+/// 新部署默认 false：上游模型默认全部隐藏，加了别名才对外。
+pub fn transparent_upstream(cfg: &Value) -> bool {
+    cfg.get("transparent_upstream").map(util::truthy).unwrap_or(false)
+}
+
+/// 渠道能否服务该模型（models 清单门 + 隐原名门）。调用方先确认渠道 enabled。
+/// transparent = 渠道没列模型时放行任意名（旧行为，见 transparent_upstream）。
+pub fn channel_serves_model(u: &Value, model: &str, global_hide: bool, transparent: bool) -> bool {
+    let models = u.get("models").and_then(|x| x.as_array());
+    if let Some(ms) = models {
+        let contains = ms.iter().any(|m| util::str_or(Some(m), "") == model);
+        if !ms.is_empty() && !contains {
+            return false;
+        }
+        if ms.is_empty() && !transparent {
+            return false;
+        }
+    } else if !transparent {
+        // models 字段缺失与空清单同口径：默认隐藏
+        return false;
+    }
+    !hidden_target(u, model, global_hide)
+}
+
 pub fn model_routable(model: &str, hide_mapped_global: bool) -> bool {
     let mut any_enabled = false;
     let db = store().load();
+    let cfg = db.get("config").unwrap_or(&Value::Null);
+    let transparent = transparent_upstream(cfg);
     // 降级链：链名可路由 = 任一成员可路由（成员级路由在请求循环里逐个走）
     {
-        let chains = parse_model_chains(db.get("config").unwrap_or(&Value::Null));
+        let chains = parse_model_chains(cfg);
         if let Some(c) = chains.iter().find(|c| c.name == model) {
             return c.members.iter().any(|m| model_routable(m, hide_mapped_global));
         }
@@ -587,17 +731,9 @@ pub fn model_routable(model: &str, hide_mapped_global: bool) -> bool {
             continue;
         }
         any_enabled = true;
-        let models = u.get("models").and_then(|x| x.as_array());
-        if let Some(ms) = models {
-            let contains = ms.iter().any(|m| util::str_or(Some(m), "") == model);
-            if !ms.is_empty() && !contains {
-                continue;
-            }
+        if channel_serves_model(u, model, hide_mapped_global, transparent) {
+            return true;
         }
-        if hidden_target(u, model, hide_mapped_global) {
-            continue;
-        }
-        return true;
     }
     !any_enabled
 }
@@ -1137,5 +1273,65 @@ mod chain_tests {
             if let Some(v) = saved_cfg { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
             d["config"]["hide_mapped_names"] = serde_json::json!(true);
         });
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    #[test]
+    fn parse_model_limits_forms_and_garbage() {
+        let cfg = serde_json::json!({"model_limits": "a=ctx:4096,out:1024\nb = 2048\nC=CTX:10\nbad line\nd=ctx:-5\ne=ctx:0,out:7\n# comment\n"});
+        let m = parse_model_limits(&cfg);
+        assert_eq!(m.get("a"), Some(&(4096, 1024)));
+        assert_eq!(m.get("b"), Some(&(2048, 0)), "裸数字=ctx");
+        assert_eq!(m.get("c"), Some(&(10, 0)), "键大小写不敏感");
+        assert!(!m.contains_key("d"));
+        assert_eq!(m.get("e"), Some(&(0, 7)), "ctx:0 忽略，out 保留");
+    }
+
+    #[test]
+    fn apply_model_limits_clamps_down_only() {
+        let cfg = serde_json::json!({"model_limits": "m=ctx:100,out:5\nbig=ctx:200\n"});
+        let limits = parse_model_limits(&cfg);
+        // 输出上限直接压
+        let mut body = serde_json::json!({"max_tokens": 50});
+        assert!(apply_model_limits(&mut body, "m", &limits, 2));
+        assert_eq!(body["max_tokens"], 5);
+        // 上下文扣除 prompt 估算（含 16 余量）作为上限；out 与 ctx 取更小
+        let mut body = serde_json::json!({"max_completion_tokens": 300});
+        assert!(apply_model_limits(&mut body, "big", &limits, 50));
+        assert_eq!(body["max_completion_tokens"], 200 - 50 - 16);
+        // 已经在上限内：不动
+        let mut body = serde_json::json!({"max_tokens": 4});
+        assert!(!apply_model_limits(&mut body, "m", &limits, 2));
+        assert_eq!(body["max_tokens"], 4);
+        // 未配置的模型：完全不动
+        let mut body = serde_json::json!({"max_tokens": 999999});
+        assert!(!apply_model_limits(&mut body, "other", &limits, 2));
+        assert_eq!(body["max_tokens"], 999999);
+        // 极小 ctx：至少给 1
+        let cfg2 = serde_json::json!({"model_limits": "tiny=ctx:20\n"});
+        let mut body = serde_json::json!({"max_tokens": 100});
+        assert!(apply_model_limits(&mut body, "tiny", &parse_model_limits(&cfg2), 10));
+        assert_eq!(body["max_tokens"], 1);
+    }
+
+    #[test]
+    fn channel_serves_model_gates_transparent_and_hidden() {
+        let listed = serde_json::json!({"models": ["a", "b"]});
+        let empty = serde_json::json!({"models": []});
+        let nomodel_field = serde_json::json!({});
+        // 列了名单：命中才可路由，与透传开关无关
+        assert!(channel_serves_model(&listed, "a", true, false));
+        assert!(!channel_serves_model(&listed, "zz", true, false));
+        assert!(!channel_serves_model(&listed, "zz", true, true));
+        // 没列名单：新语义默认隐藏
+        assert!(!channel_serves_model(&empty, "anything", true, false));
+        assert!(!channel_serves_model(&nomodel_field, "anything", true, false));
+        // 透传开关恢复旧行为
+        assert!(channel_serves_model(&empty, "anything", true, true));
+        assert!(channel_serves_model(&nomodel_field, "anything", true, true));
     }
 }
