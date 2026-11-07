@@ -1285,6 +1285,54 @@ fn money_of(u: &Value) -> f64 {
     crate::users::balance_of(u)
 }
 
+/// 链成员的用户侧准入判定（纯逻辑，便于单测）：
+/// free Key 只允许免费成员；paid Key 余额<=0 时付费成员不可用。
+/// 返回 Err((状态码, 错误码, 文案)) 表示该成员不可用。
+pub(crate) fn member_admission(kind: &str, balance: f64, paid: bool, model: &str) -> Result<(), (i64, &'static str, String)> {
+    let allowed = match kind {
+        "free" => !paid,
+        "paid" => paid,
+        _ => true,
+    };
+    if !allowed {
+        let kind_name = if kind == "free" { "免费" } else { "付费" };
+        return Err((
+            403,
+            "key_model_not_allowed",
+            format!(
+                "该 Key 仅限调用{kind_name}模型（链成员模型 {} 不在允许范围内）",
+                util::char_prefix(model, 80)
+            ),
+        ));
+    }
+    if paid && balance <= 0.0 {
+        return Err((
+            402,
+            "insufficient_quota",
+            format!("余额不足，无法调用付费模型（链成员模型 {}，免费模型不受影响）", util::char_prefix(model, 80)),
+        ));
+    }
+    Ok(())
+}
+
+/// 链成员准入（带用户上下文）。None = 可用（含网关令牌/奖品 Key 恒可用）；
+/// Some((状态码, 错误码, 文案)) = 该成员需跳过。用户已停用同样走跳过通道：
+/// 每个成员都会被同一错误挡下，链耗尽时如实收口 401，无需单独的终止通道。
+fn member_gate(user_ctx: &Option<UserCtx>, model: &str) -> Option<(i64, &'static str, String)> {
+    let uc = user_ctx.as_ref()?;
+    let Some(u) = crate::users::auth_user(&uc.id) else {
+        return Some((401, "invalid_api_key", "用户已被停用".to_string()));
+    };
+    let paid = crate::users::model_is_paid(model);
+    member_admission(uc.kind, money_of(&u), paid, model).err()
+}
+
+/// member_gate 失败的统一出口：402 用 insufficient_quota 错误类型（与主检查一致）
+fn member_gate_error(st: i64, code: &str, msg: &str, anthropic: bool) -> Response {
+    let etype = if code == "insufficient_quota" { "insufficient_quota" } else { "invalid_request_error" };
+    error_resp(st.clamp(400, 599) as u16, msg, etype, Some(code), anthropic)
+}
+
 /// 多用户计费上下文：Some((用户id, Key id)) 表示本次调用来自用户 Key。
 /// kind 在鉴权时一次性解析（"all"/"free"/"paid"），预检与 /v1/models 过滤共用。
 #[derive(Clone)]
@@ -1943,7 +1991,8 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     };
     let est = util::estimate_request_tokens(&body_text, Some(&req));
     let tok = util::str_or(entry.as_ref().and_then(|e| e.get("t")), "");
-    let mut chain: Option<upstreams::ModelChain> = None;
+    // 链解析无条件执行（含奖品 Key 锁定链名场景），延迟初始化
+    let chain: Option<upstreams::ModelChain>;
     let mut chain_pos: usize = 0;
     let mut advance_member = false;
     let requested_model = model.clone();
@@ -1964,14 +2013,35 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             req["model"] = Value::from(pc.model.clone());
             model = pc.model.clone();
         }
-    } else {
-        // 降级链：链名请求按成员路由，正文输出前的失败静默换下一个成员
-        let chains = upstreams::parse_model_chains(&cfg);
-        chain = upstreams::chain_by_name(&chains, &model).cloned();
-        if let Some(c) = &chain {
-            chain_pos = upstreams::chain_start(c);
-            model = c.members[chain_pos].clone();
-        } else if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, false) {
+    }
+    // 降级链：链名请求按成员路由，正文输出前的失败静默换下一个成员。
+    // 奖品 Key 锁定链名时同样生效（此前 chat 路径奖品+链名会 404，与 convert 不一致）
+    let chains = upstreams::parse_model_chains(&cfg);
+    chain = upstreams::chain_by_name(&chains, &model).cloned();
+    if let Some(c) = &chain {
+        // 链名也要过白/黑名单与令牌模型限制：此前链路径完全绕过 model_allowed
+        if let Some(bad) = check_model(&requested_model, entry.as_ref(), &cfg, false) {
+            return bad;
+        }
+        chain_pos = upstreams::chain_start(c);
+        model = c.members[chain_pos].clone();
+        // 初始成员同样过用户侧准入：跳到链内第一个可用成员，
+        // 而不是让单个成员（如免费 Key 撞上付费成员）卡死整条链
+        loop {
+            match member_gate(&user_ctx, &model) {
+                None => break,
+                Some((st, code, msg)) => {
+                    if chain_pos + 1 >= c.members.len() {
+                        return member_gate_error(st, &code, &msg, false);
+                    }
+                    chain_pos += 1;
+                    model = c.members[chain_pos].clone();
+                }
+            }
+        }
+    } else if prize_ctx.is_none() {
+        // 通用 404 校验；奖品 Key 跳过（锁定名可能是被隐藏的映射目标名，通用校验会误杀）
+        if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, false) {
             return bad;
         }
     }
@@ -2067,11 +2137,35 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         if advance_member {
             advance_member = false;
             if let Some(c) = &chain {
-                if chain_pos + 1 < c.members.len() {
+                loop {
+                    if chain_pos + 1 >= c.members.len() {
+                        break 'attempts None;
+                    }
                     chain_pos += 1;
                     model = c.members[chain_pos].clone();
-                } else {
-                    break 'attempts None;
+                    // 成员与用户 Key 类型/余额冲突（如免费 Key 撞上付费成员）时
+                    // 跳过该成员继续推进：否则一条链就成免费 Key 用付费模型的后门
+                    match member_gate(&user_ctx, &model) {
+                        None => break,
+                        Some((st, code, msg)) => {
+                            // 已是最后一个成员：整个链对该 Key 不可用，如实收口 403/402，
+                            // 而不是把更早成员的上游错误（如 404）透传出去误导调用方
+                            if chain_pos + 1 >= c.members.len() {
+                                break 'attempts Some(member_gate_error(st, &code, &msg, false));
+                            }
+                            pool::arelease(
+                                String::new(),
+                                false,
+                                st,
+                                msg.clone(),
+                                None,
+                                Some(release_log(ep_tag, &model, st, 0, &format!("链成员跳过：{msg}"), attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
+                                0, 0,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                 }
             }
         }
@@ -3150,15 +3244,35 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         "max_output_tokens": req.get("max_output_tokens").cloned().unwrap_or(Value::Null),
         "reasoning_effort": reasoning_effort,
     });
+    // 降级链：链名请求按成员路由（奖品 Key 锁定链名时同样生效）
     if chain.is_none() {
         let chains = upstreams::parse_model_chains(&cfg);
         chain = upstreams::chain_by_name(&chains, &model).cloned();
         if let Some(c) = &chain {
+            // 链名也要过白/黑名单与令牌模型限制（同 chat 直通）
+            if let Some(bad) = check_model(&requested_model, entry.as_ref(), &cfg, anthropic) {
+                return bad;
+            }
             chain_pos = upstreams::chain_start(c);
             model = c.members[chain_pos].clone();
+            // 初始成员过用户侧准入：跳到链内第一个可用成员
+            loop {
+                match member_gate(&user_ctx, &model) {
+                    None => break,
+                    Some((st, code, msg)) => {
+                        if chain_pos + 1 >= c.members.len() {
+                            return member_gate_error(st, &code, &msg, anthropic);
+                        }
+                        chain_pos += 1;
+                        model = c.members[chain_pos].clone();
+                    }
+                }
+            }
         }
     }
-    if chain.is_none() {
+    if chain.is_none() && prize_ctx.is_none() {
+        // 通用 404 校验；奖品 Key 跳过（锁定名可能是被隐藏的映射目标名，通用校验会误杀）。
+        // 此前 convert 缺这个豁免，与 chat 口径不一致：锁定隐藏名的奖品 Key 会 404
         if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, anthropic) {
             return bad;
         }
@@ -3256,11 +3370,32 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         if advance_member {
             advance_member = false;
             if let Some(c) = &chain {
-                if chain_pos + 1 < c.members.len() {
+                loop {
+                    if chain_pos + 1 >= c.members.len() {
+                        break 'attempts None;
+                    }
                     chain_pos += 1;
                     model = c.members[chain_pos].clone();
-                } else {
-                    break 'attempts None;
+                    match member_gate(&user_ctx, &model) {
+                        None => break,
+                        Some((st, code, msg)) => {
+                            // 已是最后一个成员：如实收口准入错误（同 chat 直通）
+                            if chain_pos + 1 >= c.members.len() {
+                                break 'attempts Some(member_gate_error(st, &code, &msg, anthropic));
+                            }
+                            pool::arelease(
+                                String::new(),
+                                false,
+                                st,
+                                msg.clone(),
+                                None,
+                                Some(release_log(ep, &model, st, 0, &format!("链成员跳过：{msg}"), attempt, None, &ctx.ip, &model, stream, 0, 0, 0, &tok)),
+                                0, 0,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                 }
             }
         }
@@ -4286,5 +4421,29 @@ mod tests {
         crate::wheel::tests::reward_regressions();
         assert_eq!(pool::inflight_odd_releases(), odd_before);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod chain_gate_tests {
+    use super::*;
+
+    #[test]
+    fn member_admission_gates_free_and_paid_keys() {
+        // 免费 Key：付费成员 403，免费成员放行
+        let e = member_admission("free", 10.0, true, "pay-model").unwrap_err();
+        assert_eq!(e.0, 403);
+        assert_eq!(e.1, "key_model_not_allowed");
+        assert!(member_admission("free", 0.0, false, "free-model").is_ok());
+        // 付费专用 Key：余额不足时付费成员 402；免费成员 403（与主检查口径一致）
+        let e2 = member_admission("paid", 0.0, true, "pay-model").unwrap_err();
+        assert_eq!(e2.0, 402);
+        assert_eq!(e2.1, "insufficient_quota");
+        let e3 = member_admission("paid", 10.0, false, "free-model").unwrap_err();
+        assert_eq!(e3.0, 403);
+        assert!(member_admission("paid", 10.0, true, "pay-model").is_ok());
+        // all 类型不受类型限制，仅受余额约束
+        assert!(member_admission("all", 0.0, true, "pay-model").is_err());
+        assert!(member_admission("all", 5.0, true, "pay-model").is_ok());
     }
 }

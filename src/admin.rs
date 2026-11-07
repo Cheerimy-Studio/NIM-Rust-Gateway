@@ -902,6 +902,14 @@ pub async fn settings_get(headers: &HeaderMap) -> Response {
     json_resp(cfg_without_secrets(&cfg))
 }
 
+/// 模型路由编辑器候选清单：启用渠道的模型/别名 + 现有链名，附可路由标记
+pub async fn routable_models(headers: &HeaderMap) -> Response {
+    if let Err(e) = require(headers, false) {
+        return e;
+    }
+    json_resp(json!({ "models": crate::upstreams::routing_candidates() }))
+}
+
 fn validate_sign_settings(current: &Value, incoming: &Value) -> Result<(), String> {
     if incoming.get("sign_min").is_none() && incoming.get("sign_max").is_none() { return Ok(()); }
     let read = |key:&str,default:f64| {

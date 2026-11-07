@@ -956,6 +956,29 @@ details.upgrp[open]{background:#fff}
           </div>
         </div>
       </div>
+      <div class="card mb-3" id="sec-chains">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span><i class="bi bi-diagram-3 me-2 text-muted"></i>模型路由（降级链）</span>
+          <button class="btn btn-sm btn-outline-primary" id="chain-add" type="button">添加路由</button>
+        </div>
+        <div class="card-body">
+          <div class="form-text mb-2">请求「链名」时按成员顺序路由：fb=故障回退（固定从第一个成员开始，失败静默换下一个）；rr/rrN=轮询（成员间分摊，N 为粘滞轮数）。正文开始输出前的失败对调用方不可见。链名不能与现有模型/别名重名，成员建议从候选里选（灰叹号=当前不可路由）。</div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-2" id="chain-table">
+              <thead><tr>
+                <th style="width:24%">链名（客户端调用名）</th>
+                <th>成员（按优先级，逗号分隔）</th>
+                <th style="width:110px">模式</th>
+                <th style="width:84px">粘滞轮数</th>
+                <th style="width:52px"></th>
+              </tr></thead>
+              <tbody id="chain-rows"></tbody>
+            </table>
+          </div>
+          <div class="form-text text-danger" id="chain-err"></div>
+          <datalist id="chain-cands"></datalist>
+        </div>
+      </div>
       <div class="card mb-3" id="sec-privacy">
         <div class="card-header"><i class="bi bi-eye-slash me-2 text-muted"></i>隐私与渠道兼容</div>
         <div class="card-body">

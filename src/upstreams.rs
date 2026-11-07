@@ -2,6 +2,7 @@
 
 use crate::store::{store, Obj, Value};
 use crate::util;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -518,11 +519,15 @@ pub fn parse_model_chains(cfg: &Value) -> Vec<ModelChain> {
                 }
             }
         }
-        let members: Vec<String> = rest
-            .split(',')
-            .map(|m| m.trim().to_string())
-            .filter(|m| !m.is_empty() && m.chars().count() <= 160)
-            .collect();
+        let mut members: Vec<String> = Vec::new();
+        for m in rest.split(',') {
+            let m = m.trim().to_string();
+            // 重复成员只会浪费一次同号重试：解析期直接去重
+            if m.is_empty() || m.chars().count() > 160 || members.iter().any(|x| x == &m) {
+                continue;
+            }
+            members.push(m);
+        }
         if members.len() >= 2 && out.iter().all(|c: &ModelChain| c.name != name) {
             out.push(ModelChain { name, members, rr, sticky });
         }
@@ -548,7 +553,15 @@ pub fn chain_start(chain: &ModelChain) -> usize {
     }
     let mut g = CHAIN_ROTATION.lock().unwrap();
     let m = g.get_or_insert_with(HashMap::new);
-    let entry = m.entry(chain.name.clone()).or_insert((0, chain.sticky - 1));
+    // 已删除链名的轮询状态会永远残留：超过上限整体清零重建
+    // （丢一次轮询起点无正确性影响，比无界堆积干净）
+    if m.len() > 256 {
+        m.clear();
+    }
+    // 初始粘滞计数给满 sticky：旧实现给 sticky-1，导致链首成员永远少分一次
+    // （|rr 时甚至直接从成员 1 起步）。推进路径的 sticky-1 是对的：当次调用
+    // 本身就消耗一次配额，剩余 sticky-1 次留给后续调用
+    let entry = m.entry(chain.name.clone()).or_insert((0, chain.sticky));
     if entry.1 > 0 {
         entry.1 -= 1;
         return entry.0 % chain.members.len();
@@ -680,6 +693,84 @@ pub fn curated_models() -> Vec<String> {
     }
     for c in parse_model_chains(&cfg) {
         push(&c.name, &mut out);
+    }
+    out
+}
+
+/// 模型路由编辑器候选清单：启用渠道的 models 条目 + model_map 别名 + 现有链名。
+/// 每项带 routable（按 model_routable 同口径判定当前是否真实可路由）与
+/// chain（是否为链名）标记。整表一次载入完成，避免逐名重载 db。
+pub fn routing_candidates() -> Vec<Value> {
+    let db = store().load();
+    let cfg = db.get("config").cloned().unwrap_or(Value::Null);
+    let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+    let chains = parse_model_chains(&cfg);
+    let ups: Vec<&Value> = db
+        .get("upstreams")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|u| u.get("enabled").map(|x| util::truthy(x)).unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut names: Vec<String> = Vec::new();
+    for u in &ups {
+        if let Some(ms) = u.get("models").and_then(|x| x.as_array()) {
+            for m in ms {
+                let s = util::str_or(Some(m), "");
+                if !s.is_empty() && names.len() < 500 && !names.iter().any(|x| x == &s) {
+                    names.push(s);
+                }
+            }
+        }
+        if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
+            for k in mm.keys() {
+                if !k.is_empty() && names.len() < 500 && !names.iter().any(|x| x == k) {
+                    names.push(k.clone());
+                }
+            }
+        }
+    }
+    for c in &chains {
+        if names.len() < 500 && !names.iter().any(|x| x == &c.name) {
+            names.push(c.name.clone());
+        }
+    }
+    names.sort();
+    // 与 model_routable 同口径的裸名判定（不递归链）
+    let plain_routable = |name: &str| -> bool {
+        if ups.is_empty() {
+            return true; // 无启用渠道 = 透传模式，任意名可路由
+        }
+        for u in &ups {
+            let models = u.get("models").and_then(|x| x.as_array());
+            if let Some(ms) = models {
+                let contains = ms.iter().any(|m| util::str_or(Some(m), "") == name);
+                if !ms.is_empty() && !contains {
+                    continue;
+                }
+            }
+            if hidden_target(u, name, global_hide) {
+                continue;
+            }
+            return true;
+        }
+        false
+    };
+    let mut out: Vec<Value> = Vec::with_capacity(names.len());
+    for name in &names {
+        let is_chain = chains.iter().any(|c| &c.name == name);
+        let routable = if is_chain {
+            chains
+                .iter()
+                .find(|c| &c.name == name)
+                .map(|c| c.members.iter().any(|m| plain_routable(m)))
+                .unwrap_or(false)
+        } else {
+            plain_routable(name)
+        };
+        out.push(json!({"name": name, "routable": routable, "chain": is_chain}));
     }
     out
 }
@@ -968,5 +1059,83 @@ mod endpoint_tests {
         for base in ["https://user:secret@example.test/v1","https://example.test/v1?secret=x","https://example.test/v1#x","file:///tmp/test","http://","https://example.test/v1\n"] {
             assert!(validate_save(&serde_json::json!({"name":"test","base":base})).0.is_none(),"{base}");
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::store::store;
+
+    fn cfg_of(text: &str) -> Value {
+        serde_json::json!({ "model_chains": text })
+    }
+
+    #[test]
+    fn parse_dedupes_members_and_keeps_first_chain_name() {
+        let chains = parse_model_chains(&cfg_of("c1 = a, a, b ,\nc1 = x, y\n# comment\n\nbad line\nc2 = only-one\n"));
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].name, "c1");
+        assert_eq!(chains[0].members, vec!["a", "b"]);
+        assert!(!chains[0].rr);
+        assert_eq!(chains[0].sticky, 3);
+    }
+
+    #[test]
+    fn parse_flags_fb_rr_rrn_with_clamp() {
+        let chains = parse_model_chains(&cfg_of("f = a, b | fb\nr = a, b | rr\nr5 = a, b | rr5\nr0 = a, b | rr0\nrx = a, b | rrx\n"));
+        let get = |n: &str| chains.iter().find(|c| c.name == n).unwrap();
+        assert!(!get("f").rr);
+        assert!(get("r").rr && get("r").sticky == 3, "|rr 默认粘滞 3");
+        assert!(get("r5").rr && get("r5").sticky == 5);
+        assert!(get("r0").rr && get("r0").sticky == 1, "rr0 钳到 1");
+        assert!(get("rx").rr && get("rx").sticky == 3, "非法 N 保持默认");
+    }
+
+    #[test]
+    fn chain_start_round_robin_sticky_and_wrap() {
+        let chain = ModelChain { name: "rt".into(), members: vec!["a".into(), "b".into()], rr: true, sticky: 2 };
+        // 粘滞 2：两次同起点，再推进；对成员数取模
+        let s1 = chain_start(&chain);
+        let s2 = chain_start(&chain);
+        assert_eq!(s1, s2, "粘滞期内起点不变");
+        let s3 = chain_start(&chain);
+        assert_eq!(s3, (s1 + 1) % 2, "粘滞结束后推进一格");
+        // fallback 链恒 0，不写轮询状态
+        let fb = ModelChain { name: "fb".into(), members: vec!["a".into(), "b".into()], rr: false, sticky: 3 };
+        assert_eq!(chain_start(&fb), 0);
+    }
+
+    #[test]
+    fn routing_candidates_marks_routable_and_chain() {
+        let db = store().load();
+        let saved_ups = db.get("upstreams").cloned();
+        let saved_cfg = db.get("config").and_then(|c| c.get("model_chains")).cloned();
+        store().update(|d| {
+            d["upstreams"] = serde_json::json!([
+                {"id":"u1","name":"T","base":"https://x.test/v1","enabled":true,
+                 "models":["alpha","beta"],"model_map":{"gamma":"delta"}}
+            ]);
+            d["config"]["model_chains"] = serde_json::json!("mix = alpha, beta");
+            d["config"]["hide_mapped_names"] = serde_json::json!(true);
+        });
+        let out = routing_candidates();
+        let find = |n: &str| out.iter().find(|x| x["name"] == n).cloned();
+        let alpha = find("alpha").expect("alpha in candidates");
+        assert_eq!(alpha["routable"], true);
+        assert_eq!(alpha["chain"], false);
+        let mix = find("mix").expect("chain in candidates");
+        assert_eq!(mix["chain"], true);
+        assert_eq!(mix["routable"], true, "链可路由=任一成员可路由");
+        // 隐藏目标名 delta：不在 models 清单 → 被隐原名规则挡住 → 不可路由也不进候选
+        // （map 键 gamma 进候选但不在 models 清单 → 同样不可路由，UI 会标警告）
+        let gamma = find("gamma").expect("gamma in candidates");
+        assert_eq!(gamma["routable"], false);
+        // 还原
+        store().update(|d| {
+            d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
+            if let Some(v) = saved_cfg { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
+            d["config"]["hide_mapped_names"] = serde_json::json!(true);
+        });
     }
 }

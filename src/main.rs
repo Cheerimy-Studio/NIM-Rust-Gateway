@@ -427,6 +427,10 @@ async fn h_settings_get(headers: HeaderMap) -> Response {
     admin::settings_get(&headers).await
 }
 
+async fn h_routable_models(headers: HeaderMap) -> Response {
+    admin::routable_models(&headers).await
+}
+
 async fn h_settings_save(headers: HeaderMap, body: Bytes) -> Response {
     admin::settings_save(&headers, body).await
 }
@@ -1334,6 +1338,7 @@ fn build_router() -> Router {
         .route("/api/logs", get(h_logs))
         .route("/api/logs/clear", post(h_logs_clear))
         .route("/api/settings", get(h_settings_get).post(h_settings_save))
+        .route("/api/routable-models", get(h_routable_models))
         .route("/api/password", post(h_password))
         .route("/api/stats/reset", post(h_stats_reset))
         .route("/api/poolmap", get(h_poolmap))

@@ -1213,10 +1213,130 @@ const SET_FIELDS = [
   ['set-signmin', 'sign_min'], ['set-signmax', 'sign_max'],
 ];
 
+// ---------------- 模型路由（降级链）编辑器 ----------------
+let CHAIN_CANDS = []; // [{name, routable, chain}]，来自 /api/routable-models
+
+async function chainLoadCandidates() {
+  try {
+    const d = await api('routable-models');
+    CHAIN_CANDS = (d.models || []).filter(m => m && m.name);
+  } catch (e) { CHAIN_CANDS = []; }
+  const dl = $('#chain-cands');
+  if (!dl) return;
+  dl.textContent = '';
+  for (const m of CHAIN_CANDS) {
+    const o = document.createElement('option');
+    o.value = m.name;
+    dl.appendChild(o);
+  }
+}
+
+function chainAddRow(v) {
+  v = v || {};
+  const tb = $('#chain-rows');
+  if (!tb) return;
+  const tr = document.createElement('tr');
+  tr.innerHTML =
+    '<td><input class="form-control form-control-sm font-monospace chain-name" list="chain-cands" placeholder="如 auto-best"></td>' +
+    '<td><input class="form-control form-control-sm font-monospace chain-members" list="chain-cands" placeholder="model-a, model-b"></td>' +
+    '<td><select class="form-select form-select-sm chain-mode">' +
+    '<option value="fb">fb 回退</option><option value="rr">rr 轮询</option></select></td>' +
+    '<td><input type="number" min="1" max="100" class="form-control form-control-sm chain-sticky" value="3" disabled title="同一起点保持 N 轮"></td>' +
+    '<td><button class="btn btn-sm btn-outline-danger chain-del" type="button" title="删除此路由">×</button></td>';
+  tr.querySelector('.chain-name').value = v.name || '';
+  tr.querySelector('.chain-members').value = (v.members || []).join(', ');
+  tr.querySelector('.chain-mode').value = v.rr ? 'rr' : 'fb';
+  const sticky = tr.querySelector('.chain-sticky');
+  sticky.value = v.rr ? (v.sticky || 3) : 3;
+  sticky.disabled = !v.rr;
+  tr.querySelector('.chain-mode').onchange = e => { sticky.disabled = e.target.value !== 'rr'; };
+  tr.querySelector('.chain-del').onclick = () => tr.remove();
+  tb.appendChild(tr);
+}
+
+// 解析单行 → 行数据（与服务端 parse_model_chains 同语法）
+function chainParseLine(line) {
+  line = line.trim();
+  if (!line || line.startsWith('#')) return null;
+  const eq = line.indexOf('=');
+  if (eq < 0) return null;
+  const name = line.slice(0, eq).trim();
+  let rest = line.slice(eq + 1).trim();
+  let rr = false, sticky = 3;
+  const bar = rest.lastIndexOf('|');
+  if (bar >= 0) {
+    const flag = rest.slice(bar + 1).trim().toLowerCase();
+    const head = rest.slice(0, bar).trim();
+    if (flag === 'fb' || flag === 'fallback') { rest = head; rr = false; }
+    else if (flag.startsWith('rr')) {
+      rest = head; rr = true;
+      const n = parseInt(flag.slice(2), 10);
+      if (Number.isFinite(n)) sticky = Math.min(100, Math.max(1, n));
+    }
+  }
+  const members = rest.split(',').map(s => s.trim()).filter(Boolean);
+  return { name, members, rr, sticky };
+}
+
+function chainLoad(text) {
+  const tb = $('#chain-rows');
+  if (!tb) return;
+  tb.textContent = '';
+  (text || '').split('\n').forEach(line => {
+    const row = chainParseLine(line);
+    if (row && row.members.length >= 2) chainAddRow(row);
+  });
+}
+
+// 收集 + 校验，返回序列化文本；有硬伤抛 Error（guard 统一 toast），可疑项落到 #chain-err
+function chainDump() {
+  const errBox = $('#chain-err');
+  const warns = [], errors = [];
+  const rows = [];
+  for (const tr of $('#chain-rows').querySelectorAll('tr')) {
+    const name = tr.querySelector('.chain-name').value.trim();
+    const raw = tr.querySelector('.chain-members').value;
+    const rr = tr.querySelector('.chain-mode').value === 'rr';
+    const sticky = Math.min(100, Math.max(1, parseInt(tr.querySelector('.chain-sticky').value, 10) || 3));
+    if (!name && !raw.trim()) continue; // 全空行 = 删除
+    const members = [...new Set(raw.split(',').map(s => s.trim()).filter(Boolean))];
+    rows.push({ name, members, rr, sticky });
+  }
+  const chainNames = new Set(rows.map(r => r.name));
+  for (const m of CHAIN_CANDS) if (m.chain) chainNames.add(m.name);
+  const seenNames = new Set();
+  for (const r of rows) {
+    const tag = r.name || '(空链名)';
+    if (!r.name) { errors.push('存在没有链名的路由'); continue; }
+    if (r.name.length > 80) errors.push(`${tag}：链名过长（>80 字符）`);
+    if (/[=|#]/.test(r.name)) errors.push(`${tag}：链名不能包含 = | # 字符`);
+    if (seenNames.has(r.name)) errors.push(`${tag}：链名重复`);
+    seenNames.add(r.name);
+    const shadow = CHAIN_CANDS.find(m => m.name === r.name && !m.chain);
+    if (shadow) errors.push(`${tag}：与现有模型/别名重名，会遮蔽原模型`);
+    if (r.members.length < 2) { errors.push(`${tag}：至少需要 2 个成员`); continue; }
+    for (const mem of r.members) {
+      if (mem.length > 160) { errors.push(`${tag}：成员名过长（${mem.slice(0, 40)}…）`); continue; }
+      if (/[=|#]/.test(mem)) { errors.push(`${tag}：成员不能包含 = | # 字符`); continue; }
+      if (chainNames.has(mem)) { errors.push(`${tag}：成员 ${mem} 是链名，不支持链嵌套`); continue; }
+      const cand = CHAIN_CANDS.find(m => m.name === mem);
+      if (cand && cand.routable === false) warns.push(`${tag} 的成员 ${mem} 当前不可路由（隐藏原名或未列入渠道模型），请求到它会跳过`);
+    }
+  }
+  if (errBox) errBox.textContent = warns.join('；');
+  if (errors.length) throw new Error('模型路由：' + errors[0] + (errors.length > 1 ? `（共 ${errors.length} 处问题）` : ''));
+  return rows.map(r => {
+    const suffix = r.rr ? (r.sticky === 3 ? ' | rr' : ` | rr${r.sticky}`) : '';
+    return `${r.name} = ${r.members.join(', ')}${suffix}`;
+  }).join('\n');
+}
+
 async function loadSettings() {
   const c = await run(() => api('settings'));
   if (!c) return;
   for (const [id, key] of SET_FIELDS) $('#' + id).value = c[key] != null ? c[key] : '';
+  chainLoad(c.model_chains || '');
+  chainLoadCandidates();
   $('#set-logen').checked = !!c.log_enabled;
   $('#set-verify').checked = !!c.verify_tls;
   $('#set-queue').checked = !!c.queue_enabled;
@@ -1239,9 +1359,12 @@ async function loadSettings() {
 }
 
 function bindSettings() {
+  $('#chain-add').onclick = () => chainAddRow({});
   $('#settings-save').onclick = guard(async () => {
     const config = {};
     for (const [id, key] of SET_FIELDS) config[key] = $('#' + id).value;
+    // 模型路由：先校验再序列化（有硬伤会抛错，guard 统一 toast）
+    config.model_chains = chainDump();
     config.log_enabled = $('#set-logen').checked;
     config.verify_tls = $('#set-verify').checked;
     config.queue_enabled = $('#set-queue').checked;
