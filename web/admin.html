@@ -346,11 +346,14 @@ details.upgrp[open]{background:#fff}
         </select>
       </div>
     <div class="card-body">
-      <input type="hidden" id="up-id">
+
       <div class="row g-3">
+        <div class="col-md-2"><label class="form-label" for="up-id">渠道 ID</label>
+          <input class="form-control form-control-sm font-monospace" id="up-id" placeholder="留空自动生成">
+          <div class="form-text">改 ID 会同步迁移账号归属，调用统计重新累计</div></div>
         <div class="col-md-3"><label class="form-label" for="up-name">名称</label>
           <input class="form-control form-control-sm" id="up-name" placeholder="NVIDIA NIM"></div>
-        <div class="col-md-6"><label class="form-label" for="up-base">Base URL</label>
+        <div class="col-md-7"><label class="form-label" for="up-base">Base URL</label>
           <input class="form-control form-control-sm font-monospace" id="up-base" placeholder="https://integrate.api.nvidia.com/v1"></div>
         <div class="col-md-3"><label class="form-label" for="up-weight" title="1-100">权重</label>
           <input type="number" min="1" max="100" class="form-control form-control-sm" id="up-weight" value="10"></div>
@@ -516,12 +519,6 @@ details.upgrp[open]{background:#fff}
 <section class="pane" id="pane-catalog">
   <h2 class="pane-title">模型接入</h2>
   <div class="hint mb-3">渠道里的模型默认不对外，客户端调不到。想开放哪个，就给它起个对外的名字（别名），客户端拿别名调用；把别名清空再保存，它就下线了。上下文/输出上限填 0 是不限，超了网关会自动往下压，省得上游直接报错。</div>
-  <div class="card mb-3"><div class="card-body py-2">
-    <div class="form-check form-switch">
-      <input class="form-check-input" type="checkbox" id="cat-transparent">
-      <label class="form-check-label small" for="cat-transparent">旧透传模式：渠道没列任何模型时，放行任意模型名（升级前的行为，老配置才需要开）</label>
-    </div>
-  </div></div>
   <div class="card mb-3">
     <div class="card-header d-flex justify-content-between align-items-center">
       <span><i class="bi bi-boxes me-2 text-muted"></i>上游模型</span>

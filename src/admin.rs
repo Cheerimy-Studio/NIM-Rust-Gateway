@@ -1049,6 +1049,11 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     if alias.chars().count() > 160 || alias.chars().any(char::is_control) || upstream.chars().any(char::is_control) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "别名含非法字符"}}))).into_response();
     }
+    // 渠道表单把 model_map/models 按文本（= > , ）往返编辑，这些字符进别名
+    // 会在下一次表单保存时把配置撕碎
+    if alias.contains(['=', '>', '|', ',', '#']) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "别名不能包含 = > | , # 字符"}}))).into_response();
+    }
     if ctx < 0 || out < 0 || ctx > 100_000_000 || out > 100_000_000 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "上限数值非法"}}))).into_response();
     }
@@ -1127,7 +1132,7 @@ pub async fn upstream_models_fetch(headers: &HeaderMap, body: Bytes) -> Response
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "请求体格式错误"}}))).into_response();
     };
     let ch_id = util::str_or(body.get("channel_id"), "");
-    let (base, apikey, auth_mode) = {
+    let (base, apikey, auth_mode, verify_tls) = {
         let db = store().load();
         let Some(u) = db
             .get("upstreams")
@@ -1147,13 +1152,17 @@ pub async fn upstream_models_fetch(headers: &HeaderMap, body: Bytes) -> Response
             .map(|k| util::str_or(k.get("apikey"), ""))
             .unwrap_or_default();
         let mode = util::str_or(u.get("auth_mode"), "auto");
-        (util::str_or(u.get("base"), ""), key, mode)
+        let verify = db.get("config").map(|c| util::truthy(c.get("verify_tls").unwrap_or(&Value::Bool(true)))).unwrap_or(true);
+        (util::str_or(u.get("base"), ""), key, mode, verify)
     };
     if base.is_empty() {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "渠道缺少 Base URL"}}))).into_response();
     }
+    if apikey.is_empty() {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "这个渠道还没有可用账号，先到「账号池」导入再拉取"}}))).into_response();
+    }
     let url = format!("{}/models", base.trim_end_matches('/'));
-    let client = crate::webhttp::get_http(true, 10);
+    let client = crate::webhttp::get_http(verify_tls, 10);
     let mut req = client.get(&url).timeout(std::time::Duration::from_secs(20));
     req = if auth_mode == "x-api-key" {
         req.header("x-api-key", &apikey)

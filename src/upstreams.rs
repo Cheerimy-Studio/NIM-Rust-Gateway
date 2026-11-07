@@ -788,6 +788,7 @@ pub fn curated_models() -> Vec<String> {
     };
     let mut curated = false;
     let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+    let transparent = transparent_upstream(&cfg);
     for u in &ups {
         // 隐藏集 = 被隐原名规则挡住的映射目标名；显式列进 models 的不算（见 hidden_target）
         let hidden: HashSet<String> = u
@@ -812,16 +813,36 @@ pub fn curated_models() -> Vec<String> {
     }
     if curated {
         for u in &ups {
+            let models_list: HashSet<String> = u
+                .get("models")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().map(|m| util::str_or(Some(m), "")).collect())
+                .unwrap_or_default();
             if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
                 for m in mm.keys() {
-                    push(m, &mut out);
+                    // 别名只有进了 models 清单才真的可路由；没进的挂出来只会
+                    // 「清单里有、调用 404」。透传模式下维持旧行为
+                    if transparent || models_list.contains(m) {
+                        push(m, &mut out);
+                    }
                 }
             }
         }
-        // 降级链名作为虚拟模型进入清单
+        // 降级链名：任一成员可路由才对外，否则清单挂着却调不通
         for c in parse_model_chains(&cfg) {
-            push(&c.name, &mut out);
+            let routable = transparent
+                || c.members.iter().any(|mem| {
+                    ups.iter()
+                        .any(|u| channel_serves_model(u, mem, global_hide, transparent))
+                });
+            if routable {
+                push(&c.name, &mut out);
+            }
         }
+        return out;
+    }
+    if !transparent {
+        // 默认隐藏：没有任何接入就老实返回空清单
         return out;
     }
     for u in &ups {
@@ -936,6 +957,16 @@ fn clamp(v: &Value, lo: i64, hi: i64, default: i64) -> i64 {
 
 pub fn validate_save(data: &Value) -> (Option<Value>, String) {
     let name = util::str_or(data.get("name"), "").trim().to_string();
+    // 自定义渠道 ID：进「渠道ID/模型名」展示与映射键，字符集必须收敛
+    let id_in = util::str_or(data.get("id"), "").trim().to_string();
+    if !id_in.is_empty()
+        && (id_in.chars().count() > 48
+            || !id_in
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+    {
+        return (None, "渠道 ID 只能含字母、数字、下划线、连字符，最长 48".into());
+    }
     let raw_base = util::str_or(data.get("base"), "");
     if raw_base.chars().any(char::is_control) { return (None, "Base URL 不能包含控制字符".into()); }
     let mut base = raw_base.trim().to_string();
@@ -1038,7 +1069,9 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
     let (row, err) = validate_save(data);
     let Some(mut row) = row else { return (None, err) };
     let uid_in = util::str_or(data.get("id"), "");
+    let prev_id = util::str_or(data.get("prev_id"), "");
     let mut final_id = String::new();
+    let mut save_err: Option<String> = None;
     store().update(|db| {
         let ups_val = db
             .as_object_mut()
@@ -1049,8 +1082,12 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
             None => return,
         };
         let mut replaced = false;
+        let mut renamed_from = String::new();
         let mut routing_changed = false;
-        if !uid_in.is_empty() {
+        // 带着旧 ID 的请求是「改名意图」：新 ID 命中别的渠道时绝不能静默更新
+        // 那个渠道（改名该被「ID 已占用」拒绝），也不要误伤别人的配置
+        let rename_intent = !prev_id.is_empty() && prev_id != uid_in;
+        if !uid_in.is_empty() && !rename_intent {
             for u in arr.iter_mut() {
                 if util::str_or(u.get("id"), "") == uid_in {
                     if let (Some(old), Some(newo)) = (u.as_object(), row.as_object_mut()) {
@@ -1080,9 +1117,58 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
                 }
             }
         }
+        // 改名：新 ID 没命中任何渠道、但 prev_id 命中 → 显式改名并级联迁移，
+        // 而不是被当成「新建」造成重复渠道 + 孤儿账号
+        if !replaced && !uid_in.is_empty() && !prev_id.is_empty() && prev_id != uid_in {
+            let hit = arr
+                .iter()
+                .position(|u| util::str_or(u.get("id"), "") == prev_id);
+            let Some(idx) = hit else {
+                save_err = Some(format!("要改名的渠道不存在（{}）", prev_id));
+                return;
+            };
+            let dupe = arr
+                .iter()
+                .any(|u| util::str_or(u.get("id"), "") == uid_in);
+            if dupe {
+                save_err = Some(format!("渠道 ID {} 已被占用", uid_in));
+                return;
+            }
+            let u = &mut arr[idx];
+            if let (Some(old), Some(newo)) = (u.as_object(), row.as_object_mut()) {
+                for (k, v) in old {
+                    if !data.get(k).is_some() {
+                        newo.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            routing_changed = ["base", "api_endpoint", "auth_mode", "model_map", "models"]
+                .iter().any(|field| arr[idx].get(*field) != row.get(*field));
+            let enabled = row.get("enabled").map(util::as_bool2).unwrap_or(false);
+            if let Some(newo) = row.as_object_mut() {
+                newo.insert("id".into(), Value::from(uid_in.clone()));
+                if enabled {
+                    newo.remove("auto_disabled_at");
+                    newo.remove("auto_reason");
+                }
+            }
+            arr[idx] = row.clone();
+            renamed_from = prev_id.clone();
+            final_id = uid_in.clone();
+            replaced = true;
+        }
         if !replaced {
             let mut new_row = row.clone();
-            let new_id = format!("u_{}", util::rand_hex(6));
+            let new_id = if uid_in.is_empty() {
+                format!("u_{}", util::rand_hex(6))
+            } else {
+                // 新建时也允许自定义 ID（已确认无冲突）
+                uid_in.clone()
+            };
+            if arr.iter().any(|u| util::str_or(u.get("id"), "") == new_id) {
+                save_err = Some(format!("渠道 ID {} 已被占用", new_id));
+                return;
+            }
             if let Some(o) = new_row.as_object_mut() {
                 o.insert("id".into(), Value::from(new_id.clone()));
                 o.insert("created_at".into(), Value::from(util::now_i()));
@@ -1090,12 +1176,54 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
             arr.push(new_row);
             final_id = new_id;
         }
+        // 改名级联：账号归属 / 目录缓存 / 池与配额 / 负缓存 / 最近统计
+        if !renamed_from.is_empty() {
+            if let Some(keys) = db.get_mut("keys").and_then(Value::as_array_mut) {
+                for k in keys.iter_mut() {
+                    if util::str_or(k.get("upstream_id"), "") == prev_id {
+                        if let Some(o) = k.as_object_mut() {
+                            o.insert("upstream_id".into(), Value::from(uid_in.clone()));
+                        }
+                    }
+                }
+            }
+            for map_name in ["upstream_catalog", "pool_buckets", "pool_daily", "model_missing"] {
+                if let Some(m) = db.get_mut(map_name).and_then(Value::as_object_mut) {
+                    if let Some(v) = m.remove(prev_id.as_str()) {
+                        m.insert(uid_in.clone(), v);
+                    }
+                }
+            }
+            if let Some(m) = db.get_mut("up_recent").and_then(Value::as_object_mut) {
+                let sep: String = std::iter::once('\0').collect();
+                let old_prefix = format!("{}{}", prev_id, sep);
+                let new_prefix = format!("{}{}", uid_in, sep);
+                let old_keys: Vec<String> = m
+                    .keys()
+                    .filter(|k| k.as_str() == prev_id || k.starts_with(&old_prefix))
+                    .cloned()
+                    .collect();
+                for k in old_keys {
+                    if let Some(v) = m.remove(&k) {
+                        let nk = if k == prev_id {
+                            uid_in.clone()
+                        } else {
+                            k.replacen(&old_prefix, &new_prefix, 1)
+                        };
+                        m.insert(nk, v);
+                    }
+                }
+            }
+        }
         if routing_changed {
             if let Some(cache) = db.get_mut("model_missing").and_then(Value::as_object_mut) { cache.remove(&final_id); }
             // Breakers are model-global in the existing store; clear them after changing routing.
             if let Some(obj) = db.as_object_mut() { obj.insert("model_breaker".into(), serde_json::json!({})); }
         }
     });
+    if let Some(e) = save_err {
+        return (None, e);
+    }
     (get_upstream(&final_id), String::new())
 }
 

@@ -4064,6 +4064,11 @@ pub fn gateway_model_ids() -> Vec<String> {
     if !names.is_empty() {
         return names;
     }
+    // 默认隐藏语义下，什么都没接入就是空清单，不能再拿内置演示名顶上
+    // （清单里有、调用 404）。透传模式维持旧行为
+    if !upstreams::transparent_upstream(&crate::store::store().load().get("config").cloned().unwrap_or(Value::Null)) {
+        return Vec::new();
+    }
     let mut aliases: Vec<String> = Vec::new();
     for u in upstreams::all_upstreams() {
         if !u.get("enabled").map(util::truthy).unwrap_or(false) {

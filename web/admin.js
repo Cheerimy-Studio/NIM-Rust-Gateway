@@ -635,6 +635,7 @@ async function loadUpstreams() {
     };
     mk('编辑', 'btn-outline-primary', () => {
       $('#up-id').value = u.id;
+      $('#up-id').dataset.prev = u.id;
       $('#up-name').value = u.name;
       $('#up-base').value = u.base;
       $('#up-endpoint').value = u.api_endpoint || 'auto';
@@ -855,6 +856,7 @@ async function fillModelSelects() {
 
 function resetUpstreamForm() {
     $('#up-id').value = '';
+    delete $('#up-id').dataset.prev;
     $('#up-name').value = '';
     $('#up-base').value = '';
     $('#up-endpoint').value = 'auto';
@@ -878,7 +880,8 @@ function resetUpstreamForm() {
 function bindUpstreams() {
   $('#up-save').onclick = guard(async () => {
     const payload = {
-      id: $('#up-id').value || undefined,
+      id: $('#up-id').value.trim() || undefined,
+      prev_id: $('#up-id').dataset.prev || undefined,
       name: $('#up-name').value.trim(),
       base: $('#up-base').value.trim(),
       api_endpoint: $('#up-endpoint').value,
@@ -1338,7 +1341,6 @@ let CAT_ROWS = [];
 async function loadCatalog() {
   const d = await run(() => api('upstream-models'));
   if (!d) return;
-  $('#cat-transparent').checked = !!d.transparent;
   CAT_ROWS = d.rows || [];
   const sel = $('#cat-channel');
   const chans = [...new Set(CAT_ROWS.map(r => r.channel_id))];
@@ -1396,11 +1398,6 @@ function bindCatalog() {
     if (!ch) throw new Error('先在上面选一个渠道');
     const d = await api('upstream-models/fetch', {method: 'POST', json: {channel_id: ch}});
     toast('拉到 ' + d.count + ' 个模型');
-    loadCatalog();
-  });
-  $('#cat-transparent').onchange = guard(async (e) => {
-    await api('settings', {method: 'POST', json: {config: {transparent_upstream: e.target.checked}}});
-    toast(e.target.checked ? '透传已开：没列模型的渠道放行任意模型名' : '透传已关：模型必须加别名才对外');
     loadCatalog();
   });
   $('#chain-add').onclick = () => chainAddRow({});

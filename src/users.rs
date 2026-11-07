@@ -1262,6 +1262,7 @@ pub fn user_logs_page(user_id: &str, kind: &str, page: i64, per: usize) -> (Vec<
 pub fn model_square() -> Vec<Value> {
     let db = store().load();
     let limits = crate::upstreams::parse_model_limits(db.get("config").unwrap_or(&Value::Null));
+    let transparent = crate::upstreams::transparent_upstream(db.get("config").unwrap_or(&Value::Null));
     let ups = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
     let mut best: HashMap<String, f64> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -1275,6 +1276,7 @@ pub fn model_square() -> Vec<Value> {
             .and_then(|m| m.as_array())
             .map(|a| a.iter().map(|m| util::str_or(Some(m), "")).collect())
             .unwrap_or_default();
+        let models_set: std::collections::HashSet<String> = models.iter().cloned().collect();
         for m in models {
             if m.is_empty() {
                 continue;
@@ -1291,9 +1293,13 @@ pub fn model_square() -> Vec<Value> {
                 order.push(m);
             }
         }
-        // model_map 别名同样进广场（按别名自身计价，与计费口径一致）
+        // model_map 别名同样进广场（按别名自身计价，与计费口径一致）；
+        // 默认隐藏下只挂「真进了 models 清单」的别名，与可路由口径一致
         if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
             for (alias, _target) in mm {
+                if !transparent && !models_set.contains(alias) {
+                    continue;
+                }
                 let price = prices.get(alias).and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let e = best.entry(alias.clone()).or_insert(f64::INFINITY);
                 if price < *e {
