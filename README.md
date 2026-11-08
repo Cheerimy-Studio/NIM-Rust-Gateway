@@ -237,12 +237,9 @@ GET  /queue                    公开排队页
 ```bash
 NGW_PUBLIC_ORIGIN=https://gateway.example.com
 NGW_TRUSTED_PROXIES=127.0.0.1,::1
-# 可选：启用 GitHub 第三方登录
-NGW_GITHUB_CLIENT_ID=your-client-id
-NGW_GITHUB_CLIENT_SECRET=your-client-secret
-# 可选：禁止创建新的 GitHub 用户，既有绑定仍可登录
-NGW_GITHUB_ALLOW_SIGNUP=false
 ```
+
+也可以在后台「设置 → 01Code 设备登录」直接填写公网入口与可信反代 IP（留空时读取上述环境变量）。
 
 `NGW_PUBLIC_ORIGIN` 只允许 HTTPS origin，不能含路径、用户名、查询或片段。网关本身位于 TLS 反向代理后；代理必须覆盖 `X-Forwarded-Proto: https` 和 `X-Real-IP`，并阻止用户绕过代理直连网关。仅对 `NGW_TRUSTED_PROXIES` 列出的精确 IP 信任这些头，其他来源不能使用新授权接口。未设置正确 origin/可信代理时返回 `invalid_request`。不要把公网客户端地址加入可信代理列表。
 
@@ -254,7 +251,7 @@ sequenceDiagram
     C->>G: POST /api/device/code
     G-->>C: 验证码、授权地址、轮询间隔
     C->>B: 打开授权地址
-    B->>G: 用户中心登录或 GitHub 登录
+    B->>G: 用户中心登录
     B->>G: POST /api/device/authorize，CSRF，允许或拒绝
     loop 按 interval 轮询
         C->>G: POST /api/device/token
@@ -276,7 +273,7 @@ sequenceDiagram
 
 兑换成功：`{"access_token":"sk-usr-...","token_type":"Bearer","expires_in":0,"scope":"llm"}`。Key 名为“01Code-设备”，受用户启停、余额、模型权限和 RPM 限制。客户端版本头写入成功调用的用户调用日志 `client` 字段。用量按成功结算请求聚合到独立持久表，不随调用日志裁剪而丢失；聚合功能从升级后开始计数，不反推被历史日志裁剪的数据。
 
-设备码使用 256 位随机值，服务端只保存其 SHA-256；人类验证码为 8 位，排除 `0/O/1/I`。授权、拒绝、兑换均不可重复。并发兑换只创建一个 Key。每 IP 每分钟最多签发 5 个码；授权页及确认入口设有十分钟窗口的尝试次数限制。轮询过快将 interval 增加 5 秒并持续生效。设备码绑定发起 IP 与 client_id；切换网络后需要重新发起登录。未完成的设备码与 GitHub 登录 state 使用有上限的进程内存，服务重启后需重新发起；已兑换 Key 持久保存。多实例部署需要对授权链路启用粘性路由。
+设备码使用 256 位随机值，服务端只保存其 SHA-256；人类验证码为 8 位，排除 `0/O/1/I`。授权、拒绝、兑换均不可重复。并发兑换只创建一个 Key。每 IP 每分钟最多签发 5 个码；授权页及确认入口设有十分钟窗口的尝试次数限制。轮询过快将 interval 增加 5 秒并持续生效。设备码绑定发起 IP 与 client_id；切换网络后需要重新发起登录。未完成的设备码使用有上限的进程内存，服务重启后需重新发起；已兑换 Key 持久保存。多实例部署需要对授权链路启用粘性路由。
 
 | error | HTTP | 客户端处理 |
 | --- | --- | --- |
@@ -292,10 +289,6 @@ sequenceDiagram
 
 用户中心新增“已授权设备”，可独立撤销；原 API Key 页面也可以管理对应 Key。撤销后新模型调用与账户访问会被拒绝，已发出的上游请求不强制中断。授权页使用既有会话和独立 CSRF 请求头，并禁止 iframe 嵌入及缓存。
 
-### GitHub 第三方登录
-
-配置 OAuth App 的回调为 `https://gateway.example.com/api/oauth/github/callback`。启用后用户中心显示“使用 GitHub 登录”，01Code 的浏览器授权过程自动使用同一登录页面。实现使用一次性 state、HttpOnly/Secure/SameSite Cookie、S256 PKCE 和服务端换码。GitHub Token 不回传到桌面，也不持久保存。身份按 GitHub 数字 ID 绑定，不按邮箱或同名账号自动合并，避免接管旧账户；首次登录创建独立账户。已有邮箱账户的自动关联没有启用。
-
 验证命令：
 
 ```bash
@@ -310,4 +303,4 @@ node tests/frontend-webclaw.cjs
 node tests/frontend-webclaw-send.cjs
 ```
 
-设备状态机单元测试覆盖轮询、过期、拒绝、绑定和限速；接口测试覆盖授权 CSRF、并发兑换、撤销后拒绝；邮箱注册/验证码/密码重置回归继续保留。接口测试在隔离本机实例模拟可信 TLS 代理，真实 HTTPS 和 GitHub OAuth 回调仍须在部署域名上验收。
+设备状态机单元测试覆盖轮询、过期、拒绝、绑定和限速；接口测试覆盖授权 CSRF、并发兑换、撤销后拒绝；邮箱注册/验证码/密码重置回归继续保留。接口测试在隔离本机实例模拟可信 TLS 代理，真实 HTTPS 入口仍须在部署域名上验收。

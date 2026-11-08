@@ -52,9 +52,33 @@ fn reply(v: Value) -> Response {
         .insert("pragma", "no-cache".parse().unwrap());
     r
 }
-// NGW_PUBLIC_ORIGIN must be the canonical external HTTPS origin. Never build authorization links from Host.
+fn cfg_str(key: &str) -> String {
+    store()
+        .load()
+        .get("config")
+        .and_then(|c| c.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// 后台「01Code 设备登录」可关闭整条授权链路（默认开启）。
+fn enabled() -> bool {
+    store()
+        .load()
+        .get("config")
+        .map(|c| c.get("device_login_enabled").map(util::truthy).unwrap_or(true))
+        .unwrap_or(true)
+}
+
+// 公网入口优先取后台配置，留空回退环境变量。必须是规范 HTTPS 源，
+// 绝不从 Host 拼授权链接。
 pub fn origin() -> Option<String> {
-    let s = std::env::var("NGW_PUBLIC_ORIGIN").ok()?;
+    let mut s = cfg_str("public_origin");
+    if s.is_empty() {
+        s = std::env::var("NGW_PUBLIC_ORIGIN").ok()?;
+    }
     let u = reqwest::Url::parse(&s).ok()?;
     if u.scheme() != "https"
         || u.host_str().is_none()
@@ -69,8 +93,11 @@ pub fn origin() -> Option<String> {
     Some(s.trim_end_matches('/').into())
 }
 fn trusted(peer: std::net::IpAddr) -> bool {
-    std::env::var("NGW_TRUSTED_PROXIES")
-        .unwrap_or_default()
+    let mut configured = cfg_str("trusted_proxies");
+    if configured.is_empty() {
+        configured = std::env::var("NGW_TRUSTED_PROXIES").unwrap_or_default();
+    }
+    configured
         .split(',')
         .filter_map(|v| v.trim().parse::<std::net::IpAddr>().ok())
         .any(|p| p == peer)
@@ -120,6 +147,9 @@ pub async fn code(
     h: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !secure(&h, addr.ip()) {
         return err("invalid_request");
     }
@@ -202,6 +232,9 @@ pub async fn token(
     h: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !secure(&h, addr.ip()) {
         return err("invalid_request");
     }
@@ -244,6 +277,9 @@ fn bearer(h: &HeaderMap) -> Option<(Value, Value)> {
     users::lookup_user_key(a[7..].trim())
 }
 pub async fn revoke(ConnectInfo(addr): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
+    if !enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !secure(&h, addr.ip()) {
         return err("invalid_request");
     }
@@ -261,6 +297,9 @@ pub async fn revoke(ConnectInfo(addr): ConnectInfo<SocketAddr>, h: HeaderMap) ->
     StatusCode::NO_CONTENT.into_response()
 }
 pub async fn me(ConnectInfo(addr): ConnectInfo<SocketAddr>, h: HeaderMap) -> Response {
+    if !enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !secure(&h, addr.ip()) {
         return err("invalid_request");
     }
@@ -277,6 +316,9 @@ pub async fn usage(
     h: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
+    if !enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !secure(&h, addr.ip()) {
         return err("invalid_request");
     }
@@ -303,6 +345,9 @@ pub async fn decide(
     h: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !secure(&h, addr.ip()) {
         return err("invalid_request");
     }
@@ -346,6 +391,9 @@ pub async fn page(
     h: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
+    if !enabled() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !secure(&h, addr.ip()) {
         return err("invalid_request");
     }

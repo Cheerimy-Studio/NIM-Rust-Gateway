@@ -108,6 +108,7 @@ const LOADERS = {
   dash: () => loadOverview(),
   keys: () => loadKeys(),
   upstreams: () => loadUpstreams(),
+  import: () => loadUpstreams(),
   catalog: () => loadCatalog(),
   tokens: () => loadTokens(),
   intercept: () => loadIntercept(),
@@ -1114,6 +1115,7 @@ const SET_FIELDS = [
   ['set-uachk', 'update_auto_check_hours'],
   ['set-user', 'admin_username'], ['set-mwl', 'model_whitelist'], ['set-mbl', 'model_blacklist'],
   ['set-pover', 'param_overrides'],
+  ['set-origin', 'public_origin'], ['set-trusted', 'trusted_proxies'],
   ['set-smax', 'session_log_max'],
   ['set-trmax', 'training_log_max'],
   ['set-trmin', 'training_min_chars'],
@@ -1402,6 +1404,7 @@ async function loadSettings() {
   $('#set-breaker').checked = !!c.breaker_enabled;
   $('#set-herr').checked = !!c.hide_upstream_errors;
   $('#set-mhide').checked = !!c.hide_mapped_names;
+  $('#set-deviceon').checked = c.device_login_enabled !== false;
   $('#set-watchdog').checked = !!c.watchdog_enabled;
   $('#set-signen').checked = !!c.sign_enabled;
   $('#set-smtp-host').value = c.smtp_host || '';
@@ -1427,6 +1430,7 @@ function bindSettings() {
     config.breaker_enabled = $('#set-breaker').checked;
     config.hide_upstream_errors = $('#set-herr').checked;
     config.hide_mapped_names = $('#set-mhide').checked;
+    config.device_login_enabled = $('#set-deviceon').checked;
     config.watchdog_enabled = $('#set-watchdog').checked;
     config.sign_enabled = $('#set-signen').checked;
   config.smtp_host = $('#set-smtp-host').value;

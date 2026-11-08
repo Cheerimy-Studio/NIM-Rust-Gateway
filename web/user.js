@@ -519,5 +519,3 @@ function bindLoginTabs() {
 
 async function loadDevices(){const r=await api('keys');const box=document.getElementById('device-list');if(!box)return;box.replaceChildren();for(const t of (r.rows||[]).filter(t=>t.device_client==='01code')){const row=document.createElement('div');row.className='d-flex align-items-center gap-3 mb-3';const text=document.createElement('span');text.textContent=t.name+' · '+(t.device_ip||'')+' · '+fmtTime(t.created_at)+(t.enabled?'':' · 已撤销');const btn=document.createElement('button');btn.className='btn btn-sm btn-outline-danger';btn.textContent='撤销';btn.disabled=!t.enabled;btn.onclick=()=>run(async()=>{await api('keys/op',{method:'POST',json:{id:t.id,op:'disable'}});await loadDevices();});row.append(text,btn);box.append(row);}if(!box.children.length)box.textContent='暂无已授权设备';}
 
-
-fetch('/api/oauth/providers').then(r=>r.json()).then(p=>{if(p.github){const a=document.getElementById('github-login');a.hidden=false;a.href='/api/oauth/github?device='+encodeURIComponent(new URLSearchParams(location.search).get('device')||'');}}).catch(()=>{});

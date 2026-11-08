@@ -2,7 +2,6 @@
 
 mod admin;
 mod device;
-mod oauth;
 mod billing;
 mod convert;
 mod bridge;
@@ -1260,9 +1259,6 @@ fn cli_reset_password(pw: &str) -> i32 {
 fn build_router() -> Router {
     Router::new()
         // /v1 数据面
-        .route("/api/oauth/providers", get(oauth::providers))
-        .route("/api/oauth/github", get(oauth::start))
-        .route("/api/oauth/github/callback", get(oauth::callback))
         .route("/api/device/code", post(device::code))
         .route("/api/device/token", post(device::token).delete(device::revoke))
         .route("/api/device/authorize", post(device::decide))

@@ -947,6 +947,22 @@ details.upgrp[open]{background:#fff}
           </div>
         </div>
       </div>
+      <div class="card mb-3" id="sec-device">
+        <div class="card-header"><i class="bi bi-laptop me-2 text-muted"></i>01Code 设备登录</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label" for="set-origin">公网 HTTPS 入口</label>
+              <input class="form-control form-control-sm font-monospace" id="set-origin" placeholder="https://gateway.example.com">
+              <div class="form-text">留空时读取环境变量 NGW_PUBLIC_ORIGIN。只能填纯源，不能带路径或参数。</div></div>
+            <div class="col-md-6"><label class="form-label" for="set-trusted">可信反代 IP</label>
+              <input class="form-control form-control-sm font-monospace" id="set-trusted" placeholder="127.0.0.1,::1">
+              <div class="form-text">留空时读取 NGW_TRUSTED_PROXIES。反代需覆盖 X-Forwarded-Proto 与 X-Real-IP。</div></div>
+            <div class="col-12"><div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="set-deviceon">
+              <label class="form-check-label small" for="set-deviceon">允许 01Code 设备码登录（关闭后相关接口返回 404）</label></div></div>
+          </div>
+        </div>
+      </div>
       <div class="card mb-3" id="sec-breaker">
         <div class="card-header"><i class="bi bi-activity me-2 text-muted"></i>防风控与熔断</div>
         <div class="card-body">

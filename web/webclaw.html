@@ -168,7 +168,7 @@ a{text-decoration:none}
         <button id="wc-export-all" class="side-btn" title="全部项目导出为一个文件">导出全部</button>
         <button id="wc-import" class="side-btn" title="导入之前导出的文件">导入</button>
       </div>
-      <div class="side-note">项目和工作区文件保存在本机浏览器。换设备或清理浏览器前请先导出。</div>
+      <div class="side-note">项目保存在本机浏览器，换设备前先导出。</div>
     </div>
     <div class="foot"><a href="/admin"><i class="bi bi-arrow-left"></i>返回后台</a></div>
   </aside>
@@ -206,7 +206,7 @@ a{text-decoration:none}
         <button id="wc-disconnect" class="btn btn-sm btn-outline-secondary" hidden>断开目录</button>
       </div>
       <div id="wc-files" class="workspace-files"></div>
-      <p class="small text-muted mb-0 mt-2">工具在当前浏览器执行，项目不向服务器同步。读取的文件内容会随对话发送给所选模型；写入本机目录前会逐次确认。每轮任务最多 8 次模型请求。目录连接在刷新后失效。</p>
+      <p class="small text-muted mb-0 mt-2">文件只在当前浏览器处理；读取内容会随对话发给模型，写入本机目录前会确认。刷新后需重新连接目录。</p>
     </details>
     <div class="card chat" id="wc-chat" aria-live="polite"></div>
 

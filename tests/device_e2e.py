@@ -76,10 +76,24 @@ def main():
                     check(c.get('/v1/models').status_code==401,'revoked model calls rejected')
                     del c.headers['Authorization']
                     denied=issue();check(c.post('/api/device/authorize',json={'code':denied['user_code'],'decision':'deny'}).status_code==200,'deny');check(poll(denied).json()['error']=='access_denied','denied polling')
-                    for _ in range(3):issue()
+                    # 后台设置：公网入口/可信代理优先于环境变量；开关可整体停用。
+                    # 此时 c 是用户会话，管理设置走独立的 admin 会话。
+                    with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=30) as adm:
+                        ar=adm.post('/api/login',json={'username':'admin','password':'device-test-password'})
+                        adm.headers['X-CSRF']=ar.json()['csrf']
+                        check(adm.post('/api/settings',json={'config':{'public_origin':'https://cfg.example'}}).status_code==200,'settings origin saved')
+                        g2=issue();check(g2['verification_uri'].startswith('https://cfg.example/user/device'),'config origin takes precedence')
+                        check(adm.post('/api/settings',json={'config':{'public_origin':'http://bad'}}).status_code==400,'reject non-https origin in settings')
+                        check(adm.post('/api/settings',json={'config':{'trusted_proxies':'not-an-ip'}}).status_code==400,'reject non-ip trusted proxy')
+                        check(adm.post('/api/settings',json={'config':{'trusted_proxies':'203.0.113.9'}}).status_code==200,'settings trusted saved')
+                        check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==400,'config overrides env trust')
+                        check(adm.post('/api/settings',json={'config':{'public_origin':'','trusted_proxies':'','device_login_enabled':False}}).status_code==200,'settings disable device login')
+                        check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==404,'device login disabled => 404')
+                        check(adm.post('/api/settings',json={'config':{'device_login_enabled':True}}).status_code==200,'settings re-enable device login')
+                    for _ in range(2):issue()
                     check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==429,'five codes per IP per minute')
                     check(poll({'device_code':'unknown'}).json()['error']=='expired_token','unknown/expired token')
-                    check(c.get('/api/oauth/providers').json()['github'] is False,'OAuth disabled without credentials')
+                    check(c.get('/api/oauth/providers').status_code == 404,'OAuth removed')
             finally:
                 p.terminate();p.wait(timeout=10)
 if __name__=='__main__':main()

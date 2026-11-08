@@ -871,11 +871,14 @@ const STR_SETTINGS: &[&str] = &[
     "reg_email_error_msg",
     "model_chains",
     "model_limits",
+    "public_origin",
+    "trusted_proxies",
 ];
 const BOOL_SETTINGS: &[&str] = &[
     "recovery_enabled",
     "tool_compact_enabled",
     "transparent_upstream",
+    "device_login_enabled",
     "log_enabled",
     "verify_tls",
     "queue_enabled",
@@ -1484,6 +1487,34 @@ pub async fn settings_save(headers: &HeaderMap, body: Bytes) -> Response {
     if let Some(chains_text) = incoming.get("model_chains").and_then(|v| v.as_str()) {
         if let Err(e) = validate_model_chains(&store().load(), chains_text) {
             return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": e}}))).into_response();
+        }
+    }
+    // 设备登录接入配置：公网入口只收纯 HTTPS 源，可信代理解析为 IP
+    if let Some(v) = incoming.get("public_origin").and_then(|x| x.as_str()) {
+        let t = v.trim();
+        if !t.is_empty() {
+            let ok = reqwest::Url::parse(t).ok().is_some_and(|u| {
+                u.scheme() == "https"
+                    && u.host_str().is_some()
+                    && u.username().is_empty()
+                    && u.password().is_none()
+                    && u.query().is_none()
+                    && u.fragment().is_none()
+                    && u.path() == "/"
+            });
+            if !ok {
+                return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "公网入口必须是纯 HTTPS 源，例如 https://gateway.example.com（不能带路径、参数或凭据）"}}))).into_response();
+            }
+        }
+    }
+    if let Some(v) = incoming.get("trusted_proxies").and_then(|x| x.as_str()) {
+        let bad: Vec<&str> = v
+            .split(',')
+            .map(str::trim)
+            .filter(|x| !x.is_empty() && x.parse::<std::net::IpAddr>().is_err())
+            .collect();
+        if !bad.is_empty() {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("可信代理必须是 IP 地址：{}", bad.join(", "))}}))).into_response();
         }
     }
     // 邮箱注册正则：保存前校验可编译，避免线上写出永远匹配失败的规则
