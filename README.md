@@ -239,7 +239,7 @@ NGW_PUBLIC_ORIGIN=https://gateway.example.com
 NGW_TRUSTED_PROXIES=127.0.0.1,::1
 ```
 
-也可以在后台「设置 → 01Code 设备登录」直接填写公网入口与可信反代 IP（留空时读取上述环境变量）。
+也可以在后台「设置 → 01Code 设备登录」直接填写公网入口与可信反代 IP（留空时读取上述环境变量；可信反代 IP 填 `*` 表示信任全部来源，此时必须确保网关只能经反代访问且反代覆盖转发头，否则可伪造协议与来源 IP）。
 
 `NGW_PUBLIC_ORIGIN` 只允许 HTTPS origin，不能含路径、用户名、查询或片段。网关本身位于 TLS 反向代理后；代理必须覆盖 `X-Forwarded-Proto: https` 和 `X-Real-IP`，并阻止用户绕过代理直连网关。仅对 `NGW_TRUSTED_PROXIES` 列出的精确 IP 信任这些头，其他来源不能使用新授权接口。未设置正确 origin/可信代理时返回 `invalid_request`。不要把公网客户端地址加入可信代理列表。
 

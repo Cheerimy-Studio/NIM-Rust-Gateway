@@ -956,10 +956,11 @@ details.upgrp[open]{background:#fff}
               <div class="form-text">留空时读取环境变量 NGW_PUBLIC_ORIGIN。只能填纯源，不能带路径或参数。</div></div>
             <div class="col-md-6"><label class="form-label" for="set-trusted">可信反代 IP</label>
               <input class="form-control form-control-sm font-monospace" id="set-trusted" placeholder="127.0.0.1,::1">
-              <div class="form-text">留空时读取 NGW_TRUSTED_PROXIES。反代需覆盖 X-Forwarded-Proto 与 X-Real-IP。</div></div>
+              <div class="form-text">留空时读取 NGW_TRUSTED_PROXIES；填 <code>*</code> 允许全部来源（网关必须只能经反代访问，且反代覆盖 X-Forwarded-Proto 与 X-Real-IP，否则可被伪造）。</div></div>
             <div class="col-12"><div class="form-check form-switch">
               <input class="form-check-input" type="checkbox" id="set-deviceon">
-              <label class="form-check-label small" for="set-deviceon">允许 01Code 设备码登录（关闭后相关接口返回 404）</label></div></div>
+              <label class="form-check-label small" for="set-deviceon">允许 01Code 设备码登录</label>
+              <div class="form-text">关闭后该客户端无法登录，设备相关接口返回 404。</div></div></div>
           </div>
         </div>
       </div>

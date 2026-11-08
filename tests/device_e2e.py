@@ -15,7 +15,8 @@ def check(ok,msg):
 def main():
     with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
     with tempfile.TemporaryDirectory(prefix='ngw-device-') as tmp:
-        env={**os.environ,'NGW_DATA_DIR':tmp,'NGW_ADMIN_PASSWORD':'device-test-password','NGW_PUBLIC_ORIGIN':'https://gateway.example','NGW_TRUSTED_PROXIES':'127.0.0.1'}
+        # 不配置任何设备登录环境变量：全部走后台设置，验证「功能可用」
+        env={**os.environ,'NGW_DATA_DIR':tmp,'NGW_ADMIN_PASSWORD':'device-test-password'}
         with open(Path(tmp)/'server.log','w+') as log:
             p=subprocess.Popen([str(ROOT/'target/debug/nim-gateway'),'--port',str(port)],env=env,stdout=log,stderr=log)
             try:
@@ -29,6 +30,8 @@ def main():
                     c.headers.update({'X-Forwarded-Proto':'https','X-Real-IP':'192.0.2.1'})
                     a=c.post('/api/login',json={'username':'admin','password':'device-test-password'}).json();c.headers['X-CSRF']=a['csrf']
                     for cookie in c.cookies.jar:cookie.secure=False
+                    # 仅通过后台设置启用设备登录：公网入口 + 信任全部来源（*）
+                    check(c.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*'}}).status_code==200,'configure device login in admin settings')
                     check(c.post('/api/users',json={'username':'device-user','password':'device-test-password','balance':2,'free_rpm':10,'paid_rpm':10}).status_code==200,'create user')
                     u=c.post('/api/user/login',json={'username':'device-user','password':'device-test-password'}).json();c.headers['X-CSRF']=u['csrf']
                     # HTTP fixture emulates TLS at proxy; httpx correctly withholds Secure cookies on HTTP.
@@ -87,7 +90,7 @@ def main():
                         check(adm.post('/api/settings',json={'config':{'trusted_proxies':'not-an-ip'}}).status_code==400,'reject non-ip trusted proxy')
                         check(adm.post('/api/settings',json={'config':{'trusted_proxies':'203.0.113.9'}}).status_code==200,'settings trusted saved')
                         check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==400,'config overrides env trust')
-                        check(adm.post('/api/settings',json={'config':{'public_origin':'','trusted_proxies':'','device_login_enabled':False}}).status_code==200,'settings disable device login')
+                        check(adm.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*','device_login_enabled':False}}).status_code==200,'settings disable device login')
                         check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==404,'device login disabled => 404')
                         check(adm.post('/api/settings',json={'config':{'device_login_enabled':True}}).status_code==200,'settings re-enable device login')
                     for _ in range(2):issue()

@@ -1508,10 +1508,11 @@ pub async fn settings_save(headers: &HeaderMap, body: Bytes) -> Response {
         }
     }
     if let Some(v) = incoming.get("trusted_proxies").and_then(|x| x.as_str()) {
+        // `*` = 信任全部来源（需确保网关只能经反代访问且反代覆盖转发头）
         let bad: Vec<&str> = v
             .split(',')
             .map(str::trim)
-            .filter(|x| !x.is_empty() && x.parse::<std::net::IpAddr>().is_err())
+            .filter(|x| !x.is_empty() && *x != "*" && x.parse::<std::net::IpAddr>().is_err())
             .collect();
         if !bad.is_empty() {
             return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": format!("可信代理必须是 IP 地址：{}", bad.join(", "))}}))).into_response();

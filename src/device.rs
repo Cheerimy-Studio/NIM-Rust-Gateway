@@ -31,6 +31,9 @@ struct State {
     grants: HashMap<String, Grant>,
     rates: HashMap<String, Vec<i64>>,
     failures: HashMap<String, Vec<i64>>,
+    // 信任全部来源时按 IP 的限速可被 x-real-ip 伪造绕过：再压一层全局窗口
+    global_codes: HashMap<String, Vec<i64>>,
+    global_failures: HashMap<String, Vec<i64>>,
 }
 fn state() -> &'static Mutex<State> {
     static S: OnceLock<Mutex<State>> = OnceLock::new();
@@ -97,9 +100,15 @@ fn trusted(peer: std::net::IpAddr) -> bool {
     if configured.is_empty() {
         configured = std::env::var("NGW_TRUSTED_PROXIES").unwrap_or_default();
     }
-    configured
-        .split(',')
-        .filter_map(|v| v.trim().parse::<std::net::IpAddr>().ok())
+    let items: Vec<&str> = configured.split(',').map(str::trim).collect();
+    // `*` = 信任所有来源。只有网关确实只能经反代访问、且反代覆盖
+    // X-Forwarded-Proto / X-Real-IP 时才安全；否则客户端可伪造协议与来源 IP
+    if items.iter().any(|v| *v == "*") {
+        return true;
+    }
+    items
+        .iter()
+        .filter_map(|v| v.parse::<std::net::IpAddr>().ok())
         .any(|p| p == peer)
 }
 pub fn client_ip(h: &HeaderMap, peer: std::net::IpAddr) -> String {
@@ -165,6 +174,13 @@ pub async fn code(
     let mut s = state().lock().unwrap();
     s.grants.retain(|_, g| g.exp > now - 600);
     if limited(&mut s.rates, &ip, now, 5, 60) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(json!({"error":"slow_down"})),
+        )
+            .into_response();
+    }
+    if limited(&mut s.global_codes, "all", now, 120, 60) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             axum::Json(json!({"error":"slow_down"})),
@@ -363,7 +379,9 @@ pub async fn decide(
     let now = util::now_i();
     let mut s = state().lock().unwrap();
     let ip = client_ip(&h, addr.ip());
-    if limited(&mut s.failures, &ip, now, 10, 600) {
+    if limited(&mut s.failures, &ip, now, 10, 600)
+        || limited(&mut s.global_failures, "all", now, 300, 600)
+    {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             axum::Json(json!({"error":"access_denied"})),
@@ -412,7 +430,8 @@ pub async fn page(
         util::now_i(),
         10,
         600,
-    ) {
+    ) || limited(&mut s.global_failures, "all", util::now_i(), 300, 600)
+    {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let Some(g) = s
@@ -467,6 +486,20 @@ mod tests {
         );
         s
     }
+    #[test]
+    fn trusted_proxy_wildcard_and_ips() {
+        let _lock = crate::store::test_lock();
+        let saved = store().load();
+        let peer: std::net::IpAddr = "203.0.113.5".parse().unwrap();
+        store().update(|db| { db["config"]["trusted_proxies"] = json!("127.0.0.1, 198.51.100.7"); });
+        assert!(!trusted(peer), "未列出的地址不信任");
+        store().update(|db| { db["config"]["trusted_proxies"] = json!("*"); });
+        assert!(trusted(peer), "* 允许全部来源");
+        store().update(|db| { db["config"]["trusted_proxies"] = json!(" * , 198.51.100.7"); });
+        assert!(trusted(peer), "* 与空格混排也可");
+        store().update(|db| *db = saved);
+    }
+
     #[test]
     fn polling_state_machine() {
         let mut s = setup();
