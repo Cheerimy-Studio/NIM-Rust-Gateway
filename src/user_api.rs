@@ -102,37 +102,24 @@ pub async fn login(headers: &HeaderMap, ip: String, body: Bytes) -> Response {
             })
         })
         .cloned();
-    // 时序均衡：用户不存在时也对固定假哈希跑一遍 pbkdf2，
-    // 否则「用户不存在」立即返回可被用来枚举用户名（与管理端同口径）
-    let ok_pass = match &found {
-        Some(u) => crate::store::verify_password(&password, &util::str_or(u.get("password_hash"), "")),
-        None => {
-            static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-            let _ = crate::store::verify_password(&password, DUMMY.get_or_init(|| crate::store::hash_password("ngw-dummy")));
-            false
-        }
+    let rate_key = format!("user:{ip}:{}", util::char_prefix(&username.to_lowercase(), 320));
+    if !crate::admin::login_rate_ok(&rate_key) {
+        return login_throttled();
+    }
+    let stored = found.as_ref().map(|u| util::str_or(u.get("password_hash"), ""));
+    let ok_pass = match verify_login_password(password, stored).await {
+        Ok(ok) => ok,
+        Err(response) => return response,
     };
-    if found.is_none() || !ok_pass {
-        // 先验证、失败才计入限流预算（与管理端一致）：反代/公网部署下所有流量共享
-        // 同一来源 IP，验证前计数会把正常用户也挡在门外
-        if !crate::admin::login_rate_ok(&ip) {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                axum::Json(json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试", "type": "auth"}})),
-            )
-                .into_response();
-        }
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(json!({"error": {"message": "账号或密码错误", "type": "auth"}})),
-        )
-            .into_response();
+    if !ok_pass {
+        return (StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error":{"message":"账号或密码错误","type":"auth"}}))).into_response();
     }
     let u = found.unwrap();
-    crate::admin::login_rate_clear(&ip);
+    crate::admin::login_rate_clear(&rate_key);
     let uid = util::str_or(u.get("id"), "");
     let secret = util::str_or(cfg.get("session_secret"), "");
-    let session = users::user_session_value(&secret, &uid);
+    let session = users::user_session_from_row(&secret, &u);
     let csrf = users::user_csrf_token(&secret, &uid);
     let mut resp = axum::Json(json!({"ok": true, "csrf": csrf, "username": util::str_or(u.get("username"), "")}))
         .into_response();
@@ -301,7 +288,7 @@ pub async fn register_send_code(ip: String, _headers: &HeaderMap, body: Bytes) -
 /// 邮箱注册。body: {email, password, inv?}
 pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
     // 简单速率限制：复用登录失败限流（同一 IP）
-    if !crate::admin::login_rate_ok(&ip) {
+    if !crate::admin::login_rate_ok(&format!("register:{ip}")) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             axum::Json(json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试"}})),
@@ -313,21 +300,17 @@ pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response 
     let password = util::str_or(body_v.get("password"), "");
     let inv = util::str_or(body_v.get("inv"), "");
     let code = util::str_or(body_v.get("code"), "");
-    if !users::email_code_verify(&email, &code) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "验证码错误或已过期"}})),
-        )
-            .into_response();
-    }
-    let (row, err) = users::email_register(&email, &password, &inv);
+    let (row, err) = match password_work(move || users::email_register(&email, &password, &inv, &code)).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
     if let Some(u) = row {
         // 注册即登录：种会话
         let cfg = store().load();
         let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
         let secret = util::str_or(cfgc.get("session_secret"), "");
         let uid = util::str_or(u.get("id"), "");
-        let session = users::user_session_value(&secret, &uid);
+        let session = users::user_session_from_row(&secret, &u);
         let csrf = users::user_csrf_token(&secret, &uid);
         let secure = headers
             .get("x-forwarded-proto")
@@ -444,7 +427,11 @@ pub async fn reset_pw(body: Bytes) -> Response {
     let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let token = util::str_or(body_v.get("token"), "");
     let password = util::str_or(body_v.get("password"), "");
-    match users::reset_with_token(&token, &password) {
+    let result = match password_work(move || users::reset_with_token(&token, &password)).await {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
+    match result {
         Ok(()) => json_resp(json!({"ok": true, "message": "密码已重置，请使用新密码登录"})),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -793,7 +780,7 @@ pub async fn stats(headers: &HeaderMap) -> Response {
             my_logs.extend(a.iter().filter(|r| util::str_or(r.get("user_id"), "") == uid).cloned());
         }
     }
-    my_logs.sort_by_key(|r| -util::int_or(r.get("t"), 0));
+    my_logs.sort_by_key(|r| std::cmp::Reverse(util::int_or(r.get("t"), 0)));
     let recent: Vec<Value> = my_logs.iter().take(5).map(|r| json!({
         "t": util::int_or(r.get("t"), 0),
         "model": util::str_or(r.get("model"), ""),

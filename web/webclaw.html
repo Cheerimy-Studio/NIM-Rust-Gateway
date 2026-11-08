@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>模型测试 · WebClaw</title>
-<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
-<script defer src="https://cdn.bootcdn.net/ajax/libs/marked/4.3.0/marked.min.js"></script>
-<script defer src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
+<link href="/assets/vendor/bootstrap.min.css" rel="stylesheet">
+<link href="/assets/vendor/bootstrap-icons.min.css" rel="stylesheet">
+<script defer src="/assets/vendor/marked.min.js"></script>
+<script defer src="/assets/vendor/purify.min.js"></script>
 <style>
 :root{--acc:#2f6fed;--bg:#f3f5f9;--line:#e7ecf3;--txt:#1c2536;--mut:#68758a;
   --r-xs:6px;--r-sm:8px;--r-md:10px;--r:12px;--r-lg:14px;--r-pill:999px;--ring:0 0 0 3px rgba(47,111,237,.12)}
@@ -152,8 +152,9 @@ a{text-decoration:none}
   .chat{max-height:46vh}
 }
 </style>
+<link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
 </head>
-<body>
+<body data-page="webclaw">
 <div class="layout">
   <aside class="sidebar">
     <div class="brand"><span class="mark">W</span><span class="bt">WebClaw<small>模型测试</small></span></div>

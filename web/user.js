@@ -41,8 +41,10 @@ const run = async fn => { try { return await fn(); } catch (e) { toast(e.message
 
 function toast(msg, kind) {
   const d = document.createElement('div');
-  d.className = 'toast align-items-center border-0' + (kind === 'danger' ? ' bg-danger' : ' bg-dark');
+  d.className = 'toast show align-items-center border-0' + (kind === 'danger' ? ' bg-danger' : ' bg-dark');
   d.style.cssText = 'position:fixed;top:18px;right:18px;z-index:9999;color:#fff';
+  d.setAttribute('role', kind === 'danger' ? 'alert' : 'status');
+  d.setAttribute('aria-live', kind === 'danger' ? 'assertive' : 'polite');
   const inner = document.createElement('div');
   inner.className = 'd-flex';
   const body = document.createElement('div');
@@ -79,12 +81,15 @@ function fallbackCopy(text) {
   return ok;
 }
 
-function uiConfirm(msg) { return window.confirm(msg); }
+function uiConfirm(msg) { return window.NGW_UI.dialog({title: '删除 Key', body: msg, danger: true, okText: '删除'}); }
 
 let ME = null;
 bindLogsKind();
 
 function showLogin() {
+  ME = null;
+  userCsrfToken = '';
+  clearTimeout(signTimer);
   $('#login-view').style.display = 'flex';
   $('#panel-view').style.display = 'none';
   showLoginTab('main');
@@ -228,14 +233,13 @@ async function loadKeys() {
       + '<td class="key-mono">' + esc(k.key.slice(0, 14)) + '…</td>'
       + '<td>' + kindBadge(k.kind || 'all') + '</td>'
       + '<td>' + (k.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>'
-      + '<td class="small text-muted">' + fmtTime(k.last_used_at) + '</td>'
-      + '<td class="text-end"></td>';
+      + '<td class="small text-muted">' + fmtTime(k.last_used_at) + '</td>';
     const op = document.createElement('td');
     op.className = 'text-end';
     const copy = document.createElement('button');
     copy.className = 'btn btn-sm btn-outline-secondary me-1';
     copy.textContent = '复制';
-    copy.onclick = () => copyText(k.key);
+    copy.onclick = () => run(async () => { if (!await copyText(k.key)) throw new Error('复制失败，请检查浏览器权限'); toast('Key 已复制'); });
     const tog = document.createElement('button');
     tog.className = 'btn btn-sm btn-outline-secondary me-1';
     tog.textContent = k.enabled ? '停用' : '启用';
@@ -244,7 +248,7 @@ async function loadKeys() {
     del.className = 'btn btn-sm btn-outline-danger';
     del.textContent = '删除';
     del.onclick = () => run(async () => {
-      if (!uiConfirm('删除该 Key？')) return;
+      if (!await uiConfirm('删除该 Key 后，使用它的应用将无法继续调用。')) return;
       await api('keys/op', {method: 'POST', json: {id: k.id, op: 'delete'}});
       toast('已删除'); loadKeys();
     });
@@ -326,50 +330,67 @@ async function loadLogs() {
   mk('›', LOGS_STATE.page + 1, LOGS_STATE.page >= pages, false);
 }
 
+let MODEL_ROWS = [];
 async function loadModels() {
-  const rows = (await api('models')).rows || [];
+  MODEL_ROWS = (await api('models')).rows || [];
+  renderModels();
+}
+function renderModels() {
+  const query = ($('#model-search').value || '').trim().toLowerCase();
+  const kind = $('#model-kind').value;
+  const rows = MODEL_ROWS.filter(m => m.model.toLowerCase().includes(query)
+    && (kind === 'all' || (kind === 'free' ? m.free : !m.free)));
   const box = $('#model-cards');
   box.innerHTML = '';
+  $('#model-count').textContent = rows.length + ' / ' + MODEL_ROWS.length + ' 个模型';
+  if (!rows.length) {
+    const empty = document.createElement('div'); empty.className = 'col-12';
+    const message = document.createElement('div'); message.className = 'empty-state';
+    message.textContent = MODEL_ROWS.length ? '没有匹配的模型，请调整搜索条件。' : '暂无可用模型，请联系管理员配置渠道。';
+    empty.append(message); box.append(empty); return;
+  }
   for (const m of rows) {
-    const col = document.createElement('div');
-    col.className = 'col-md-4 col-lg-3';
-    const badge = m.free
-      ? '<span class="badge badge-free">免费</span>'
-      : '<span class="badge badge-paid">¥' + m.price + ' / 次</span>';
-    let health = '';
-    if (m.health !== null && m.health !== undefined) {
-      const h = m.health;
-      const cls = h >= 80 ? 'text-success' : h >= 50 ? 'text-warning' : 'text-danger';
-      const icon = h >= 80 ? 'bi-heart-pulse-fill' : h >= 50 ? 'bi-heart-pulse' : 'bi-heartbreak-fill';
-      health = '<div class="small mt-1"><i class="bi ' + icon + ' ' + cls + '"></i> 健康度 ' + h + '%</div>';
-    }
+    const col = document.createElement('div'); col.className = 'col-md-6 col-xl-4';
+    const badge = m.free ? '<span class="badge badge-free">免费</span>'
+      : '<span class="badge badge-paid">¥' + esc(m.price) + ' 起 / 次</span>';
     col.innerHTML = '<div class="card model-card h-100"><div class="card-body">'
-      + '<div class="d-flex justify-content-between align-items-start mb-1">'
-      + '<span class="mono fw-semibold" style="font-size:12.5px;word-break:break-all">' + esc(m.model) + '</span>' + badge
-      + '</div>' + (m.ctx || m.tps ? '<div class="small mt-1 text-muted">'
-        + (m.ctx ? '上下文 ' + m.ctx : '')
-        + (m.ctx && m.tps ? ' · ' : '')
-        + (m.tps ? '≈' + m.tps + ' tok/s' : '')
-        + '</div>' : '') + health + '</div></div>';
-    box.appendChild(col);
+      + '<div class="model-name">' + esc(m.model) + '</div><div class="mt-2">' + badge + '</div>'
+      + '<div class="small mt-3 text-muted">'
+      + (m.ctx ? '上下文 ' + esc(m.ctx) : '上下文未标注')
+      + (m.tps ? ' · 约 ' + esc(m.tps) + ' tok/s' : '') + '</div>'
+      + '<div class="small mt-1 text-muted">'
+      + (m.health == null ? '暂无调用统计' : '近期成功率 ' + esc(m.health) + '%') + '</div>'
+      + '<div class="model-actions"></div></div></div>';
+    const actions = col.querySelector('.model-actions');
+    const test = document.createElement('a'); test.className = 'btn btn-sm btn-primary';
+    test.textContent = '对话测试'; test.href = '/webclaw?model=' + encodeURIComponent(m.model);
+    test.target = '_blank'; test.rel = 'noopener';
+    const copy = document.createElement('button'); copy.className = 'btn btn-sm btn-outline-secondary'; copy.textContent = '复制名称';
+    copy.onclick = () => run(async () => { if (!await copyText(m.model)) throw new Error('复制失败，请检查浏览器权限'); toast('模型名称已复制'); });
+    actions.append(test, copy); box.append(col);
   }
 }
+$('#model-search').addEventListener('input', renderModels);
+$('#model-kind').addEventListener('change', renderModels);
+$('#model-refresh').onclick = () => run(() => loadModels());
 
-document.querySelectorAll('.sidebar nav a').forEach(a => {
-  if (!a.dataset.p) return;   // 外链（WebClaw 测试台）交给浏览器原生跳转
-  a.addEventListener('click', e => {
-    e.preventDefault();
-    document.querySelectorAll('.sidebar nav a').forEach(x => x.classList.remove('active'));
-    a.classList.add('active');
-    document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
-    $('#pane-' + a.dataset.p).classList.add('active');
-    if (a.dataset.p === 'logs') run(() => loadLogs());
-    if (a.dataset.p === 'models') run(() => loadModels());
-    if (a.dataset.p === 'promo') run(() => loadPromo());
-    if (a.dataset.p === 'wheel') run(() => loadWheels());
-    if (a.dataset.p === 'prizes') run(() => loadPrizes());
+function activateUser(name, loaded = false) {
+  const pane = document.getElementById('pane-' + name);
+  if (!pane || !pane.classList.contains('pane')) name = 'overview';
+  document.querySelectorAll('.sidebar nav a[data-p]').forEach(a => {
+    const selected = a.dataset.p === name;
+    a.classList.toggle('active', selected);
+    if (selected) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  const loaders = {overview: loadMe, keys: loadKeys, logs: loadLogs, models: loadModels, promo: loadPromo, wheel: loadWheels, prizes: loadPrizes};
+  if (Object.hasOwn(loaders, name) && !(loaded && name === 'overview')) run(loaders[name]);
+}
+document.querySelectorAll('.sidebar nav a[data-p]').forEach(a => {
+  a.addEventListener('click', e => { e.preventDefault(); activateUser(a.dataset.p); });
 });
+window.addEventListener('hashchange', () => { if (ME) activateUser(location.hash.slice(1)); });
 
 $('#key-add').onclick = () => run(async () => {
   await api('keys', {method: 'POST', json: {name: $('#key-name').value, kind: $('#key-kind').value}});
@@ -396,15 +417,16 @@ $('#login-go').onclick = async () => {
     }
     const session = await r.json();
     userCsrfToken = session.csrf || '';
-    showPanel();
     await loadMe();
-    await loadKeys();
+    showPanel();
+    activateUser(location.hash.slice(1) || 'overview', true);
+    await run(() => loadKeys());
   } catch (e) {
     err.textContent = e.message || '登录失败';
     err.style.display = 'block';
   }
 };
-$('#login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') $('#login-go').click(); });
+$('#login-pass').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) $('#login-go').click(); });
 
 function bindLoginTabs() {
   $('#go-register').onclick = () => showLoginTab('register');
@@ -413,15 +435,18 @@ function bindLoginTabs() {
   $('#back-login-2').onclick = () => showLoginTab('main');
   if (invFromUrl()) showLoginTab('register');
   let codeLeft = 0;
+  let codeSending = false;
   const codeBtn = $('#reg-send');
   setInterval(() => {
     if (codeLeft > 0) { codeLeft--; codeBtn.textContent = codeLeft + 's'; codeBtn.disabled = true; }
-    else { codeBtn.textContent = '发送验证码'; codeBtn.disabled = false; }
+    else if (!codeSending) { codeBtn.textContent = '发送验证码'; codeBtn.disabled = false; }
   }, 1000);
   codeBtn.onclick = async () => {
+    if (codeSending || codeLeft > 0) return;
     const email = $('#reg-email').value.trim();
     if (!email) { lgErr('请先输入邮箱'); return; }
     codeBtn.disabled = true;
+    codeSending = true;
     try {
       const res = await fetch('api/user/register/send-code', {method: 'POST',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email: email})});
@@ -430,7 +455,8 @@ function bindLoginTabs() {
       codeLeft = 60;
       lgErr('');
       toast(d.message || '验证码已发送');
-    } catch (e) { codeBtn.disabled = false; lgErr('发送失败'); }
+    } catch (e) { lgErr('发送失败，请稍后重试'); }
+    finally { codeSending = false; codeBtn.disabled = codeLeft > 0; }
   };
   $('#reg-go').onclick = async () => {
     const email = $('#reg-email').value.trim();
@@ -446,10 +472,12 @@ function bindLoginTabs() {
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
       const d = await res.json();
       if (!res.ok) { lgErr((d.error && d.error.message) || '注册失败'); return; }
-      toast('注册成功，已自动登录');
-      showPanel();
+      userCsrfToken = d.csrf || '';
+      toast('注册成功');
       await loadMe();
-      await loadKeys();
+      showPanel();
+      activateUser('overview', true);
+      await run(() => loadKeys());
     } catch (e) { lgErr('注册失败'); }
   };
   $('#forgot-go').onclick = async () => {
@@ -474,6 +502,8 @@ function bindLoginTabs() {
       const d = await res.json();
       if (!res.ok) { lgErr((d.error && d.error.message) || '重置失败'); return; }
       toast('密码已重置，请登录');
+      window.__resetToken = '';
+      history.replaceState(null, '', location.pathname);
       showLoginTab('main');
     } catch (e) { lgErr('重置失败'); }
   };
@@ -863,6 +893,14 @@ function promoCard(ev, d) {
 
 (async () => {
   bindLoginTabs();
+  for (const id of ['login-go', 'reg-go', 'forgot-go', 'reset-go', 'key-add']) {
+    const button = document.getElementById(id), action = button.onclick;
+    button.onclick = async (...args) => {
+      if (button.disabled) return;
+      const text = button.textContent; button.disabled = true; button.textContent = '处理中…';
+      try { await action(...args); } finally { button.disabled = false; button.textContent = text; }
+    };
+  }
   const rt = resetTokenFromUrl();
   if (rt) {
     window.__resetToken = rt;
@@ -873,9 +911,11 @@ function promoCard(ev, d) {
   try {
     await loadMe();
     showPanel();
-    await loadKeys();
+    activateUser(location.hash.slice(1) || 'overview', true);
+    await run(() => loadKeys());
   } catch (e) {
     showLogin();
+    if (e.status !== 401) lgErr(e.message || '暂时无法连接服务，请稍后重试');
   }
 })();
 

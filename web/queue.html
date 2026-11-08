@@ -32,41 +32,61 @@ tr:last-child td{border-bottom:0}
 .dot.g{background:#16a34a}.dot.y{background:#d97706}
 .muted{color:#98a3b8;font-size:12px}
 </style>
+<link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
 </head>
-<body>
+<body data-page="queue">
 <div class="hdr"><span class="hl"><span class="mark">言</span><b>言灵中转</b></span><span class="muted">队列状态</span></div>
 <div class="wrap">
+  <h1 style="font-size:24px;font-weight:600;margin:0 0 20px">队列状态</h1>
   <div class="stat" id="stats"></div>
+  <div class="queue-note"><span id="queue-status" role="status">正在获取队列…</span><button id="queue-retry" class="btn" type="button">刷新</button><a href="/">返回首页</a></div>
   <table>
     <thead><tr><th>#</th><th>等待时间</th><th>模型</th><th>状态</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
-  <p class="muted" style="margin-top:12px">当所有账号暂不可用时，请求进入排队等待；队首优先获得下一个可用账号。刷新本页查看排队最新状态。</p>
+  <p class="muted" style="margin-top:12px">账号暂不可用时，请求会进入队列。此页面每 3 秒更新一次；切回页面后自动刷新。</p>
 </div>
 <script>
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let busy = false, timer = null;
 async function refresh(){
-  try{
-    const r = await fetch('/api/queue/public');
+  if (busy) return;
+  clearTimeout(timer);
+  if (document.hidden) return;
+  busy = true;
+  const status = document.getElementById('queue-status');
+  const retry = document.getElementById('queue-retry');
+  retry.disabled = true;
+  try {
+    const r = await fetch('/api/queue/public', {signal: AbortSignal.timeout(10000)});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
-    const s = document.getElementById('stats');
+    if (!Array.isArray(d.rows) || typeof d.length !== 'number') throw new Error('数据格式错误');
     const n = d.length || 0;
     const cls = n === 0 ? 'ok' : n < 5 ? 'warn' : 'err';
-    s.innerHTML = `
-      <div class="stat-card"><div class="num ${cls}">${n}</div><div class="lbl">排队中</div></div>
-      <div class="stat-card"><div class="num ${n?'warn':'ok'}">${d.max_wait}s</div><div class="lbl">最长等待</div></div>
-      <div class="stat-card"><div class="num ok">✓</div><div class="lbl">服务正常</div></div>`;
+    document.getElementById('stats').innerHTML = `
+      <div class="stat-card"><div class="num ${cls}">${esc(n)}</div><div class="lbl">排队中</div></div>
+      <div class="stat-card"><div class="num ${n?'warn':'ok'}">${esc(d.max_wait)}s</div><div class="lbl">最长等待</div></div>`;
     const tb = document.getElementById('rows');
     tb.innerHTML = '';
-    if(!n){ tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:20px">队列为空</td></tr>'; return; }
-    d.rows.forEach((q,i)=>{
+    if (!n) tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#657084;padding:28px">当前没有排队请求</td></tr>';
+    for (const [i,q] of d.rows.entries()) {
       const cls = q.wait > d.max_wait/2 ? 'y' : 'g';
       tb.innerHTML += `<tr><td>${i+1}</td><td><span class="dot ${cls}"></span>${esc(q.wait)}s</td><td>${esc(q.model||'-')}</td><td>${esc(q.hint||'-')}</td></tr>`;
-    });
-  }catch(e){ console.error(e); }
+    }
+    status.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', {hour12:false});
+    status.style.color = '';
+  } catch(e) {
+    status.textContent = '更新失败，当前显示的是上次数据。请稍后重试。';
+    status.style.color = '#b42318';
+  } finally {
+    busy = false; retry.disabled = false;
+    if (!document.hidden) timer = setTimeout(refresh, 3000);
+  }
 }
+document.getElementById('queue-retry').onclick = refresh;
+document.addEventListener('visibilitychange', () => { clearTimeout(timer); if (!document.hidden) refresh(); });
 refresh();
-setInterval(refresh, 3000);
 </script>
 </body>
 </html>

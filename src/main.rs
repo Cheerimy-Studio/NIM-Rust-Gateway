@@ -68,6 +68,17 @@ fn html_resp(name: &str, csrf: &str, no_cache: bool) -> Response {
     resp
 }
 
+async fn h_bundled_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    let Some((mime, bytes)) = bundled_asset(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = bytes.into_response();
+    response.headers_mut().insert("content-type", axum::http::HeaderValue::from_static(mime));
+    response.headers_mut().insert("cache-control", axum::http::HeaderValue::from_static("no-cache, must-revalidate"));
+    response.headers_mut().insert("x-content-type-options", axum::http::HeaderValue::from_static("nosniff"));
+    response
+}
+
 // ---------------------------------------------------------------- /v1 处理器
 
 async fn h_options(headers: HeaderMap) -> Response {
@@ -540,7 +551,7 @@ async fn h_config_import(headers: HeaderMap, body: Bytes) -> Response {
 async fn h_user_page() -> Response {
     // 始终返回同一个 SPA 页面：登录/面板由 JS 根据 /api/user/me 的结果切换，
     // 不在服务端做跳转——彻底消除重定向循环
-    let mut resp = web_assets::USER_HTML.to_string().into_response();
+    let mut resp = web_assets::USER_HTML.replace("{{VERSION}}", VERSION).into_response();
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
@@ -1335,6 +1346,7 @@ fn build_router() -> Router {
         .route("/api/presets", get(h_presets))
         .route("/api/queue/public", get(h_queue_public))
         .route("/assets/admin.js", get(h_admin_js))
+        .route("/assets/{*name}", get(h_bundled_asset))
         .route("/assets/webclaw.js", get(h_webclaw_js))
         // 管理 API
         .route("/api/login", post(h_login))

@@ -126,6 +126,11 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
     let mut ok = false;
     let mut err = String::new();
     let mut disable_keys = false;
+    let reset_hash = if op == "reset-password" {
+        let password = util::str_or(body.get("password"), "");
+        if password.chars().count() < 6 { return (false, "密码至少 6 位".into()); }
+        Some(crate::store::hash_password(&password))
+    } else { None };
     let mut note: Option<(&'static str, f64, f64, String)> = None;
     store().update(|db| {
         users_mut(db, |arr| {
@@ -216,15 +221,9 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                     ok = true;
                 }
                 "reset-password" => {
-                    let pw = util::str_or(body.get("password"), "");
-                    if pw.chars().count() < 6 {
-                        err = "密码至少 6 位".into();
-                        return;
-                    }
-                    let next_epoch = user_pw_epoch(u) + 1;
+                    let next_epoch = user_pw_epoch(u).saturating_add(1);
                     if let Some(o) = u.as_object_mut() {
-                        o.insert("password_hash".into(), Value::from(crate::store::hash_password(&pw)));
-                        // 改密即踢会话：纪元 +1，所有旧 Cookie 的签名载荷里的纪元即刻不匹配
+                        o.insert("password_hash".into(), Value::from(reset_hash.as_ref().unwrap().clone()));
                         o.insert("pw_epoch".into(), json!(next_epoch));
                     }
                     ok = true;
@@ -249,6 +248,11 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                 _ => err = "未知操作".into(),
             }
         });
+        if ok && matches!(op, "reset-password" | "delete") {
+            if let Some(resets) = db.get_mut("pw_resets").and_then(Value::as_array_mut) {
+                resets.retain(|r| util::str_or(r.get("uid"), "") != user_id);
+            }
+        }
         // 删用户时清掉抽奖记录/奖品 Key（活跃凭据），但【保留资金流水】：
         // 欠款与充值记录是财务凭据，删除用户不应抹掉审计轨迹
         // （fund_logs 每用户上限 500 条，孤儿数据无害）
@@ -296,9 +300,17 @@ fn user_pw_epoch(user: &Value) -> i64 {
     util::int_or(user.get("pw_epoch"), 0)
 }
 
+#[cfg(test)]
 pub fn user_session_value(secret: &str, user_id: &str) -> String {
+    let user = get_user_by_id(user_id).unwrap_or_else(|| json!({"id":user_id}));
+    user_session_from_row(secret, &user)
+}
+
+/// Sign the verified password snapshot; a concurrent reset must not grant a new epoch.
+pub fn user_session_from_row(secret: &str, user: &Value) -> String {
     use base64::Engine;
-    let epoch = get_user_by_id(user_id).map(|u| user_pw_epoch(&u)).unwrap_or(0);
+    let user_id = util::str_or(user.get("id"), "");
+    let epoch = user_pw_epoch(user);
     let issued = util::now_i();
     let payload = format!("{}|{}|{}", user_id, epoch, issued);
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
@@ -745,29 +757,16 @@ pub fn email_code_create(email: &str) -> Result<String, String> {
     Ok(got)
 }
 
-/// 校验邮箱验证码（10 分钟有效，验证后即作废）。
-pub fn email_code_verify(email: &str, code: &str) -> bool {
-    let email = email.trim().to_lowercase();
-    let now = util::now_i();
-    let mut ok = false;
-    store().update(|db| {
-        if let Some(codes) = db.get_mut("email_codes").and_then(|v| v.as_object_mut()) {
-            if let Some(rec) = codes.get(&email) {
-                let exp = util::int_or(rec.get("exp"), 0);
-                let stored = util::str_or(rec.get("code"), "");
-                if exp > now && stored == code.trim() {
-                    ok = true;
-                }
-            }
-            if ok {
-                codes.remove(&email);
-            }
-        }
-    });
-    ok
+fn registration_code_matches(db: &Value, email: &str, code: &str, now: i64) -> bool {
+    db.get("email_codes").and_then(|v| v.get(email)).is_some_and(|rec| {
+        util::int_or(rec.get("exp"), 0) > now
+            && util::int_or(rec.get("attempts"), 0) < 5
+            && code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
+            && crate::webhttp::constant_time_token(&util::str_or(rec.get("code"), ""), code)
+    })
 }
 
-pub fn email_register(email: &str, password: &str, inv: &str) -> (Option<Value>, String) {
+pub fn email_register(email: &str, password: &str, inv: &str, code: &str) -> (Option<Value>, String) {
     let email = email.trim().to_lowercase();
     if email.is_empty() || !email.contains('@') {
         return (None, "请输入正确的邮箱地址".into());
@@ -798,6 +797,21 @@ pub fn email_register(email: &str, password: &str, inv: &str) -> (Option<Value>,
     }).unwrap_or(false) {
         return (None, "该邮箱已注册，请直接登录或找回密码".into());
     }
+    let code = code.trim();
+    let now = util::now_i();
+    let mut code_ok = false;
+    store().update(|db| {
+        code_ok = registration_code_matches(db, &email, code, now);
+        if !code_ok {
+            if let Some(rec) = db.get_mut("email_codes").and_then(|v| v.get_mut(&email)).and_then(Value::as_object_mut) {
+                let attempts = util::int_or(rec.get("attempts"), 0).saturating_add(1);
+                rec.insert("attempts".into(), json!(attempts));
+            }
+        }
+    });
+    if !code_ok {
+        return (None, "验证码错误或已过期，请重新获取验证码".into());
+    }
     let row = json!({
         "id": format!("u8_{}", util::rand_hex(6)),
         "username": email,
@@ -811,6 +825,9 @@ pub fn email_register(email: &str, password: &str, inv: &str) -> (Option<Value>,
     });
     let mut out = None;
     store().update(|db| {
+        if !registration_code_matches(db, &email, code, util::now_i()) {
+            return;
+        }
         users_mut(db, |arr| {
             if arr.iter().any(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email)) {
                 return;
@@ -818,6 +835,11 @@ pub fn email_register(email: &str, password: &str, inv: &str) -> (Option<Value>,
             arr.push(row.clone());
             out = Some(row.clone());
         });
+        if out.is_some() {
+            if let Some(codes) = db.get_mut("email_codes").and_then(Value::as_object_mut) {
+                codes.remove(&email);
+            }
+        }
     });
     match out {
         Some(u) => {
@@ -827,7 +849,7 @@ pub fn email_register(email: &str, password: &str, inv: &str) -> (Option<Value>,
             }
             (Some(u), String::new())
         }
-        None => (None, "该邮箱已注册".into()),
+        None => (None, "注册未完成，邮箱已注册或验证码已使用".into()),
     }
 }
 
@@ -839,17 +861,30 @@ pub fn reset_token_create(email: &str) -> Option<(String, String)> {
     })?;
     let uid = util::str_or(u.get("id"), "");
     let token = util::rand_hex(24);
+    let epoch = user_pw_epoch(&u);
     let now = util::now_i();
     store().update(|db| {
         let obj = db.as_object_mut().unwrap();
         let arr = obj.entry("pw_resets").or_insert_with(|| Value::Array(vec![]));
         if let Some(a) = arr.as_array_mut() {
             a.retain(|r| util::int_or(r.get("exp"), 0) > now);
-            a.insert(0, json!({"token": token, "uid": uid, "exp": now + 900}));
+            a.insert(0, json!({"token": token, "uid": uid, "exp": now + 900, "pw_epoch":epoch}));
             a.truncate(200);
         }
     });
     Some((token, uid))
+}
+
+fn reset_user_id(db: &Value, token: &str, now: i64) -> Option<String> {
+    if token.is_empty() { return None; }
+    let record = db.get("pw_resets")?.as_array()?.iter().find(|r| {
+        util::str_or(r.get("token"), "") == token && util::int_or(r.get("exp"), 0) > now
+    })?;
+    let uid = util::str_or(record.get("uid"), "");
+    let user = db.get("users")?.as_array()?.iter().find(|u| util::str_or(u.get("id"), "") == uid)?;
+    // Legacy records use epoch zero. A persisted password change invalidates every old link
+    // even if the mail table has not yet been flushed after a crash.
+    (user_pw_epoch(user) == util::int_or(record.get("pw_epoch"), 0)).then_some(uid)
 }
 
 /// 用令牌重置密码（一次性）。成功后旧会话全部失效（纪元 +1）。
@@ -857,41 +892,31 @@ pub fn reset_with_token(token: &str, password: &str) -> Result<(), String> {
     if password.chars().count() < 6 {
         return Err("密码至少 6 位".into());
     }
-    let now = util::now_i();
-    let mut uid = String::new();
+    if reset_user_id(&store().load(), token, util::now_i()).is_none() {
+        return Err("重置链接无效或已过期".into());
+    }
+    let hash = crate::store::hash_password(password);
+    let mut done = false;
     store().update(|db| {
-        let obj = db.as_object_mut().unwrap();
-        let arr = obj.entry("pw_resets").or_insert_with(|| Value::Array(vec![]));
-        if let Some(a) = arr.as_array_mut() {
-            if let Some(pos) = a.iter().position(|r| {
-                util::str_or(r.get("token"), "") == token && util::int_or(r.get("exp"), 0) > now
-            }) {
-                uid = util::str_or(a[pos].get("uid"), "");
-                a.remove(pos);
+        let Some(uid) = reset_user_id(db, token, util::now_i()) else { return; };
+        users_mut(db, |arr| {
+            if let Some(u) = find_user_mut(arr, &uid) {
+                let next_epoch = util::int_or(u.get("pw_epoch"), 0).saturating_add(1);
+                if let Some(o) = u.as_object_mut() {
+                    o.insert("password_hash".into(), Value::from(hash));
+                    o.insert("pw_epoch".into(), json!(next_epoch));
+                    o.insert("updated_at".into(), json!(util::now_i()));
+                    done = true;
+                }
+            }
+        });
+        if done {
+            if let Some(resets) = db.get_mut("pw_resets").and_then(Value::as_array_mut) {
+                resets.retain(|r| util::str_or(r.get("uid"), "") != uid);
             }
         }
     });
-    if uid.is_empty() {
-        return Err("重置链接无效或已过期".into());
-    }
-    let mut done = false;
-    store().update(|db| {
-        users_mut(db, |arr| {
-            if let Some(u) = find_user_mut(arr, &uid) {
-                let next_epoch = util::int_or(u.get("pw_epoch"), 0) + 1;
-                if let Some(o) = u.as_object_mut() {
-                    o.insert("password_hash".into(), Value::from(crate::store::hash_password(password)));
-                    o.insert("pw_epoch".into(), json!(next_epoch));
-                }
-                done = true;
-            }
-        });
-    });
-    if done {
-        Ok(())
-    } else {
-        Err("用户不存在".into())
-    }
+    if done { Ok(()) } else { Err("重置链接无效或已过期".into()) }
 }
 
 // ---------------------------------------------------------------- 计费与限速
@@ -907,12 +932,15 @@ pub fn price_for(upstream_id: &str, model: &str) -> f64 {
 
 /// 该模型在任一启用渠道上是否收费（用于请求前置的余额检查）。
 pub fn model_is_paid(model: &str) -> bool {
-    crate::upstreams::all_upstreams()
-        .iter()
-        .any(|u| {
-            u.get("enabled").map(util::truthy).unwrap_or(false)
-                && money(u.get("prices").and_then(|p| p.get(model))) > 0.0
-        })
+    let db = store().load();
+    let cfg = db.get("config").unwrap_or(&Value::Null);
+    let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+    let transparent = crate::upstreams::transparent_upstream(cfg);
+    db.get("upstreams").and_then(Value::as_array).is_some_and(|ups| ups.iter().any(|u| {
+        u.get("enabled").map(util::truthy).unwrap_or(false)
+            && crate::upstreams::channel_serves_model(u, model, global_hide, transparent)
+            && money(u.get("prices").and_then(|p| p.get(model))) > 0.0
+    }))
 }
 
 /// 用户级每分钟滑动窗口限速。kind: "free" / "paid"。
@@ -1245,7 +1273,7 @@ pub fn user_logs_page(user_id: &str, kind: &str, page: i64, per: usize) -> (Vec<
         _ => {
             let mut all = collect("user_logs_paid");
             all.extend(collect("user_logs_free"));
-            all.sort_by_key(|r| -util::int_or(r.get("t"), 0));
+            all.sort_by_key(|r| std::cmp::Reverse(util::int_or(r.get("t"), 0)));
             all
         }
     };
@@ -1264,6 +1292,7 @@ pub fn model_square() -> Vec<Value> {
     let limits = crate::upstreams::parse_model_limits(db.get("config").unwrap_or(&Value::Null));
     let transparent = crate::upstreams::transparent_upstream(db.get("config").unwrap_or(&Value::Null));
     let ups = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
+    let global_hide = db.pointer("/config/hide_mapped_names").map(util::truthy).unwrap_or(true);
     let mut best: HashMap<String, f64> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for u in &ups {
@@ -1276,9 +1305,8 @@ pub fn model_square() -> Vec<Value> {
             .and_then(|m| m.as_array())
             .map(|a| a.iter().map(|m| util::str_or(Some(m), "")).collect())
             .unwrap_or_default();
-        let models_set: std::collections::HashSet<String> = models.iter().cloned().collect();
         for m in models {
-            if m.is_empty() {
+            if m.is_empty() || !crate::upstreams::channel_serves_model(u, &m, global_hide, transparent) {
                 continue;
             }
             let price = prices
@@ -1297,7 +1325,7 @@ pub fn model_square() -> Vec<Value> {
         // 默认隐藏下只挂「真进了 models 清单」的别名，与可路由口径一致
         if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
             for (alias, _target) in mm {
-                if !transparent && !models_set.contains(alias) {
+                if !crate::upstreams::channel_serves_model(u, alias, global_hide, transparent) {
                     continue;
                 }
                 let price = prices.get(alias).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1352,7 +1380,8 @@ pub fn model_square() -> Vec<Value> {
             let mut health: Option<f64> = None;
             for u in &ups_list {
                 let ch_id = util::str_or(u.get("id"), "");
-                if ch_id.is_empty() { continue; }
+                if ch_id.is_empty() || !u.get("enabled").map(util::truthy).unwrap_or(false)
+                    || !crate::upstreams::channel_serves_model(u, &m, global_hide, transparent) { continue; }
                 let key = format!("{}{}{}", ch_id, '\u{0}', m);
                 if let Some(rec) = up_recent.get(&key).and_then(|r| r.as_array()) {
                     if rec.is_empty() { continue; }
@@ -1447,5 +1476,88 @@ mod square_tests {
             if let Some(v) = saved_chains { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
             if let Some(v) = saved_prices { d["config"]["model_limits"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_limits"); }
         });
+    }
+}
+
+#[cfg(test)]
+mod account_regression_tests {
+    use super::*;
+
+    #[test]
+    fn registration_preserves_code_until_success_and_limits_guesses() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["config"]["reg_email_enabled"] = json!(true);
+            db["config"]["reg_email_regex"] = json!("");
+            db["users"] = json!([]);
+            db["email_codes"] = json!({});
+        });
+        let email = "regression+code@example.test";
+        let code = email_code_create(email).unwrap();
+        assert!(email_register(email, "short", "", &code).0.is_none());
+        assert!(registration_code_matches(&store().load(), email, &code, util::now_i()));
+        let row = email_register(email, "valid-password", "", &code).0.unwrap();
+        assert_eq!(row["username"], email);
+        assert!(store().load()["email_codes"].get(email).is_none());
+        assert!(email_register(email, "valid-password", "", &code).0.is_none());
+
+        let other = "guesses@example.test";
+        let code = email_code_create(other).unwrap();
+        for _ in 0..5 { assert!(email_register(other, "valid-password", "", "not-a-code").0.is_none()); }
+        assert!(email_register(other, "valid-password", "", &code).0.is_none());
+        store().update(|db| *db = saved);
+    }
+
+    #[test]
+    fn password_reset_is_single_use_and_revokes_all_older_links() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["users"] = json!([{"id":"reset-user","username":"reset@example.test","enabled":true,"pw_epoch":0}]);
+            db["pw_resets"] = json!([]);
+        });
+        let (old, _) = reset_token_create("reset@example.test").unwrap();
+        let (token, _) = reset_token_create("reset@example.test").unwrap();
+        let old_resets = store().load()["pw_resets"].clone();
+        let session = user_session_value("test-secret", "reset-user");
+        let verified_snapshot = get_user_by_id("reset-user").unwrap();
+        let workers: Vec<_> = (0..2).map(|_| {
+            let token = token.clone();
+            std::thread::spawn(move || reset_with_token(&token, "new-password"))
+        }).collect();
+        assert_eq!(workers.into_iter().map(|w| w.join().unwrap()).filter(Result::is_ok).count(), 1);
+        assert!(reset_with_token(&old, "another-password").is_err());
+        assert!(user_session_id("test-secret", &session).is_none());
+        assert!(user_session_id("test-secret", &user_session_from_row("test-secret", &verified_snapshot)).is_none());
+        let db = store().load();
+        assert_eq!(db["users"][0]["pw_epoch"], 1);
+        assert!(crate::store::verify_password("new-password", db["users"][0]["password_hash"].as_str().unwrap()));
+        assert_eq!(db["pw_resets"], json!([]));
+        store().update(|db| db["pw_resets"] = old_resets);
+        assert!(reset_with_token(&old, "another-password").is_err());
+        store().update(|db| *db = saved);
+    }
+
+    #[test]
+    fn model_square_ignores_hidden_and_unlisted_aliases() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["config"]["transparent_upstream"] = json!(true);
+            db["config"]["model_chains"] = json!("");
+            db["upstreams"] = json!([
+                {"id":"public","enabled":true,"models":["public"],"prices":{}},
+                {"id":"private","enabled":true,"hide_mapped":1,"models":["raw","alias"],
+                 "model_map":{"alias":"raw","unlisted":"elsewhere"},"prices":{"public":1,"raw":1}}
+            ]);
+        });
+        let names: Vec<_> = model_square().into_iter().map(|r| r["model"].as_str().unwrap().to_owned()).collect();
+        assert!(names.contains(&"public".to_owned()));
+        assert!(names.contains(&"alias".to_owned()));
+        assert!(!names.contains(&"raw".to_owned()));
+        assert!(!names.contains(&"unlisted".to_owned()));
+        assert!(!model_is_paid("public"));
+        store().update(|db| *db = saved);
     }
 }

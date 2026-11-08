@@ -1072,6 +1072,16 @@ async function init() {
   tokenHint();
   await ensureToken(false);
   await loadModels(active() && active().model);
+  const requested = window.location ? new URLSearchParams(window.location.search).get('model') : '';
+  if (requested) {
+    const available = Array.from($('#wc-model').options).some(o => o.value === requested);
+    if (available && state.projects.length < MAX_PROJECTS) {
+      const project = blankProject(requested.slice(0, MAX_NAME));
+      project.model = requested;
+      state.projects.push(project); state.active = project.id;
+      save(); renderAll();
+    } else toast(available ? '项目数量已达上限，请先删除或导出项目' : '该模型暂不可用，请重新选择', 'warning');
+  }
   syncInputs();
 }
 

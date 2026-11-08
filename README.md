@@ -89,10 +89,16 @@ data/db/reward_journal.json 奖励事务恢复日志，仅在提交与写回之�
 ```bash
 cargo test --locked --all-targets
 node tests/frontend-rewards.cjs
+node tests/frontend-console.cjs
 node tests/frontend-webclaw.cjs
 node tests/frontend-webclaw-send.cjs
 python tests/webclaw_e2e.py
+python tests/console_e2e.py
 ```
+
+浏览器回归需要 `pip install -r requirements-dev.txt` 和 `python -m playwright install chromium`，
+然后执行 `python tests/console_e2e.py --ui`。全部接口测试使用临时数据目录。
+前端样式、脚本与图标已内嵌，页面无需连接外部 CDN。模型广场支持搜索、价格筛选与直接进入对话测试。
 
 测试覆盖跨网络分块的 UTF-8 / CRLF、工具调用转换、异常断流、真实 usage、
 成功调用计费、客户端断连释放、并发排队上限、签到目录备份与多用户日志迁移。

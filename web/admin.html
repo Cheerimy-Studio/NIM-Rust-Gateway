@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>言灵中转 · 管理后台</title>
-<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
-<script defer src="https://cdn.bootcdn.net/ajax/libs/marked/4.3.0/marked.min.js"></script>
-<script defer src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
+<link href="/assets/vendor/bootstrap.min.css" rel="stylesheet">
+<link href="/assets/vendor/bootstrap-icons.min.css" rel="stylesheet">
+<script defer src="/assets/vendor/marked.min.js"></script>
+<script defer src="/assets/vendor/purify.min.js"></script>
 <style>
 :root{--acc:#2f6fed;--bg:#f3f5f9;--line:#e7ecf3;--txt:#1c2536;--mut:#68758a;
   --r-xs:6px;--r-sm:8px;--r-md:10px;--r:12px;--r-lg:14px;--r-pill:999px;--ring:0 0 0 3px rgba(47,111,237,.12)}
@@ -201,8 +201,10 @@ details.upgrp[open]{background:#fff}
   .content{padding:14px}
 }
 </style>
+<link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
+<script src="/assets/ui.js?v={{VERSION}}"></script>
 </head>
-<body>
+<body data-page="admin">
 <div class="layout">
 <aside class="sidebar">
   <div class="brand"><span class="mark">言</span><span class="bt">言灵中转<small>管理后台</small></span></div>
@@ -218,7 +220,7 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-pane="import"><i class="bi bi-upload"></i>导入</a>
     <a href="javascript:void(0)" data-pane="tokens"><i class="bi bi-shield-lock"></i>访问令牌</a>
     <a href="javascript:void(0)" data-pane="users"><i class="bi bi-people"></i>用户</a>
-    <a href="javascript:void(0)" data-pane="promo"><i class="bi bi-megaphone"></i>拉人活动</a>
+    <a href="javascript:void(0)" data-pane="promo"><i class="bi bi-megaphone"></i>邀请活动</a>
     <a href="javascript:void(0)" data-pane="wheels"><i class="bi bi-database"></i>大转盘</a>
     <a href="javascript:void(0)" data-pane="intercept"><i class="bi bi-slash-circle"></i>拦截</a>
     <div class="nav-label">数据</div>
@@ -497,7 +499,7 @@ details.upgrp[open]{background:#fff}
                 <button type="button" id="tdef-add" class="btn btn-sm btn-outline-primary">添加</button>
               </div>
               <div id="tdef-list" class="pover-list small"></div>
-            <div class="small text-muted mt-1">模型名按完整名称精确匹配（下拉框选的就是完整模型名），也可用 <code>*</code> 通配兜底；未匹配的模型不做调整。强度 <code>off</code> 剥离该模型的全部思考参数——上游不支持思考时选这个，省去 400 重试。即使不配置，网关在 400 后也会自动剥离并记住该渠道+模型（6 小时），后续请求发送前直接生效。</div>
+            <div class="small text-muted mt-1">按完整模型名匹配，<code>*</code> 适用于所有模型。选择 <code>off</code> 可移除思考参数。上游返回参数错误后，网关会自动尝试兼容设置，并为该渠道与模型保留 6 小时。</div>
             </div>
           </div>
         </div>
@@ -517,7 +519,7 @@ details.upgrp[open]{background:#fff}
 
 <section class="pane" id="pane-catalog">
   <h2 class="pane-title">模型接入</h2>
-  <div class="hint mb-3">渠道里的模型默认不对外，客户端调不到。想开放哪个，就给它起个对外的名字（别名），客户端拿别名调用；把别名清空再保存，它就下线了。上下文/输出上限填 0 是不限，超了网关会自动往下压，省得上游直接报错。</div>
+  <div class="hint mb-3">为模型设置别名并保存后，客户端即可通过别名调用。清空别名可撤下模型。上下文与输出上限填 0 表示不限；超出上限的请求将自动调整。</div>
   <div class="card mb-3">
     <div class="card-header d-flex justify-content-between align-items-center">
       <span><i class="bi bi-boxes me-2 text-muted"></i>上游模型</span>
@@ -539,7 +541,7 @@ details.upgrp[open]{background:#fff}
         <table class="table table-sm align-middle mb-0">
           <thead><tr>
             <th style="width:34px"><input type="checkbox" id="cat-selall" title="全选"></th>
-            <th>渠道</th><th>上游模型</th><th style="width:200px">别名（客户端用名）</th>
+            <th>渠道</th><th>上游模型</th><th style="width:200px">调用名称</th>
             <th style="width:104px" title="0=不限">上下文上限</th>
             <th style="width:104px" title="0=不限">输出上限</th>
             <th style="width:104px" title="仅展示，给用户挑模型参考">预估速度</th>
@@ -563,7 +565,7 @@ details.upgrp[open]{background:#fff}
           <div class="table-responsive">
             <table class="table table-sm align-middle mb-2" id="chain-table">
               <thead><tr>
-                <th style="width:24%">路由名（客户端调用名）</th>
+                <th style="width:24%">路由名称</th>
                 <th>成员（按优先级，逗号分隔）</th>
                 <th style="width:110px">模式</th>
                 <th style="width:84px">粘滞轮数</th>
@@ -580,7 +582,7 @@ details.upgrp[open]{background:#fff}
     <div class="card-header"><i class="bi bi-tags me-2 text-muted"></i>模型定价</div>
     <div class="card-body">
 
-  <div class="hint mb-3">按客户端调用的模型名设置单次成功调用价格（元/次），仅成功计费；模型映射后请对映射前的名字（客户端用的名字）设价。未设价的模型为免费模型。</div>
+  <div class="hint mb-3">按客户端调用的模型名设置单次成功调用单次价格 · 元，仅成功计费；模型映射后请对映射前的名字（客户端用的名字）设价。未设价的模型为免费模型。</div>
   <div class="card mb-3"><div class="card-body d-flex gap-2 align-items-end flex-wrap">
     <div style="min-width:180px"><label class="form-label" for="price-channel">渠道</label>
       <select class="form-select form-select-sm" id="price-channel"></select></div>
@@ -592,7 +594,7 @@ details.upgrp[open]{background:#fff}
   </div></div>
   <div class="card"><div class="table-responsive">
     <table class="table table-hover align-middle">
-      <thead><tr><th>渠道</th><th>模型</th><th>价格（元/次）</th><th>类型</th><th class="text-end">操作</th></tr></thead>
+      <thead><tr><th>渠道</th><th>模型</th><th>单次价格 · 元</th><th>类型</th><th class="text-end">操作</th></tr></thead>
       <tbody id="price-rows"></tbody>
     </table>
   </div></div>
@@ -651,7 +653,7 @@ details.upgrp[open]{background:#fff}
 
 
 <section class="pane" id="pane-promo">
-  <h2 class="pane-title">拉人活动</h2>
+  <h2 class="pane-title">邀请活动</h2>
   <div class="card mb-3">
     <div class="card-header">新建活动</div>
     <div class="card-body">
@@ -758,7 +760,7 @@ details.upgrp[open]{background:#fff}
           <input type="number" min="0" class="form-control form-control-sm" id="usr-frpm" value="10"></div>
         <div class="col-md-2"><button id="usr-add" class="btn btn-sm btn-primary w-100">添加</button></div>
       </div>
-      <div class="form-text small mt-2 mb-0">付费模型限速默认关闭，添加后可在列表中设置。用户登录入口：<code>/user</code></div>
+      <div class="form-text small mt-2 mb-0">付费模型默认不限速，添加后可在列表中设置每分钟上限。用户登录入口：<code>/user</code></div>
     </div>
   </div>
   <div class="card">
@@ -1257,7 +1259,7 @@ details.upgrp[open]{background:#fff}
 </main>
 </div>
 
-<script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="/assets/vendor/bootstrap.bundle.min.js"></script>
 <script>window.NGW = {base: "/", csrf: "{{CSRF}}"};</script>
 <script src="/assets/admin.js?v={{VERSION}}"></script>
 </body>

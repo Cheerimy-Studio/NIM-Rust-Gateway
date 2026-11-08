@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>言灵中转 · 用户中心</title>
-<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://cdn.bootcdn.net/ajax/libs/bootstrap-icons/1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+<link href="/assets/vendor/bootstrap.min.css" rel="stylesheet">
+<link href="/assets/vendor/bootstrap-icons.min.css" rel="stylesheet">
 <style>
 :root{--acc:#10b981;--bg:#f3f5f9;--line:#e7ecf3;--txt:#1c2536;--mut:#68758a;
   --r-xs:6px;--r-sm:8px;--r-md:10px;--r:12px;--r-lg:14px;--r-pill:999px}
@@ -393,8 +393,10 @@ body{overflow-x:clip}
 @keyframes pconf{0%{opacity:1;transform:translate(0,0) rotate(0deg)}
   100%{opacity:0;transform:translate(var(--dx),var(--dy)) rotate(560deg)}}
 </style>
+<link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
+<script src="/assets/ui.js?v={{VERSION}}"></script>
 </head>
-<body>
+<body data-page="user">
 
 <div id="login-view" style="display:none">
   <div class="login-card">
@@ -469,8 +471,8 @@ body{overflow-x:clip}
   <nav>
     <div class="nav-label">账户</div>
     <a href="javascript:void(0)" data-p="overview" class="active"><i class="bi bi-speedometer2"></i>概览</a>
-    <a href="javascript:void(0)" data-p="wheel"><i class="bi bi-database"></i>大转盘</a>
-    <a href="javascript:void(0)" data-p="promo"><i class="bi bi-fire"></i>拉人活动</a>
+    <a href="javascript:void(0)" data-p="wheel"><i class="bi bi-gift"></i>大转盘</a>
+    <a href="javascript:void(0)" data-p="promo"><i class="bi bi-fire"></i>邀请活动</a>
     <div class="nav-label">开发</div>
     <a href="javascript:void(0)" data-p="keys"><i class="bi bi-key"></i>API Key</a>
     <a href="javascript:void(0)" data-p="prizes"><i class="bi bi-gift"></i>奖品中心</a>
@@ -645,12 +647,18 @@ body{overflow-x:clip}
 
 <div class="pane" id="pane-models">
   <h2 class="pane-title">模型广场</h2>
-  <div class="hint mb-3">标有「免费」的模型余额为 0 也可调用；标价为单次成功调用的费用。</div>
+  <div class="hint mb-3">标价为各渠道的最低单次价格，实际费用取决于本次调用的渠道。仅成功调用计费。</div>
+  <div class="model-tools">
+    <input id="model-search" type="search" class="form-control" placeholder="搜索模型名称" aria-label="搜索模型">
+    <select id="model-kind" class="form-select" aria-label="按价格筛选"><option value="all">全部模型</option><option value="free">免费模型</option><option value="paid">付费模型</option></select>
+    <button id="model-refresh" type="button" class="btn btn-outline-secondary">刷新</button>
+    <span id="model-count" class="hint" role="status"></span>
+  </div>
   <div class="row g-3" id="model-cards"></div>
 </div>
 
 <div class="pane" id="pane-promo">
-  <h2 class="pane-title">拉人活动
+  <h2 class="pane-title">邀请活动
     <button class="btn btn-sm btn-outline-secondary ms-auto" id="promo-refresh" title="刷新活动进度"><i class="bi bi-arrow-clockwise"></i></button>
   </h2>
   <div id="promo-body"></div>
@@ -697,6 +705,6 @@ body{overflow-x:clip}
   </div>
 </div>
 
-<script src="/assets/user.js"></script>
+<script src="/assets/user.js?v={{VERSION}}"></script>
 </body>
 </html>

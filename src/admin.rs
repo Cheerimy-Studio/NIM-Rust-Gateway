@@ -51,6 +51,12 @@ pub(crate) fn login_rate_ok(ip: &str) -> bool {
     let now = util::now_f();
     let mut g = LOGIN_RATE.lock().unwrap();
     let m = g.get_or_insert_with(Vec::new);
+    if m.len() >= 4096 {
+        m.retain(|(_, v)| v.last().is_some_and(|t| now - t < 300.0));
+        if m.len() >= 4096 && !m.iter().any(|(k, _)| k == ip) {
+            return false;
+        }
+    }
     let mut attempts: Vec<f64> = m
         .iter()
         .find(|(k, _)| k == ip)
@@ -158,9 +164,9 @@ fn query_get(query: &Option<String>, key: &str) -> String {
             None => (pair, ""),
         };
         if k == key {
-            return percent_encoding::percent_decode_str(v)
+            return percent_encoding::percent_decode_str(&v.replace('+', " "))
                 .decode_utf8_lossy()
-                .replace('+', " ");
+                .into_owned();
         }
     }
     String::new()
@@ -174,20 +180,20 @@ pub async fn login(headers: &HeaderMap, ip: String, body: Bytes) -> Response {
     let cfg = cfg.get("config").cloned().unwrap_or(json!({}));
     let username = util::str_or(body_v.get("username"), "").trim().to_string();
     let password = util::str_or(body_v.get("password"), "");
-    let ok_user = username.to_lowercase() == util::str_or(cfg.get("admin_username"), "").to_lowercase();
-    let ok_pass = verify_password(&password, &util::str_or(cfg.get("admin_password_hash"), ""));
-    // 先验证、失败才计入限流预算：反代/公网部署下所有流量共享同一个来源 IP，
-    // 扫描机器人的垃圾请求会把 10 次预算永远占满，正确口令也被 429 挡在门外
-    // （暴力破解防护不受影响：同一 IP 每5分钟仍只有 10 次错误尝试的机会）
+    let rate_key = format!("admin:{ip}:{}", util::char_prefix(&username.to_lowercase(), 320));
+    if !login_rate_ok(&rate_key) {
+        return login_throttled();
+    }
+    let ok_user = username.eq_ignore_ascii_case(&util::str_or(cfg.get("admin_username"), ""));
+    let ok_pass = match verify_login_password(password, Some(util::str_or(cfg.get("admin_password_hash"), ""))).await {
+        Ok(ok) => ok,
+        Err(response) => return response,
+    };
     if !(ok_user && ok_pass) {
-        if !login_rate_ok(&ip) {
-            let body = json!({"error": {"message": "尝试过于频繁，请 5 分钟后重试", "type": "auth"}});
-            return (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response();
-        }
         let body = json!({"error": {"message": "账号或密码错误", "type": "auth"}});
         return (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response();
     }
-    login_rate_clear(&ip);
+    login_rate_clear(&rate_key);
     let session = session_cookie(&cfg);
     let csrf = csrf_token(&cfg);
     // https 部署下会话 Cookie 带 Secure（反代成 http 的内网部署不能设，否则浏览器
@@ -2292,7 +2298,12 @@ pub async fn users_op(headers: &HeaderMap, body: Bytes) -> Response {
     };
     let uid = util::str_or(body.get("id"), "");
     let op = util::str_or(body.get("op"), "");
-    let (ok, err) = crate::users::user_op(&uid, &op, &body);
+    let (ok, err) = if op == "reset-password" {
+        match password_work(move || crate::users::user_op(&uid, &op, &body)).await {
+            Ok(result) => result,
+            Err(response) => return response,
+        }
+    } else { crate::users::user_op(&uid, &op, &body) };
     if !ok {
         return (
             StatusCode::BAD_REQUEST,
@@ -2824,5 +2835,30 @@ mod chain_validate_tests {
 nested = aa, x").is_err(), "嵌套");
         // 空文本 = 清空路由，合法
         assert!(validate_model_chains(&db, "").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod login_regression_tests {
+    use super::*;
+
+    #[test]
+    fn limits_are_reserved_before_password_work_and_isolated_by_account() {
+        let key = "test-login:shared-ip:account-a";
+        let other = "test-login:shared-ip:account-b";
+        login_rate_clear(key); login_rate_clear(other);
+        for _ in 0..10 { assert!(login_rate_ok(key)); }
+        assert!(!login_rate_ok(key));
+        assert!(login_rate_ok(other));
+        login_rate_clear(other);
+        assert!(!login_rate_ok(key));
+        login_rate_clear(key);
+        assert!(login_rate_ok(key));
+        login_rate_clear(key);
+    }
+
+    #[test]
+    fn query_decoding_preserves_encoded_plus() {
+        assert_eq!(query_get(&Some("q=a%2Bb+c%26d".into()), "q"), "a+b c&d");
     }
 }

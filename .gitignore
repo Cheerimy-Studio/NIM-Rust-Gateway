@@ -6,3 +6,6 @@ __pycache__/
 last-gateway-stderr.log
 *.exe.old
 tests-blackbox/
+
+# 修复包应用备份（apply_fix.py）
+.ngw-fix-backups/

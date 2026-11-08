@@ -85,7 +85,11 @@ async function api(path, opts = {}) {
   const res = await fetch(B + 'api/' + path, init);
   let data = null;
   try { data = await res.json(); } catch (e) {  }
-  if (!res.ok) throw new Error((data && data.error && data.error.message) || ('HTTP ' + res.status));
+  if (!res.ok) {
+    if (res.status === 401) { location.href = B + 'admin'; }
+    throw new Error((data && data.error && data.error.message) || ('HTTP ' + res.status));
+  }
+  if (data === null) throw new Error('服务返回无效数据，请重试');
   return data;
 }
 
@@ -95,41 +99,7 @@ const run = async fn => { try { return await fn(); } catch (e) { toast(e.message
 const guard = fn => async (...args) => { try { return await fn(...args); } catch (e) { toast(e.message, 'danger'); } };
 
 
-function uiDialog({ title = '确认', body = '', input = null, danger = false, okText = '确定' }) {
-  return new Promise(resolve => {
-    const mask = el('div', 'ui-mask');
-    const box = el('div', 'ui-dialog');
-    box.append(el('div', 'ui-title', title));
-    const bodyEl = el('div', 'ui-body');
-    if (body) bodyEl.appendChild(el('div', 'ui-msg', body));
-    let inputEl = null;
-    if (input !== null) {
-      inputEl = el('input', 'form-control form-control-sm mt-2');
-      inputEl.value = input.value || '';
-      inputEl.placeholder = input.placeholder || '';
-      bodyEl.appendChild(inputEl);
-    }
-    box.appendChild(bodyEl);
-    const foot = el('div', 'ui-foot');
-    const cancel = el('button', 'btn btn-sm btn-outline-secondary', '取消');
-    const ok = el('button', 'btn btn-sm ' + (danger ? 'btn-danger' : 'btn-primary'), okText);
-    foot.append(cancel, ok);
-    box.appendChild(foot);
-    mask.appendChild(box);
-    document.body.appendChild(mask);
-    const close = val => { mask.remove(); document.removeEventListener('keydown', onKey); resolve(val); };
-    const okFn = () => close(inputEl ? inputEl.value.trim() : true);
-    cancel.onclick = () => close(input !== null ? null : false);
-    ok.onclick = okFn;
-    mask.onclick = e => { if (e.target === mask) close(input !== null ? null : false); };
-    const onKey = e => {
-      if (e.key === 'Escape') close(input !== null ? null : false);
-      if (e.key === 'Enter') okFn();
-    };
-    document.addEventListener('keydown', onKey);
-    if (inputEl) { inputEl.focus(); inputEl.select(); } else { ok.focus(); }
-  });
-}
+function uiDialog(options) { return window.NGW_UI.dialog(options); }
 const uiConfirm = (msg, opts = {}) => uiDialog({ title: opts.title || '确认操作', body: msg, danger: !!opts.danger, okText: opts.okText || '确定' });
 const uiPrompt = (msg, val = '', opts = {}) => uiDialog({ title: opts.title || '输入', body: msg, input: { value: val, placeholder: opts.placeholder || '' }, okText: opts.okText || '确定' });
 
@@ -156,6 +126,7 @@ async function loadPromoAdmin() {
   const tb = $('#promo-rows');
   if (!tb) return;
   tb.innerHTML = '';
+  if (!d) return;
   const rows = d.rows || [];
   if (!rows.length) {
     tb.innerHTML = '<tr><td colspan="8" class="text-muted small text-center py-4">还没有活动，先创建一个</td></tr>';
@@ -183,7 +154,7 @@ async function loadPromoAdmin() {
       b.onclick = () => run(async () => {
         await api('promo/op', {method: 'POST', json: {id: e.id, op: op}});
         toast('已' + label);
-        loadPromoAdmin();
+        await loadPromoAdmin();
       });
       return b;
     };
@@ -191,7 +162,7 @@ async function loadPromoAdmin() {
       e.enabled ? 'btn-outline-secondary' : 'btn-outline-success'));
     const del = document.createElement('button');
     del.className = 'btn btn-sm btn-outline-danger';
-    del.textContent = '删';
+    del.textContent = '删除';
     del.onclick = () => uiConfirm('删除活动「' + esc(e.name || e.id) + '」？参与进度将一并删除。', {danger: true, okText: '删除'})
       .then(ok => { if (ok) run(async () => { await api('promo/op', {method: 'POST', json: {id: e.id, op: 'delete'}}); toast('已删除'); loadPromoAdmin(); }); });
     td.appendChild(del);
@@ -213,9 +184,11 @@ $('#promo-add').onclick = guard(async () => {
 });
 
 function activate(name) {
-  $$('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.pane === name));
+  if (!Object.hasOwn(LOADERS, name)) name = 'dash';
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  $$('.sidebar nav a').forEach(a => { a.classList.toggle('active', a.dataset.pane === name); if (a.dataset.pane === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   $$('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
-  if (LOADERS[name]) LOADERS[name]();
+  if (LOADERS[name]) run(LOADERS[name]);
 }
 
 async function loadOverview() {
@@ -228,7 +201,7 @@ async function loadOverview() {
     ['当前 RPM', o.rpm + ' / ' + (o.rpm_limit_total === -1 ? '不限' : o.rpm_limit_total), '今日 tokens ' + o.daily.tokens, 'amber', 'bi-speedometer'],
     ['排队中', o.queue, o.queue ? '等待可用账号' : '无等待', o.queue ? 'red' : 'accent', 'bi-hourglass-split'],
     ['在途 / 连接池', (o.pool ? o.pool.inflight : 0) + ' / ' + (o.pool ? o.pool.max_connections : 0),
-      o.pool && o.pool.inflight >= o.pool.max_connections * 0.8 ? '已吃满池容量' : '池余量充足',
+      o.pool && o.pool.inflight >= o.pool.max_connections * 0.8 ? '连接使用率较高' : '连接容量充足',
       o.pool && o.pool.inflight >= o.pool.max_connections * 0.8 ? 'amber' : 'accent', 'bi-diagram-3'],
   ];
   const box = $('#dash-cards'); box.innerHTML = '';
@@ -1243,7 +1216,7 @@ function chainAddRow(v) {
     '<td><input class="form-control form-control-sm font-monospace chain-name" list="chain-cands" placeholder="如 auto-best"></td>' +
     '<td><input class="form-control form-control-sm font-monospace chain-members" list="chain-cands" placeholder="model-a, model-b"></td>' +
     '<td><select class="form-select form-select-sm chain-mode">' +
-    '<option value="fb">fb 回退</option><option value="rr">rr 轮询</option></select></td>' +
+    '<option value="fb">故障回退</option><option value="rr">轮询分配</option></select></td>' +
     '<td><input type="number" min="1" max="100" class="form-control form-control-sm chain-sticky" value="3" disabled title="同一起点保持 N 轮"></td>' +
     '<td><button class="btn btn-sm btn-outline-danger chain-del" type="button" title="删除此路由">×</button></td>';
   tr.querySelector('.chain-name').value = v.name || '';
@@ -1381,7 +1354,7 @@ function renderCatalog() {
   const sel = $('#cat-channel').value;
   const rows = CAT_ROWS.filter(r => !sel || r.channel_id === sel);
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="text-muted small text-center py-4">这里还没东西：点右上「拉取模型清单」，或到「上游」分页给渠道手填模型。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="text-muted small text-center py-4">暂无模型。选择渠道后点击「拉取模型清单」，也可在「上游」中手动添加。</td></tr>';
     return;
   }
   for (const r of rows) {
@@ -1467,7 +1440,7 @@ function bindCatalog() {
     const ch = $('#cat-channel').value;
     if (!ch) throw new Error('先在上面选一个渠道');
     const d = await api('upstream-models/fetch', {method: 'POST', json: {channel_id: ch}});
-    toast('拉到 ' + d.count + ' 个模型');
+    toast('已获取 ' + d.count + ' 个模型');
     loadCatalog();
   });
   $('#chain-add').onclick = () => chainAddRow({});
@@ -1881,7 +1854,8 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#queue-refresh').onclick = loadQueue;
   $('#queue-clear').onclick = guard(async () => { await api('queue', {method: 'POST'}); loadQueue(); });
 
-  activate('dash');
+  activate(location.hash.slice(1) || 'dash');
+  window.addEventListener('hashchange', () => activate(location.hash.slice(1)));
   setInterval(() => {
     if (document.hidden) return;
     if ($('#pane-dash').classList.contains('active')) loadOverview();
@@ -1967,7 +1941,7 @@ async function loadUsers() {
       + '<td class="small text-nowrap"><div>免费 ' + (u.free_calls ?? 0) + '</div><div class="text-muted">付费 ' + (u.paid_calls ?? 0) + '</div></td>'
       + '<td>' + (u.key_count ?? 0) + '</td>'
       + '<td class="small">' + (u.free_rpm > 0 ? u.free_rpm + ' 次/分' : '不限') + '</td>'
-      + '<td class="small">' + (u.paid_rpm > 0 ? u.paid_rpm + ' 次/分' : '关闭') + '</td>'
+      + '<td class="small">' + (u.paid_rpm > 0 ? u.paid_rpm + ' 次/分' : '不限') + '</td>'
       + '<td>' + (u.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>'
       + '<td class="small text-muted">' + new Date(u.created_at * 1000).toLocaleDateString() + '</td>';
     const td = document.createElement('td');
@@ -1995,7 +1969,7 @@ async function loadUsers() {
     lim.onclick = () => run(async () => {
       const f = await uiPrompt('免费模型每分钟上限', String(u.free_rpm ?? 0), {title: '限速 · 0 为不限', placeholder: '0 为不限'});
       if (f === null) return;
-      const p = await uiPrompt('付费模型每分钟上限', String(u.paid_rpm ?? 0), {title: '限速 · 0 为关闭', placeholder: '0 为关闭'});
+      const p = await uiPrompt('付费模型每分钟上限', String(u.paid_rpm ?? 0), {title: '限速 · 0 为不限', placeholder: '0 为不限'});
       if (p === null) return;
       await api('users/op', {method: 'POST', json: {id: u.id, op: 'set-limits', free_rpm: parseInt(f) || 0, paid_rpm: parseInt(p) || 0}});
       toast('限速已更新'); loadUsers();

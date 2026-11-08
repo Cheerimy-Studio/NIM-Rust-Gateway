@@ -13,7 +13,7 @@
 独立临时数据目录，不碰生产 data/。
 """
 
-import os, sys, time, shutil, pathlib, subprocess
+import os, sys, time, shutil, pathlib, subprocess, tempfile
 
 try:
     import httpx
@@ -25,12 +25,10 @@ os.environ["NO_PROXY"] = "*"
 os.environ["no_proxy"] = "*"
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TMP = pathlib.Path(os.environ.get("TEMP", ".")) / "ngw-webclaw-e2e"
+TMP = pathlib.Path(tempfile.mkdtemp(prefix="ngw-webclaw-e2e-"))
 ADMIN_USER, ADMIN_PW = "admin", "ngw-webclaw-pass"
 GW_PORT = int(os.environ.get("NGW_E2E_PORT", "18731"))
 
-shutil.rmtree(TMP, ignore_errors=True)
-TMP.mkdir(parents=True)
 
 # 默认用 debug 二进制：release 可能正被运行中的实例占用
 GW_EXE = os.environ.get("NGW_GW_EXE") or os.path.join(
@@ -192,7 +190,7 @@ try:
     )
     add(
         "user.js 外链导航不被拦截",
-        "if (!a.dataset.p) return;" in rju.text,
+        "if (!a.dataset.p) return;" in rju.text or "querySelectorAll('.sidebar nav a[data-p]')" in rju.text,
         "否则点击 /webclaw 无反应",
     )
 
@@ -238,6 +236,8 @@ finally:
         gw.wait(timeout=5)
     except Exception:
         gw.kill()
+        gw.wait()
+    shutil.rmtree(TMP, ignore_errors=True)
 
 ok_n = sum(1 for _, ok, _ in results if ok)
 print("\n%d/%d 通过" % (ok_n, len(results)))

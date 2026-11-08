@@ -729,28 +729,20 @@ pub fn channel_serves_model(u: &Value, model: &str, global_hide: bool, transpare
 }
 
 pub fn model_routable(model: &str, hide_mapped_global: bool) -> bool {
-    let mut any_enabled = false;
     let db = store().load();
     let cfg = db.get("config").unwrap_or(&Value::Null);
     let transparent = transparent_upstream(cfg);
-    // 降级链：链名可路由 = 任一成员可路由（成员级路由在请求循环里逐个走）
-    {
-        let chains = parse_model_chains(cfg);
-        if let Some(c) = chains.iter().find(|c| c.name == model) {
-            return c.members.iter().any(|m| model_routable(m, hide_mapped_global));
-        }
+    let ups: Vec<&Value> = db.get("upstreams").and_then(Value::as_array)
+        .map(|a| a.iter().filter(|u| u.get("enabled").map(util::truthy).unwrap_or(false)).collect())
+        .unwrap_or_default();
+    let plain = |name: &str| ups.is_empty() || ups.iter()
+        .any(|u| channel_serves_model(u, name, hide_mapped_global, transparent));
+    // Nested chains are unsupported; imported legacy configuration must not recurse.
+    let chains = parse_model_chains(cfg);
+    if let Some(c) = chains.iter().find(|c| c.name == model) {
+        return c.members.iter().filter(|m| !chains.iter().any(|other| &other.name == *m)).any(|m| plain(m));
     }
-    let ups = db.get("upstreams").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-    for u in &ups {
-        if !u.get("enabled").map(|x| util::truthy(x)).unwrap_or(false) {
-            continue;
-        }
-        any_enabled = true;
-        if channel_serves_model(u, model, hide_mapped_global, transparent) {
-            return true;
-        }
-    }
-    !any_enabled
+    plain(model)
 }
 
 /// 某模型是否被该渠道的「隐原名」规则挡住（只对 model_map 的目标名生效）。
@@ -1508,5 +1500,24 @@ mod curated_tests {
             d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
             if let Some(v) = saved { d["config"] = v; }
         });
+    }
+}
+
+#[cfg(test)]
+mod legacy_chain_regression_tests {
+    use super::*;
+
+    #[test]
+    fn imported_cyclic_chains_do_not_recurse() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["config"]["model_chains"] = json!("a = b, missing\nb = a, missing");
+            db["config"]["transparent_upstream"] = json!(false);
+            db["upstreams"] = json!([{"enabled":true,"models":["available"]}]);
+        });
+        assert!(!model_routable("a", true));
+        assert!(model_routable("available", true));
+        store().update(|db| *db = saved);
     }
 }

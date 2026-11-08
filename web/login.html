@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>言灵中转 · 登录</title>
-<link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" rel="stylesheet">
+<link href="/assets/vendor/bootstrap.min.css" rel="stylesheet">
 <style>
 body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
   background:radial-gradient(1200px 600px at 20% -10%,#1d3561 0%,transparent 60%),
@@ -26,32 +26,42 @@ body{min-height:100vh;display:flex;align-items:center;justify-content:center;pad
 .btn-primary:hover{background:linear-gradient(135deg,#2a5ce0,#1f4fd0);box-shadow:0 6px 20px rgba(37,99,235,.45);transform:translateY(-1px)}
 .err{display:none;color:#dc2626;font-size:13px;margin-bottom:10px}
 </style>
+<link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
 </head>
-<body>
+<body data-page="login">
   <div class="card-login">
     <div class="mark">言</div>
     <div class="h-title">言灵中转</div>
     <div class="h-sub">管理后台</div>
-    <div id="login-err" class="err"></div>
+    <div id="login-err" class="err" role="alert"></div>
     <form id="login-form">
       <div class="mb-3">
-        <input type="text" class="form-control" name="username" placeholder="账号" autofocus required>
+        <label class="form-label" for="admin-user">账号</label>
+        <input id="admin-user" type="text" class="form-control" name="username" autocomplete="username" autofocus required>
       </div>
       <div class="mb-4">
-        <input type="password" class="form-control" name="password" placeholder="密码" required>
+        <label class="form-label" for="admin-password">密码</label>
+        <input id="admin-password" type="password" class="form-control" name="password" autocomplete="current-password" required>
       </div>
       <button class="btn btn-primary">登录</button>
     </form>
 <script>
-document.getElementById('login-form').addEventListener('submit', async (e) => {
+document.getElementById('login-form').addEventListener('submit', async e => {
   e.preventDefault();
+  const button = e.target.querySelector('button');
+  if (button.disabled) return;
+  const error = document.getElementById('login-err');
   const fd = new FormData(e.target);
-  const r = await fetch('/api/login', {method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({username: fd.get('username'), password: fd.get('password')})});
-  if (r.ok) { location.href = '/admin'; }
-  else { const d = await r.json().catch(() => ({}));
-    document.getElementById('login-err').textContent = (d.error && d.error.message) || '登录失败';
-    document.getElementById('login-err').style.display = 'block'; }
+  error.style.display = 'none'; button.disabled = true; button.textContent = '登录中…';
+  try {
+    const response = await fetch('/api/login', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: fd.get('username'), password: fd.get('password')})});
+    if (response.ok) { location.href = '/admin'; return; }
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error?.message || '登录失败，请稍后重试');
+  } catch (e) {
+    error.textContent = e.message || '无法连接服务，请稍后重试'; error.style.display = 'block';
+  } finally { button.disabled = false; button.textContent = '登录'; }
 });
 </script>
   </div>

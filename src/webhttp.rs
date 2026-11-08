@@ -18,6 +18,45 @@ pub fn csrf_header_matches(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|value| !expected.is_empty() && bool::from(value.as_bytes().ct_eq(expected.as_bytes())))
 }
 
+pub fn constant_time_token(expected: &str, actual: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    !expected.is_empty() && bool::from(expected.as_bytes().ct_eq(actual.as_bytes()))
+}
+
+pub fn login_throttled() -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({"error":{"message":"尝试过于频繁，请 5 分钟后重试","type":"auth"}})),
+    ).into_response();
+    response.headers_mut().insert("retry-after", HeaderValue::from_static("300"));
+    response
+}
+
+/// Password work must not occupy Tokio workers or build an unbounded blocking queue.
+pub async fn password_work<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, Response> {
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let Ok(permit) = SLOTS.try_acquire() else {
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error":{"message":"账户服务繁忙，请稍后重试"}}))).into_response();
+        response.headers_mut().insert("retry-after", HeaderValue::from_static("2"));
+        return Err(response);
+    };
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    }).await.map_err(|_| (StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({"error":{"message":"账户服务暂不可用，请稍后重试"}}))).into_response())
+}
+
+pub async fn verify_login_password(password: String, stored: Option<String>) -> Result<bool, Response> {
+    password_work(move || {
+        static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let hash = stored.as_deref().unwrap_or_else(|| DUMMY.get_or_init(|| crate::store::hash_password("ngw-dummy")));
+        let valid = crate::store::verify_password(&password, hash);
+        stored.is_some() && valid
+    }).await
+}
+
 pub const FALLBACK_MODELS: &[&str] = &[
     "deepseek-ai/deepseek-r1",
     "deepseek-ai/deepseek-v3",
@@ -40,6 +79,21 @@ pub mod web_assets {
     pub const USER_JS: &str = include_str!("../web/user.js");
     pub const WEBCLAW_HTML: &str = include_str!("../web/webclaw.html");
     pub const WEBCLAW_JS: &str = include_str!("../web/webclaw.js");
+}
+
+pub fn bundled_asset(name: &str) -> Option<(&'static str, &'static [u8])> {
+    match name {
+        "ui.css" => Some(("text/css; charset=utf-8", include_bytes!("../web/ui.css"))),
+        "ui.js" => Some(("application/javascript; charset=utf-8", include_bytes!("../web/ui.js"))),
+        "vendor/bootstrap.min.css" => Some(("text/css; charset=utf-8", include_bytes!("../web/vendor/bootstrap.min.css"))),
+        "vendor/bootstrap-icons.min.css" => Some(("text/css; charset=utf-8", include_bytes!("../web/vendor/bootstrap-icons.min.css"))),
+        "vendor/bootstrap.bundle.min.js" => Some(("application/javascript; charset=utf-8", include_bytes!("../web/vendor/bootstrap.bundle.min.js"))),
+        "vendor/marked.min.js" => Some(("application/javascript; charset=utf-8", include_bytes!("../web/vendor/marked.min.js"))),
+        "vendor/purify.min.js" => Some(("application/javascript; charset=utf-8", include_bytes!("../web/vendor/purify.min.js"))),
+        "vendor/fonts/bootstrap-icons.woff2" => Some(("font/woff2", include_bytes!("../web/vendor/fonts/bootstrap-icons.woff2"))),
+        "vendor/fonts/bootstrap-icons.woff" => Some(("font/woff", include_bytes!("../web/vendor/fonts/bootstrap-icons.woff"))),
+        _ => None,
+    }
 }
 
 pub fn cors_headers() -> Vec<(String, String)> {

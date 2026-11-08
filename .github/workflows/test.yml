@@ -24,8 +24,24 @@ jobs:
           node --check web/admin.js
           node --check web/user.js
           node --check web/webclaw.js
+          node --check web/ui.js
+          node tests/frontend-console.cjs
           node tests/frontend-rewards.cjs
       - name: Check WebClaw project file format and send path
         run: |
           node tests/frontend-webclaw.cjs
           node tests/frontend-webclaw-send.cjs
+
+  console-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --locked
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Console HTTP and browser regressions
+        run: python tests/console_e2e.py --ui
