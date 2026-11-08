@@ -48,4 +48,5 @@ jobs:
         run: |
           python tests/console_e2e.py
           python tests/billing_e2e.py
+          python tests/device_e2e.py
           python tests/console_e2e.py --ui

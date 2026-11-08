@@ -134,7 +134,7 @@ mod reservation_tests {
         let held = reserve("budget-test","budget-channel","budget-model",&json!({}),10,false).unwrap();
         assert!(reserve("budget-test","budget-channel","budget-model",&json!({}),10,false).is_err());
         store.update(|db|db["upstreams"][0]["prices"]["budget-model"]=json!(0.9));
-        let charged=crate::users::bill("budget-test","key","budget-channel","budget-model","upstream-model",200,1,10,20,false,Some(&held.pricing));
+        let charged=crate::users::bill("budget-test","key","","budget-channel","budget-model","upstream-model",200,1,10,20,false,Some(&held.pricing));
         assert_eq!(charged,0.6);
         assert_eq!(crate::users::balance_of(&crate::users::auth_user("budget-test").unwrap()),0.4);
         drop(held);

@@ -1,6 +1,8 @@
 //! 入口：路由、静态页、看门狗、定时落盘、自重启。
 
 mod admin;
+mod device;
+mod oauth;
 mod billing;
 mod convert;
 mod bridge;
@@ -1258,6 +1260,15 @@ fn cli_reset_password(pw: &str) -> i32 {
 fn build_router() -> Router {
     Router::new()
         // /v1 数据面
+        .route("/api/oauth/providers", get(oauth::providers))
+        .route("/api/oauth/github", get(oauth::start))
+        .route("/api/oauth/github/callback", get(oauth::callback))
+        .route("/api/device/code", post(device::code))
+        .route("/api/device/token", post(device::token).delete(device::revoke))
+        .route("/api/device/authorize", post(device::decide))
+        .route("/user/device", get(device::page))
+        .route("/v1/me", get(device::me))
+        .route("/v1/usage", get(device::usage))
         .route("/v1/models", get(h_v1_models).options(h_options))
         .route("/v1/models/", get(h_v1_models).options(h_options))
         .route("/v1/chat/completions", post(h_chat).options(h_options))

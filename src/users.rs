@@ -968,6 +968,7 @@ pub fn check_user_rpm(user_id: &str, kind: &str, rpm: i64) -> Result<(), f64> {
 pub fn bill(
     user_id: &str,
     key_id: &str,
+    client: &str,
     channel_id: &str,
     model: &str,
     upstream_model: &str,
@@ -985,6 +986,7 @@ pub fn bill(
         "t": now,
         "user_id": user_id,
         "key_id": key_id,
+        "client": util::str_cut(client,80),
         "model": util::str_cut(model, 80),
         "up_model": util::str_cut(upstream_model, 80),
         "channel": channel_id,
@@ -1011,6 +1013,17 @@ pub fn bill(
     store().update(|db| {
         // 旧版混存表（单数组、全局上限）拆分为付费/免费两张表（caps 已在锁外读取）
         split_legacy_user_logs(db, legacy_caps);
+        let day=chrono::Utc::now().date_naive().to_string();
+        if !db["device_usage"].is_object() {db["device_usage"]=json!({});}
+        if !db["device_usage"][user_id].is_object() {db["device_usage"][user_id]=json!({});}
+        let days=db["device_usage"][user_id].as_object_mut().unwrap();
+        let cutoff=(chrono::Utc::now().date_naive()-chrono::Duration::days(90)).to_string();
+        days.retain(|d,_|d>=&cutoff);
+        let r=days.entry(day).or_insert_with(||json!({"requests":0,"input_tokens":0,"output_tokens":0,"cost":0.0}));
+        r["requests"]=json!(r["requests"].as_i64().unwrap_or(0)+1);
+        r["input_tokens"]=json!(r["input_tokens"].as_i64().unwrap_or(0)+in_tok.max(0));
+        r["output_tokens"]=json!(r["output_tokens"].as_i64().unwrap_or(0)+out_tok.max(0));
+        r["cost"]=json!(util::round6(r["cost"].as_f64().unwrap_or(0.0)+cost));
         // 日志：插入该用户的分表，并只把「该用户」的条数截到保留上限
         {
             let obj = db.as_object_mut().unwrap();

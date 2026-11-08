@@ -124,6 +124,7 @@ a{text-decoration:none}
     <div class="login-sub">用户中心</div>
     <div class="login-err" id="login-err"></div>
     <div id="login-tab-main">
+      <a id="github-login" class="btn btn-outline-secondary w-100 mb-3" hidden>使用 GitHub 登录</a>
       <div class="mb-3"><label class="form-label small fw-semibold">账号 / 邮箱</label>
         <input class="form-control" id="login-user" autocomplete="username"></div>
       <div class="mb-3"><label class="form-label small fw-semibold">密码</label>
@@ -174,6 +175,7 @@ a{text-decoration:none}
     <div class="nav-label">账户</div>
     <a href="javascript:void(0)" data-p="overview" class="active"><i class="bi bi-speedometer2"></i>概览</a>
     <div class="nav-label">开发</div>
+    <a href="javascript:void(0)" data-p="devices"><i class="bi bi-laptop"></i>已授权设备</a>
     <a href="javascript:void(0)" data-p="keys"><i class="bi bi-key"></i>API Key</a>
     <a href="javascript:void(0)" data-p="logs"><i class="bi bi-list-ul"></i>调用日志</a>
     <a href="javascript:void(0)" data-p="models"><i class="bi bi-grid-3x3-gap"></i>模型广场</a>
@@ -251,6 +253,7 @@ a{text-decoration:none}
   </div>
 </div>
 
+<div class="pane" id="pane-devices"><h2 class="pane-title">已授权设备</h2><div id="device-list"></div></div>
 <div class="pane" id="pane-keys">
   <h2 class="pane-title">API Key</h2>
   <div class="card mb-3"><div class="card-body">

@@ -114,6 +114,8 @@ function resetTokenFromUrl() {
   return new URLSearchParams(location.search).get('reset') || '';
 }
 function showPanel() {
+  const deviceCode = new URLSearchParams(location.search).get('device');
+  if (deviceCode) { location.replace('/user/device?code=' + encodeURIComponent(deviceCode)); return; }
   $('#login-view').style.display = 'none';
   $('#panel-view').style.display = 'block';
 }
@@ -366,7 +368,7 @@ function activateUser(name, loaded = false) {
   });
   document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
-  const loaders = {overview: loadMe, keys: loadKeys, logs: loadLogs, models: loadModels};
+  const loaders = {overview: loadMe, keys: loadKeys, devices: loadDevices, logs: loadLogs, models: loadModels};
   if (Object.hasOwn(loaders, name) && !(loaded && name === 'overview')) run(loaders[name]);
 }
 document.querySelectorAll('.sidebar nav a[data-p]').forEach(a => {
@@ -514,3 +516,8 @@ function bindLoginTabs() {
     if (e.status !== 401) lgErr(e.message || '暂时无法连接服务，请稍后重试');
   }
 })();
+
+async function loadDevices(){const r=await api('keys');const box=document.getElementById('device-list');if(!box)return;box.replaceChildren();for(const t of (r.rows||[]).filter(t=>t.device_client==='01code')){const row=document.createElement('div');row.className='d-flex align-items-center gap-3 mb-3';const text=document.createElement('span');text.textContent=t.name+' · '+(t.device_ip||'')+' · '+fmtTime(t.created_at)+(t.enabled?'':' · 已撤销');const btn=document.createElement('button');btn.className='btn btn-sm btn-outline-danger';btn.textContent='撤销';btn.disabled=!t.enabled;btn.onclick=()=>run(async()=>{await api('keys/op',{method:'POST',json:{id:t.id,op:'disable'}});await loadDevices();});row.append(text,btn);box.append(row);}if(!box.children.length)box.textContent='暂无已授权设备';}
+
+
+fetch('/api/oauth/providers').then(r=>r.json()).then(p=>{if(p.github){const a=document.getElementById('github-login');a.hidden=false;a.href='/api/oauth/github?device='+encodeURIComponent(new URLSearchParams(location.search).get('device')||'');}}).catch(()=>{});

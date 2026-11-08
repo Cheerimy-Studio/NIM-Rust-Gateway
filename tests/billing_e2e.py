@@ -42,7 +42,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='ngw-billing-') as tmp:
         with open(Path(tmp)/'stderr.log','w+') as log:
             process = subprocess.Popen([os.environ.get('NGW_GW_EXE',str(ROOT/'target/debug/nim-gateway')),'--port',str(port)],cwd=ROOT,
-                env={**os.environ,'NGW_DATA_DIR':tmp,'NGW_ADMIN_PASSWORD':password},stdout=subprocess.DEVNULL,stderr=log)
+                env={**os.environ,'NGW_DATA_DIR':tmp,'NGW_ADMIN_PASSWORD':password,'NGW_PUBLIC_ORIGIN':'https://gateway.example','NGW_TRUSTED_PROXIES':'127.0.0.1'},stdout=subprocess.DEVNULL,stderr=log)
             try:
                 with httpx.Client(base_url=base,trust_env=False,timeout=30) as admin, httpx.Client(base_url=base,trust_env=False,timeout=30) as user:
                     for _ in range(150):
@@ -66,7 +66,7 @@ def main():
                     check(any(row['price']==price for row in admin.get('/api/prices').json()['rows']),'模型标注不抹掉 token 定价')
                     r=admin.post('/api/users',json={'username':'billing-user','password':password,'balance':10});check(r.status_code==200,'创建计费用户')
                     r=user.post('/api/user/login',json={'username':'billing-user','password':password});check(r.status_code==200,'用户登录');user.headers['X-CSRF']=r.json()['csrf']
-                    key=user.post('/api/user/test-key').json()['key']; headers={'Authorization':'Bearer '+key,'X-NGW-Skip-Training':'1'}
+                    key=user.post('/api/user/test-key').json()['key']; headers={'Authorization':'Bearer '+key,'X-NGW-Skip-Training':'1','X-01Code-Client':'01Code/0.2.1'}
                     user.post('/api/user/keys',json={'name':'free-only','kind':'free'})
                     check(user.post('/api/user/test-key').json()['key']==key,'WebClaw 不复用免费专用 Key')
                     paid_key=user.post('/api/user/keys',json={'name':'paid-only','kind':'paid'}).json()['key']['key']
@@ -82,6 +82,9 @@ def main():
                             check(abs(actual-expected)<.0000001,f'{endpoint} stream={stream} 按实际 token 及档位扣费: actual={actual} expected={expected}')
                     logs=user.get('/api/user/logs').json()['rows']
                     check(len(logs)==6 and all(r['billing']['mode']=='token' and r['billing']['min_input']==100 and r['model']=='token-model' for r in logs),'所有协议和路由日志保留实际计费模型及价格档位')
+                    check(all(r.get('client')=='01Code/0.2.1' for r in logs),'01Code 客户端版本写入调用日志')
+                    daily=user.get('/v1/usage?days=7',headers={'Authorization':'Bearer '+key,'X-Forwarded-Proto':'https'}).json()
+                    check(sum(r['requests'] for r in daily)==6 and sum(r['input_tokens'] for r in daily)==600 and sum(r['output_tokens'] for r in daily)==120,'日聚合保留六次调用与完整 token')
                     square=user.get('/api/user/models').json()['rows']; check(any(m['model']=='route' and any(p['rule']==price for p in m['pricing']) for m in square),'模型广场披露路由成员 token 价格')
                     before=len(Upstream.calls)
                     # Separate zero-balance user verifies preflight without relying on adjustment semantics.

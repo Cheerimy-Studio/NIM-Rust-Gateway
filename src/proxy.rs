@@ -1325,6 +1325,7 @@ fn member_gate_error(st: i64, code: &str, msg: &str, anthropic: bool) -> Respons
 pub struct UserCtx {
     pub id: String,
     pub key_id: String,
+    pub client: String,
     pub kind: &'static str,
     pub charge: Option<std::sync::Arc<crate::billing::Reservation>>,
 }
@@ -1817,7 +1818,7 @@ async fn run_pump(
     if st == ctx.status && !client_gone && truncated.is_empty() {
         if let Some(uc) = &ctx.user {
             crate::users::bill(
-                &uc.id, &uc.key_id,
+                &uc.id, &uc.key_id, &uc.client,
                 &util::str_or(key.get("upstream_id"), ""),
                 uc.charge.as_ref().map(|c| c.model.as_str()).unwrap_or(&ctx.model), &ctx.up_model,
                 st, ms,
@@ -1889,6 +1890,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             match crate::users::lookup_user_key(&b) {
                 Some((u, t)) => {
                     user_ctx = Some(UserCtx {
+                        client: ctx.headers.get("x-01code-client").and_then(|v|v.to_str().ok()).map(|v| util::str_cut(v,80)).unwrap_or_default(),
                         id: util::str_or(u.get("id"), ""),
                         key_id: util::str_or(t.get("id"), ""),
                         kind: crate::users::key_kind(&t),
@@ -2657,7 +2659,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         if success {
             if let Some(uc) = &user_ctx {
                 crate::users::bill(
-                    &uc.id, &uc.key_id,
+                    &uc.id, &uc.key_id, &uc.client,
                     &util::str_or(key.get("upstream_id"), ""),
                     &model, &up_model,
                     rstatus, ms,
@@ -3052,6 +3054,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             match crate::users::lookup_user_key(&b) {
                 Some((u, t)) => {
                     user_ctx = Some(UserCtx {
+                        client: ctx.headers.get("x-01code-client").and_then(|v|v.to_str().ok()).map(|v| util::str_cut(v,80)).unwrap_or_default(),
                         id: util::str_or(u.get("id"), ""),
                         key_id: util::str_or(t.get("id"), ""),
                         kind: crate::users::key_kind(&t),
@@ -3811,7 +3814,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         if success {
             if let Some(uc) = &user_ctx {
                 crate::users::bill(
-                    &uc.id, &uc.key_id,
+                    &uc.id, &uc.key_id, &uc.client,
                     &util::str_or(key.get("upstream_id"), ""),
                     &model, &up_model,
                     rstatus, ms,
@@ -4166,7 +4169,7 @@ mod tests {
                     body:"{}".into(), ip:"test".into(), tok:"test".into(), status:200, attempt:1,
                     t0:Instant::now(), rewrite:true, heartbeat:true, ttfb_deadline:1.0,
                     protocol:protocol.map(str::to_string), capture_train:false,
-                    user:Some(UserCtx {id:"user".into(),key_id:"key".into(),kind:"all",charge:None}), want_usage:protocol.is_none(),
+                    user:Some(UserCtx {id:"user".into(),key_id:"key".into(),client:String::new(),kind:"all",charge:None}), want_usage:protocol.is_none(),
                     recovery:None,
                 };
                 let output = spawn_pump(response, key, first, ctx);

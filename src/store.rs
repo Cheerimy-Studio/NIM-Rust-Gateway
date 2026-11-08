@@ -72,6 +72,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("queue", &["queue"]),
     ("users", &["users", "user_tokens", "user_logs", "user_logs_paid", "user_logs_free", "user_rpm", "fund_logs"]),
     ("mail", &["email_codes", "pw_resets"]),
+    ("device_usage", &["device_usage"]),
     (
         "metrics",
         &[
