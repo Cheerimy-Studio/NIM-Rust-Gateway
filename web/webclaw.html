@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>模型测试 · WebClaw</title>
+<title>浏览器 Agent · WebClaw</title>
 <link href="/assets/vendor/bootstrap.min.css" rel="stylesheet">
 <link href="/assets/vendor/bootstrap-icons.min.css" rel="stylesheet">
 <script defer src="/assets/vendor/marked.min.js"></script>
@@ -84,7 +84,7 @@ a{text-decoration:none}
 .cred{display:flex;gap:6px;align-items:center}
 .cred .form-control-sm{max-width:360px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
 .cred .hint{font-size:11.5px;color:#98a3b8}
-.chat{flex:1;min-height:260px;max-height:calc(100vh - 340px);overflow:auto;padding:14px 16px}
+.chat{flex:1;min-height:280px;max-height:calc(100vh - 410px);overflow:auto;padding:14px 16px}
 .chat-empty{font-size:12.5px;color:#98a3b8}
 .tmsg{max-width:78%;white-space:pre-wrap;word-break:break-word;padding:.5rem .78rem;
   border-radius:var(--r-lg);font-size:13px;line-height:1.55;box-shadow:0 1px 2px rgba(15,23,42,.05)}
@@ -151,13 +151,15 @@ a{text-decoration:none}
   .content{padding:14px}
   .chat{max-height:46vh}
 }
+.workspace-panel{padding:10px 14px}.workspace-panel summary{cursor:pointer;font-weight:600}.workspace-files{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.workspace-file{display:flex;gap:4px;align-items:center;padding:4px 8px;border:1px solid var(--line);border-radius:8px}.workspace-file button{border:0;background:transparent;color:var(--acc);font-size:12px}.workspace-file button:last-child{color:var(--mut)}
 </style>
 <link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
+<script src="/assets/ui.js?v={{VERSION}}"></script>
 </head>
 <body data-page="webclaw">
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><span class="mark">W</span><span class="bt">WebClaw<small>模型测试</small></span></div>
+    <div class="brand"><span class="mark">W</span><span class="bt">WebClaw<small>浏览器 Agent</small></span></div>
     <div class="side-body">
       <div class="nav-label">项目</div>
       <button id="wc-new" class="side-btn primary"><i class="bi bi-plus-lg"></i>新建项目</button>
@@ -166,13 +168,13 @@ a{text-decoration:none}
         <button id="wc-export-all" class="side-btn" title="全部项目导出为一个文件">导出全部</button>
         <button id="wc-import" class="side-btn" title="导入之前导出的文件">导入</button>
       </div>
-      <div class="side-note">项目存在本机浏览器，不随网关同步。换设备请先导出。</div>
+      <div class="side-note">项目和工作区文件保存在本机浏览器。换设备或清理浏览器前请先导出。</div>
     </div>
     <div class="foot"><a href="/admin"><i class="bi bi-arrow-left"></i>返回后台</a></div>
   </aside>
 
   <main class="content">
-    <h2 class="pane-title">模型测试<span class="sub" id="wc-hint"></span></h2>
+    <h2 class="pane-title">浏览器 Agent<span class="sub" id="wc-hint"></span></h2>
 
     <div class="toolbar">
       <select id="wc-model" class="form-select form-select-sm"></select>
@@ -181,6 +183,7 @@ a{text-decoration:none}
         <input class="form-check-input" type="checkbox" id="wc-stream" checked>
         <label class="form-check-label small" for="wc-stream">流式</label>
       </div>
+      <label class="form-check m-0"><input id="wc-agent" class="form-check-input" type="checkbox">启用本地工具</label>
       <button id="wc-reload" class="btn btn-sm btn-outline-secondary">刷新模型</button>
       <button id="wc-clear" class="btn btn-sm btn-outline-secondary">清空对话</button>
       <span class="spacer"></span>
@@ -195,7 +198,17 @@ a{text-decoration:none}
       <span class="hint" id="wc-scope"></span>
     </div>
 
-    <div class="card chat" id="wc-chat"></div>
+    <details class="card workspace-panel">
+      <summary>工作区文件 <span id="wc-workspace-status" class="text-muted small"></span></summary>
+      <div class="d-flex flex-wrap gap-2 mt-2">
+        <button id="wc-attach" class="btn btn-sm btn-outline-primary">添加文本文件</button>
+        <button id="wc-directory" class="btn btn-sm btn-outline-secondary">连接本机目录</button>
+        <button id="wc-disconnect" class="btn btn-sm btn-outline-secondary" hidden>断开目录</button>
+      </div>
+      <div id="wc-files" class="workspace-files"></div>
+      <p class="small text-muted mb-0 mt-2">工具在当前浏览器执行，项目不向服务器同步。读取的文件内容会随对话发送给所选模型；写入本机目录前会逐次确认。每轮任务最多 8 次模型请求。目录连接在刷新后失效。</p>
+    </details>
+    <div class="card chat" id="wc-chat" aria-live="polite"></div>
 
     <div class="composer">
       <textarea id="wc-input" class="form-control form-control-sm" rows="2"
@@ -220,8 +233,10 @@ a{text-decoration:none}
   </main>
 </div>
 
+<input type="file" id="wc-attach-file" accept="text/*,.md,.json,.csv,.rs,.js,.ts,.py,.html,.css,.toml,.yaml,.yml,.xml,.log" multiple hidden>
 <input type="file" id="wc-import-file" accept="application/json,.json" hidden>
 <script>window.NGW = {base: "/", csrf: "{{CSRF}}", mode: "{{MODE}}", who: "{{WHO}}"};</script>
+<script src="/assets/webclaw-agent.js?v={{VERSION}}"></script>
 <script src="/assets/webclaw.js?v={{VERSION}}"></script>
 </body>
 </html>

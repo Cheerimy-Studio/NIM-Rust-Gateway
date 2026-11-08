@@ -1,5 +1,5 @@
 // WebClaw 项目文件格式与导入导出回归测试。
-// 与 tests/frontend-rewards.cjs 同一套路：切出纯逻辑，在 vm 里跑，不依赖浏览器。
+// 切出纯逻辑，在 vm 里跑，不依赖浏览器。
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -32,7 +32,9 @@ assert.ok(limitLines.length >= 5, '上限常量缺失');
 const code = [
   uidLine[0],
   ...limitLines,
+  'const AGENT = undefined;',
   fn('clip'),
+  fn('sanitizeCalls'),
   fn('blankProject'),
   fn('normalizeStored'),
   fn('projectForExport'),

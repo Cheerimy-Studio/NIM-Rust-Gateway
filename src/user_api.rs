@@ -285,7 +285,7 @@ pub async fn register_send_code(ip: String, _headers: &HeaderMap, body: Bytes) -
     json_resp(json!({"ok": true, "message": "验证码已发送，请在 10 分钟内完成注册"}))
 }
 
-/// 邮箱注册。body: {email, password, inv?}
+/// 邮箱注册。body: {email, password, code}
 pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response {
     // 简单速率限制：复用登录失败限流（同一 IP）
     if !crate::admin::login_rate_ok(&format!("register:{ip}")) {
@@ -298,9 +298,8 @@ pub async fn register(ip: String, headers: &HeaderMap, body: Bytes) -> Response 
     let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let email = util::str_or(body_v.get("email"), "").trim().to_lowercase();
     let password = util::str_or(body_v.get("password"), "");
-    let inv = util::str_or(body_v.get("inv"), "");
     let code = util::str_or(body_v.get("code"), "");
-    let (row, err) = match password_work(move || users::email_register(&email, &password, &inv, &code)).await {
+    let (row, err) = match password_work(move || users::email_register(&email, &password, &code)).await {
         Ok(result) => result,
         Err(response) => return response,
     };
@@ -441,174 +440,10 @@ pub async fn reset_pw(body: Bytes) -> Response {
     }
 }
 
-// ---------------- 拉人活动（会话内） ----------------
-
-/// 我的拉人活动总览：所有进行中活动 + 我的进度 + 邀请链接
-pub async fn promo_overview(headers: &HeaderMap) -> Response {
-    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
-    let cfg = store().load();
-    let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
-    // 站在反代后面时从转发头推断协议，拼给用户的链接（邀请/找回重置）才不跑偏。
-    // 只认 http/https，转发头畸形（多值、大小写、垃圾值）时一律落回 http，
-    // 并兼容 X-Forwarded-SSL: on 与 Cloudflare 的 Cf-Visitor
-    let xfp = headers
-        .get("x-forwarded-proto")
-        .and_then(|x| x.to_str().ok())
-        .map(|p| p.split(',').next().unwrap_or("").trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    let forwarded_ssl_on = headers
-        .get("x-forwarded-ssl")
-        .and_then(|x| x.to_str().ok())
-        .map(|x| x.trim().eq_ignore_ascii_case("on"))
-        .unwrap_or(false);
-    let cf_https = headers
-        .get("cf-visitor")
-        .and_then(|x| x.to_str().ok())
-        .map(|x| x.contains("https"))
-        .unwrap_or(false);
-    let proto = if xfp == "https" || xfp == "http" {
-        xfp
-    } else if forwarded_ssl_on || cf_https {
-        "https".into()
-    } else {
-        "http".into()
-    };
-    let host = headers.get("host").and_then(|x| x.to_str().ok()).unwrap_or("").to_string();
-    let base = format!("{}://{}/user", proto, host);
-    let events = crate::promo::admin_list()
-        .into_iter()
-        .filter(|e| {
-            e.get("enabled").map(util::truthy).unwrap_or(false)
-                && !e.get("expired").map(util::truthy).unwrap_or(false)
-        })
-        .map(|e| {
-            let id = util::str_or(e.get("id"), "");
-            // 用户侧返回 my_status 进度 + 展示字段；绝不透出管理端聚合数据
-            let mut mine = crate::promo::my_status(&id, &uid);
-            let link_rel = util::str_or(mine.get("link"), "");
-            if let Some(o) = mine.as_object_mut() {
-                o.insert("id".into(), json!(id));
-                o.insert("link_full".into(), json!(format!("{}{}", base, link_rel)));
-                o.insert("name".into(), e.get("name").cloned().unwrap_or(json!("拉人活动")));
-                o.insert("amount".into(), e.get("amount").cloned().unwrap_or(json!(0)));
-                o.insert("target".into(), e.get("target").cloned().unwrap_or(json!(1)));
-                o.insert("enabled".into(), e.get("enabled").cloned().unwrap_or(json!(false)));
-                // 到期时间取两侧较大者：管理端给 0 时不能把 my_status 里的真实值
-                // 覆盖成 0，否则前端剩余天数永远算成 0
-                let exp = util::int_or(e.get("expires_at"), 0)
-                    .max(util::int_or(o.get("expires_at"), 0));
-                o.insert("expires_at".into(), json!(exp));
-            }
-            mine
-        })
-        .collect::<Vec<_>>();
-    json_resp(json!({
-        "events": events,
-        "reg_enabled": cfgc.get("reg_email_enabled").map(util::truthy).unwrap_or(false),
-        "doubler": crate::promo::doubler_count(&uid),
-    }))
-}
-
-/// 加入活动
-pub async fn promo_join(headers: &HeaderMap, body: Bytes) -> Response {
-    let Ok(uid) = user_require(headers, true) else { return user_require_err() };
-    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let id = util::str_or(body_v.get("id"), "");
-    match crate::promo::join(&id, &uid) {
-        Ok(st) => json_resp(json!({"ok": true, "status": st})),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": e}})),
-        )
-            .into_response(),
-    }
-}
-
-/// 领取阶段奖励/提现。body: {id, step}
-pub async fn promo_claim(headers: &HeaderMap, body: Bytes) -> Response {
-    let Ok(uid) = user_require(headers, true) else { return user_require_err() };
-    let body_v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let id = util::str_or(body_v.get("id"), "");
-    let step = util::int_or(body_v.get("step"), 1);
-    match crate::promo::claim(&id, &uid, step) {
-        Ok(st) => json_resp(json!({"ok": true, "status": st})),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": e}})),
-        )
-            .into_response(),
-    }
-}
-
 pub async fn wallet(headers: &HeaderMap) -> Response {
     let Ok(uid) = user_require(headers, false) else { return user_require_err() };
     let Some(u) = users::auth_user(&uid) else { return user_require_err() };
     json_resp(json!({"wallet": users::wallet_row(&u)}))
-}
-
-/// 用户端转盘列表（不含真实权重）。
-pub async fn wheels(headers: &HeaderMap) -> Response {
-    if let Err(e) = user_require(headers, false) { return e; }
-    json_resp(json!({"rows": crate::wheel::user_wheels()}))
-}
-
-/// 抽奖（POST /api/user/wheels/draw {id}）。
-pub async fn wheels_draw(headers: &HeaderMap, body: Bytes) -> Response {
-    let Ok(uid) = user_require(headers, true) else { return user_require_err() };
-    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
-        )
-            .into_response();
-    };
-    let id = util::str_or(body.get("id"), "");
-    let use_credit = body.get("use_credit").map(util::as_bool2).unwrap_or(false);
-    let request_id = match body.get("request_id") {
-        None => "",
-        Some(Value::String(id)) => id.as_str(),
-        _ => return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":"抽奖请求 ID 无效"}}))).into_response(),
-    };
-    let expected_cost = match body.get("expected_cost") {
-        None => None,
-        Some(v) => match v.as_f64().filter(|n| n.is_finite() && *n >= 0.0) {
-            Some(n) => Some(n),
-            None => return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":"抽奖费用格式错误"}}))).into_response(),
-        }
-    };
-    let requested_at=match body.get("requested_at") {
-        None => None,
-        Some(v) => match v.as_i64().filter(|n|*n>0) {
-            Some(at) => Some(at),
-            None => return (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":"抽奖时间格式错误"}}))).into_response(),
-        }
-    };
-    let (ok, body) = crate::wheel::draw(&uid, &id, use_credit, request_id, expected_cost, requested_at);
-    if ok {
-        json_resp(body)
-    } else {
-        let status = if body.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str())
-            .map(|m| m.contains("余额不足"))
-            .unwrap_or(false)
-        {
-            StatusCode::PAYMENT_REQUIRED
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        (status, axum::Json(body)).into_response()
-    }
-}
-
-/// 我的奖品 Key（体验卡/专属额度）。
-pub async fn prize_keys(headers: &HeaderMap) -> Response {
-    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
-    json_resp(json!({"rows": crate::wheel::user_prize_keys(&uid)}))
-}
-
-/// 我的抽奖记录。
-pub async fn draw_logs(headers: &HeaderMap) -> Response {
-    let Ok(uid) = user_require(headers, false) else { return user_require_err() };
-    json_resp(json!({"rows": crate::wheel::user_draw_logs(&uid)}))
 }
 
 pub async fn me(headers: &HeaderMap) -> Response {

@@ -185,6 +185,7 @@ fn join_lines(raw: &Value) -> String {
 /// 解析模型价格表：每行 model=价格（元/次），容忍逗号分隔与字面量对象。
 /// 价格 ≤0 或非法的行忽略（忽略即免费）。
 pub fn parse_price_map(raw: &Value) -> Obj {
+    if let Some(map) = raw.as_object() { return map.clone(); }
     let mut out = Obj::new();
     for line in util::literal_items(raw) {
         let line = line.trim();
@@ -450,28 +451,6 @@ pub fn apply_param_overrides(key: &Value, model: &str, body: &mut Value) {
             }
         }
     }
-}
-
-/// 两个模型名是否经由任一启用渠道的 model_map 互通（别名↔目标视为同一模型）。
-/// 奖品 Key/用户体验卡的模型锁定按此口径放行，避免"存目标名、调别名"被拒。
-pub fn models_alias_linked(a: &str, b: &str) -> bool {
-    if a.is_empty() || b.is_empty() || a == b {
-        return a == b;
-    }
-    for u in all_upstreams() {
-        if !u.get("enabled").map(|x| util::truthy(x)).unwrap_or(false) {
-            continue;
-        }
-        if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
-            for (alias, target) in mm {
-                let t = util::str_or(Some(target), "");
-                if (alias == a && t == b) || (alias == b && t == a) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 // ---------------------------------------------------------------- 模型上下文/输出上限
@@ -1069,6 +1048,15 @@ pub fn validate_save(data: &Value) -> (Option<Value>, String) {
 }
 
 pub fn save(data: &Value) -> (Option<Value>, String) {
+    if let Some(prices) = data.get("prices") {
+        let map = parse_price_map(prices);
+        if map.len() > 500 { return (None, "最多配置 500 个模型价格".into()); }
+        for (model, price) in &map {
+            if model.is_empty() || model.chars().count() > 160 || model.chars().any(char::is_control) { return (None, "模型名称无效".into()); }
+            if let Err(e) = crate::billing::validate(price) { return (None, format!("{model}: {e}")); }
+        }
+    }
+
     let (row, err) = validate_save(data);
     let Some(mut row) = row else { return (None, err) };
     let uid_in = util::str_or(data.get("id"), "");

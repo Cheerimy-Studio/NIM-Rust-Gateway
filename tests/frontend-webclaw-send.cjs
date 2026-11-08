@@ -86,6 +86,7 @@ const localStorage = {
 };
 
 let chatCalls = [];
+let agentStep = 0;
 // 流式响应：最后一帧故意不带空行，验证尾帧不丢
 function sseResponse(frames, opts = {}) {
   const enc = new TextEncoder();
@@ -117,6 +118,17 @@ function fetchStub(url, init = {}) {
   if (u.endsWith('/v1/chat/completions')) {
     const body = JSON.parse(init.body || '{}');
     chatCalls.push({body, headers: init.headers});
+    if (body.model === 'agent-model') {
+      agentStep++;
+      const messages = [
+        {tool_calls:[{id:'read1',type:'function',function:{name:'workspace_read',arguments:'{"path":"input.txt"}'}}]},
+        {tool_calls:[{id:'write1',type:'function',function:{name:'workspace_write',arguments:'{"path":"result.md","content":"done"}'}}]},
+        {content:'任务已完成'},
+      ];
+      const msg = messages[Math.min(agentStep-1,2)];
+      if (body.stream) return Promise.resolve(sseResponse(['data: ' + JSON.stringify({choices:[{delta:msg}]} ) + '\n\n', 'data: [DONE]\n\n']));
+      return Promise.resolve({ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({choices:[{message:msg}]})});
+    }
     if (body.model === 'err-model') {
       const txt = '{"error":{"message":"上游炸了","type":"server_error"}}';
       return Promise.resolve({ok: false, status: 500, headers: {get: () => 'application/json'},
@@ -154,6 +166,7 @@ const ctx = vm.createContext({
   performance: {now: () => Date.now()},
   TextDecoder,
   TextEncoder,
+  DOMException,
   AbortController,
   Blob: class { constructor(p) { this.text = String(p[0]); } },
   URL: {createObjectURL: () => 'blob:x', revokeObjectURL() {}},
@@ -167,6 +180,7 @@ const ctx = vm.createContext({
 });
 ctx.window.document = document;
 
+vm.runInContext(fs.readFileSync('web/webclaw-agent.js','utf8'),ctx);
 vm.runInContext(src, ctx);
 
 const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
@@ -275,6 +289,54 @@ const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
     assert.ok(!blob.includes('sk-test'), '令牌出现在 localStorage');
     assert.ok(!/authorization/i.test(blob), '鉴权头出现在 localStorage');
   });
+
+  // Real browser tool runtime + real send loop, with a model stub only.
+  await get('#wc-attach-file').onchange({target:{files:[{name:'input.txt',size:6,text:async()=> 'source'}],value:'x'}});
+  get('#wc-agent').checked = true; get('#wc-agent').onchange();
+  get('#wc-model').value = 'agent-model'; get('#wc-stream').checked = true;
+  get('#wc-input').value = '读取 input.txt 并写入 result.md';
+  await get('#wc-send').onclick();
+  ok('Agent 自动读取、写入并继续请求模型', () => {
+    const saved = JSON.parse(store.get(LS_KEY)); const p = saved.projects.find(p => p.id === saved.active);
+    assert.equal(p.files['result.md'],'done'); assert.equal(agentStep,3);
+    assert.equal(p.messages.at(-1).content,'任务已完成');
+    const calls = chatCalls.filter(c => c.body.model === 'agent-model');
+    assert.equal(calls[0].body.tools.length,3);
+    assert.ok(calls[1].body.messages.some(m => m.role === 'tool' && m.content.includes('source')));
+    assert.ok(calls[2].body.messages.some(m => m.tool_call_id === 'write1'));
+    assert.equal(calls[2].headers['X-NGW-Skip-Training'],'1');
+    assert.ok(!calls[0].body.messages.some(m => m.role === 'user' && m.content === 'source'));
+  });
+  const tool = (name,args) => ({type:'function',function:{name,arguments:JSON.stringify(args)}});
+  const project = {id:'safe',files:{}};
+  for (const path of ['../secret','/etc/passwd','a/../b','C:\\x','__proto__/x']) {
+    await assert.rejects(() => ctx.window.NGW_AGENT.execute(project,tool('workspace_write',{path,content:'x'})));
+  }
+  await assert.rejects(() => ctx.window.NGW_AGENT.execute(project,tool('shell',{command:'echo x'})));
+  const stopped = new AbortController(); stopped.abort();
+  await assert.rejects(() => ctx.window.NGW_AGENT.execute(project,tool('workspace_write',{path:'x',content:'x'}),{signal:stopped.signal}));
+  ok('工具拒绝路径穿越、任意命令和停止后的写入', () => assert.equal(Object.keys(project.files).length,0));
+
+  agentStep = 0;
+  get('#wc-stream').checked = false; get('#wc-input').value = '再做一次';
+  await get('#wc-send').onclick();
+  ok('非流式 Agent 也完成三轮工具循环', () => assert.equal(agentStep,3));
+  let written = '';
+  const directory = {name:'selected',getFileHandle:async()=>({getFile:async()=>({size:3,text:async()=> 'abc'}),createWritable:async()=>({write:async text=>{written=text},close:async()=>{},abort:async()=>{}})})};
+  ctx.window.showDirectoryPicker = async()=>directory;
+  await ctx.window.NGW_AGENT.connect(project);
+  const read = await ctx.window.NGW_AGENT.execute(project,tool('workspace_read',{path:'local.txt'}));
+  assert.equal(read.content,'abc');
+  await assert.rejects(()=>ctx.window.NGW_AGENT.execute(project,tool('workspace_write',{path:'local.txt',content:'new'}),{confirmWrite:async()=>false}));
+  assert.equal(written,'');
+  await ctx.window.NGW_AGENT.execute(project,tool('workspace_write',{path:'local.txt',content:'new'}),{confirmWrite:async()=>true});
+  assert.equal(written,'new');
+  const stopBeforeWrite = new AbortController();
+  await assert.rejects(()=>ctx.window.NGW_AGENT.execute(project,tool('workspace_write',{path:'local.txt',content:'bad'}),{signal:stopBeforeWrite.signal,confirmWrite:async()=>{stopBeforeWrite.abort();return true}}));
+  assert.equal(written,'new');
+  ctx.window.NGW_AGENT.disconnect(project);
+  assert.throws(()=>ctx.window.NGW_AGENT.putFile(project,'too-big.txt','x'.repeat(262145)));
+  ok('本机文件逐次确认，取消或停止不覆盖，超大文件被拒绝',()=>assert.equal(written,'new'));
 
   /* ---------------------------------------------------- 用户模式（mode=user） */
 

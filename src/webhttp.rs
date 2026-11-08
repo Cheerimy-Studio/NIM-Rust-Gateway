@@ -83,6 +83,7 @@ pub mod web_assets {
 
 pub fn bundled_asset(name: &str) -> Option<(&'static str, &'static [u8])> {
     match name {
+        "webclaw-agent.js" => Some(("application/javascript; charset=utf-8", include_bytes!("../web/webclaw-agent.js"))),
         "ui.css" => Some(("text/css; charset=utf-8", include_bytes!("../web/ui.css"))),
         "ui.js" => Some(("application/javascript; charset=utf-8", include_bytes!("../web/ui.js"))),
         "vendor/bootstrap.min.css" => Some(("text/css; charset=utf-8", include_bytes!("../web/vendor/bootstrap.min.css"))),

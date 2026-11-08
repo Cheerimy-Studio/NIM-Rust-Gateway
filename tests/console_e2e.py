@@ -27,7 +27,7 @@ def main():
     parser.add_argument('--ui', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    binary = root / 'target' / 'debug' / ('nim-gateway.exe' if os.name == 'nt' else 'nim-gateway')
+    binary = Path(os.environ.get('NGW_GW_EXE', root / 'target' / 'debug' / ('nim-gateway.exe' if os.name == 'nt' else 'nim-gateway')))
     password = 'console-regression-password'
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
@@ -62,9 +62,8 @@ def main():
                     response = admin.post('/api/settings', json={'config': {
                         'transparent_upstream': False, 'sign_enabled': True, 'sign_min': .01, 'sign_max': .01}})
                     check(response.status_code == 200, '保存签到与路由设置')
-                    response = admin.post('/api/wheels', json={'name': '测试抽奖', 'cost': 0, 'enabled': True,
-                        'prizes': [{'label': '赠金', 'type': 'grant', 'amount': .01, 'weight': 100}]})
-                    check(response.status_code == 200, '创建抽奖活动')
+                    for path in ['/api/wheels','/api/promo','/api/prize-keys','/api/user-draws']:
+                        check(admin.get(path).status_code == 404, '已移除旧接口 ' + path)
                     with httpx.Client(base_url=base, trust_env=False, timeout=30) as user:
                         for _ in range(10):
                             response = user.post('/api/user/login', json={'username': 'locked-account', 'password': 'wrong'})
@@ -78,16 +77,8 @@ def main():
                         check({m['model'] for m in models} == {'test-free', 'test-paid'}, '用户模型广场与渠道配置联动')
                         check(user.post('/api/user/sign').status_code == 200, '签到成功')
                         check(user.post('/api/user/sign').status_code == 400, '重复签到不再入账')
-                        wheel = user.get('/api/user/wheels').json()['rows'][0]
-                        before = user.get('/api/user/me').json()['balance']
-                        draw = {'id':wheel['id'], 'request_id':secrets.token_hex(16), 'expected_cost':0,
-                                'requested_at':wheel['server_time']}
-                        result = user.post('/api/user/wheels/draw', json=draw)
-                        replay = user.post('/api/user/wheels/draw', json=draw)
-                        after = user.get('/api/user/me').json()['balance']
-                        check(result.status_code == 200 and replay.status_code == 200
-                              and result.json() == replay.json() and abs(after - before - .01) < .000001,
-                              '抽奖重放原回执且奖励只入账一次')
+                        for path in ['/api/user/wheels','/api/user/prize-keys','/api/user/promo','/api/user/draw-logs']:
+                            check(user.get(path).status_code == 404, '用户旧接口已移除 ' + path)
                         for path, mime in [('ui.css', 'text/css'), ('ui.js', 'javascript'),
                             ('vendor/bootstrap.min.css', 'text/css'), ('vendor/bootstrap.bundle.min.js', 'javascript'),
                             ('vendor/fonts/bootstrap-icons.woff2', 'font/woff2'), ('vendor/purify.min.js', 'javascript')]:

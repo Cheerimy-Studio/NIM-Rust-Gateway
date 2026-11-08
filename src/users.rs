@@ -253,19 +253,6 @@ pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
                 resets.retain(|r| util::str_or(r.get("uid"), "") != user_id);
             }
         }
-        // 删用户时清掉抽奖记录/奖品 Key（活跃凭据），但【保留资金流水】：
-        // 欠款与充值记录是财务凭据，删除用户不应抹掉审计轨迹
-        // （fund_logs 每用户上限 500 条，孤儿数据无害）
-        if ok && op == "delete" {
-            for table in ["draw_logs","draw_receipts"] {
-                if let Some(a) = db.get_mut(table).and_then(Value::as_array_mut) {
-                    a.retain(|r| util::str_or(r.get("user_id"), "") != user_id);
-                }
-            }
-            if let Some(a) = db.get_mut("prize_keys").and_then(|k| k.as_array_mut()) {
-                a.retain(|k| util::str_or(k.get("user_id"), "") != user_id);
-            }
-        }
         // 资金变动流水（同一次 update 内写入，与账本变更原子）
         if ok {
             if let Some((kind, dg, dr, nt)) = note.take() {
@@ -492,10 +479,10 @@ pub fn key_kind(t: &Value) -> &'static str {
     }
 }
 
-/// 用户面板对话测试：取本人第一个启用中的 Key；一个都没有则自动建「对话测试」Key。
+/// WebClaw 复用启用中的全模型 Key，避免拿到免费专用 Key 后无法调用付费模型。
 pub fn ensure_test_key(user_id: &str) -> Option<String> {
     for t in list_keys(user_id) {
-        if !t.get("enabled").map(util::truthy).unwrap_or(false) {
+        if !t.get("enabled").map(util::truthy).unwrap_or(false) || key_kind(&t) != "all" {
             continue;
         }
         let k = util::str_or(t.get("key"), "");
@@ -503,7 +490,7 @@ pub fn ensure_test_key(user_id: &str) -> Option<String> {
             return Some(k);
         }
     }
-    let row = add_key(user_id, "对话测试");
+    let row = add_key(user_id, "WebClaw");
     let k = util::str_or(row.get("key"), "");
     if k.is_empty() { None } else { Some(k) }
 }
@@ -577,7 +564,7 @@ pub fn debit_bill(user: &mut Value, cost: f64) -> (f64, f64) {
 }
 
 /// 记一笔资金变动（必须在 store().update() 闭包内调用）。
-/// kind: signup/adjust/grant/recharge/sign/draw/prize/call。dg/dr = 赠金/充值增减量。
+/// kind: signup/adjust/grant/recharge/sign/call。dg/dr = 赠金/充值增减量。
 /// 每用户保留最近 500 条。
 pub fn fund_log(db: &mut Value, user_id: &str, kind: &str, dg: f64, dr: f64, note: &str) {
     if dg == 0.0 && dr == 0.0 {
@@ -619,28 +606,6 @@ pub fn user_funds_page(user_id: &str, page: i64, per: usize) -> (Vec<Value>, i64
     let db = store().load();
     let mut rows: Vec<Value> = db
         .get("fund_logs")
-        .and_then(|l| l.as_array())
-        .map(|a| {
-            a.iter()
-                .filter(|r| util::str_or(r.get("user_id"), "") == user_id)
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-    let total = rows.len() as i64;
-    let per = per.max(1) as i64;
-    let pages = ((total + per - 1) / per).max(1);
-    let page = page.clamp(1, pages);
-    let start = ((page - 1) * per) as usize;
-    rows = rows.into_iter().skip(start).take(per as usize).collect();
-    (rows, total)
-}
-
-/// 用户抽奖记录（分页）。
-pub fn user_draws_page(user_id: &str, page: i64, per: usize) -> (Vec<Value>, i64) {
-    let db = store().load();
-    let mut rows: Vec<Value> = db
-        .get("draw_logs")
         .and_then(|l| l.as_array())
         .map(|a| {
             a.iter()
@@ -720,7 +685,6 @@ pub fn sign_today(uid: &str) -> (bool, String, f64) {
 
 // ---------------------------------------------------------------- 邮箱注册与找回
 
-/// 邮箱注册。inv = 可选拉人归因（"<event_id>.<inviter_uid>"）。
 /// 返回 (用户行, 错误)。
 /// 生成并落库邮箱验证码（10 分钟有效；同邮箱 60 秒内只发一次）。返回 6 位数字码。
 pub fn email_code_create(email: &str) -> Result<String, String> {
@@ -766,7 +730,7 @@ fn registration_code_matches(db: &Value, email: &str, code: &str, now: i64) -> b
     })
 }
 
-pub fn email_register(email: &str, password: &str, inv: &str, code: &str) -> (Option<Value>, String) {
+pub fn email_register(email: &str, password: &str, code: &str) -> (Option<Value>, String) {
     let email = email.trim().to_lowercase();
     if email.is_empty() || !email.contains('@') {
         return (None, "请输入正确的邮箱地址".into());
@@ -843,10 +807,6 @@ pub fn email_register(email: &str, password: &str, inv: &str, code: &str) -> (Op
     });
     match out {
         Some(u) => {
-            let uid = util::str_or(u.get("id"), "");
-            if !inv.is_empty() {
-                crate::promo::attribute(inv, &uid);
-            }
             (Some(u), String::new())
         }
         None => (None, "注册未完成，邮箱已注册或验证码已使用".into()),
@@ -921,13 +881,10 @@ pub fn reset_with_token(token: &str, password: &str) -> Result<(), String> {
 
 // ---------------------------------------------------------------- 计费与限速
 
-/// 渠道上某模型的单次价格（元/次）。未设置 = 免费模型。
-pub fn price_for(upstream_id: &str, model: &str) -> f64 {
-    let ups = crate::upstreams::all_upstreams();
-    let Some(u) = ups.iter().find(|u| util::str_or(u.get("id"), "") == upstream_id) else {
-        return 0.0;
-    };
-    money(u.get("prices").and_then(|p| p.get(model)))
+/// 原始价格规则；数值兼容旧版元/次，token 对象为元/百万 token。
+pub fn pricing_for(upstream_id: &str, model: &str) -> Value {
+    crate::upstreams::all_upstreams().iter().find(|u| util::str_or(u.get("id"), "") == upstream_id)
+        .and_then(|u| u.get("prices").and_then(|p| p.get(model))).cloned().unwrap_or(json!(0))
 }
 
 /// 该模型在任一启用渠道上是否收费（用于请求前置的余额检查）。
@@ -939,8 +896,19 @@ pub fn model_is_paid(model: &str) -> bool {
     db.get("upstreams").and_then(Value::as_array).is_some_and(|ups| ups.iter().any(|u| {
         u.get("enabled").map(util::truthy).unwrap_or(false)
             && crate::upstreams::channel_serves_model(u, model, global_hide, transparent)
-            && money(u.get("prices").and_then(|p| p.get(model))) > 0.0
+            && crate::billing::paid(u.get("prices").and_then(|p| p.get(model)).unwrap_or(&Value::Null))
     }))
+}
+
+/// 路由名只要有一条符合 Key 类型的可达成员，就应出现在该 Key 的模型列表。
+pub fn key_allows_model(kind: &str, model: &str) -> bool {
+    let db = store().load();
+    let cfg = db.get("config").unwrap_or(&Value::Null);
+    let chains = crate::upstreams::parse_model_chains(cfg);
+    let members = chains.iter().find(|c| c.name == model).map(|c|c.members.clone()).unwrap_or_else(||vec![model.into()]);
+    members.iter().filter(|m| !chains.iter().any(|c| &c.name == *m))
+        .filter(|m| crate::upstreams::model_routable(m, cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true)))
+        .any(|m| match kind { "free" => !model_is_paid(m), "paid" => model_is_paid(m), _ => true })
 }
 
 /// 用户级每分钟滑动窗口限速。kind: "free" / "paid"。
@@ -1008,9 +976,10 @@ pub fn bill(
     in_tok: i64,
     out_tok: i64,
     stream: bool,
+    pricing_override: Option<&Value>,
 ) -> f64 {
-    let price = price_for(channel_id, model);
-    let cost = if price > 0.0 { util::round6(price) } else { 0.0 };
+    let pricing = pricing_override.cloned().unwrap_or_else(|| pricing_for(channel_id, model));
+    let cost = crate::billing::cost(&pricing, in_tok, out_tok);
     let now = util::now_i();
     let row = json!({
         "t": now,
@@ -1022,6 +991,7 @@ pub fn bill(
         "st": st,
         "ms": ms,
         "cost": cost,
+        "billing": crate::billing::snapshot(&pricing, in_tok),
         "in_tok": in_tok,
         "out_tok": out_tok,
         "stream": stream,
@@ -1309,10 +1279,7 @@ pub fn model_square() -> Vec<Value> {
             if m.is_empty() || !crate::upstreams::channel_serves_model(u, &m, global_hide, transparent) {
                 continue;
             }
-            let price = prices
-                .get(&m)
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
+            let price = crate::billing::cost(prices.get(&m).unwrap_or(&Value::Null), 1_000_000, 1_000_000);
             let e = best.entry(m.clone()).or_insert(f64::INFINITY);
             if price < *e {
                 *e = price;
@@ -1328,7 +1295,7 @@ pub fn model_square() -> Vec<Value> {
                 if !crate::upstreams::channel_serves_model(u, alias, global_hide, transparent) {
                     continue;
                 }
-                let price = prices.get(alias).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let price = crate::billing::cost(prices.get(alias).unwrap_or(&Value::Null), 1_000_000, 1_000_000);
                 let e = best.entry(alias.clone()).or_insert(f64::INFINITY);
                 if price < *e {
                     *e = price;
@@ -1391,9 +1358,22 @@ pub fn model_square() -> Vec<Value> {
                 }
             }
             let health_pct = health.map(|h| (h * 100.0).round() as i64);
+            let members = crate::upstreams::parse_model_chains(db.get("config").unwrap_or(&Value::Null))
+                .into_iter().find(|c| c.name == m).map(|c| c.members).unwrap_or_else(|| vec![m.clone()]);
+            let mut pricing = Vec::new();
+            for u in &ups_list {
+                if !u.get("enabled").map(util::truthy).unwrap_or(false) { continue; }
+                for member in &members {
+                    if crate::upstreams::channel_serves_model(u, member, global_hide, transparent) {
+                        pricing.push(json!({"model":member,"rule":u.get("prices").and_then(|p|p.get(member)).cloned().unwrap_or(json!(0))}));
+                    }
+                }
+            }
             json!({
                 "model": m,
-                "free": !(price.is_finite() && price > 0.0),
+                "pricing": pricing,
+                "free": pricing.iter().any(|p| !crate::billing::paid(&p["rule"])),
+                "paid": pricing.iter().any(|p| crate::billing::paid(&p["rule"])),
                 "price": if price.is_finite() && price > 0.0 { json!(util::round6(price)) } else { json!(0) },
                 "health": health_pct,
                 "ctx": limits.get(&m.to_lowercase()).map(|x| x.ctx).unwrap_or(0),
@@ -1495,17 +1475,17 @@ mod account_regression_tests {
         });
         let email = "regression+code@example.test";
         let code = email_code_create(email).unwrap();
-        assert!(email_register(email, "short", "", &code).0.is_none());
+        assert!(email_register(email, "short", &code).0.is_none());
         assert!(registration_code_matches(&store().load(), email, &code, util::now_i()));
-        let row = email_register(email, "valid-password", "", &code).0.unwrap();
+        let row = email_register(email, "valid-password", &code).0.unwrap();
         assert_eq!(row["username"], email);
         assert!(store().load()["email_codes"].get(email).is_none());
-        assert!(email_register(email, "valid-password", "", &code).0.is_none());
+        assert!(email_register(email, "valid-password", &code).0.is_none());
 
         let other = "guesses@example.test";
         let code = email_code_create(other).unwrap();
-        for _ in 0..5 { assert!(email_register(other, "valid-password", "", "not-a-code").0.is_none()); }
-        assert!(email_register(other, "valid-password", "", &code).0.is_none());
+        for _ in 0..5 { assert!(email_register(other, "valid-password", "not-a-code").0.is_none()); }
+        assert!(email_register(other, "valid-password", &code).0.is_none());
         store().update(|db| *db = saved);
     }
 

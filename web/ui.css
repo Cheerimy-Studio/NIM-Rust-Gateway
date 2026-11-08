@@ -98,17 +98,6 @@ body[data-page="landing"] .foot{color:var(--mut)}
 .proj .mt,.proj.active .mt,.side-note{color:var(--mut)}
 .proj .ops button:hover{color:var(--txt);background:#e5e7eb}
 .proj .ops button{min-width:26px;min-height:26px}
-.wheel-activity:hover{transform:none;box-shadow:0 4px 14px #1821340d;border-color:#c8d5fb}
-.wheel-pointer{animation:none}
-.prob-bar{background:#e5e7eb}
-.prize-overlay{background:#1b243b66;backdrop-filter:blur(4px)}
-.prize-stars,.prize-streak{display:none}
-.prize-cut::before,.prize-cut::after{display:none}
-.prize-foot{background:transparent;backdrop-filter:none;margin-top:0;padding:24px 10px 10px}
-.prize-title{color:#fff;font-size:20px}
-.promo-task,.promo-success{border-width:1px;box-shadow:none}
-.promo-task::after,.promo-hero::before,.promo-bar>div::after,.promo-taskbar>div::after{display:none}
-.promo-claim,.promo-none-ic,.promo-cd.urgent{animation:none}
 @media(min-width:861px){.layout>.sidebar{flex-shrink:0}.content>.pane{max-width:1500px;margin:0 auto}}
 @media(max-width:860px){
  .sidebar{width:100%;height:auto;position:static}.brand{padding:16px;justify-content:flex-start}
@@ -119,3 +108,5 @@ body[data-page="landing"] .foot{color:var(--mut)}
  .side-body{max-height:280px}.proj .ops{opacity:1}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+.price-fields{min-width:280px;max-width:500px}.price-fields label{font-size:12px;color:var(--mut);flex:1}.price-fields input{min-width:100px}.price-fields textarea{font-family:ui-monospace,monospace;min-width:270px}

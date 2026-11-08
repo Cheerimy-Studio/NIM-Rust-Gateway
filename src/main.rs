@@ -1,12 +1,12 @@
 //! 入口：路由、静态页、看门狗、定时落盘、自重启。
 
 mod admin;
+mod billing;
 mod convert;
 mod bridge;
 mod user_api;
 mod pool;
 mod mailer;
-mod promo;
 mod proxy;
 mod queue;
 mod store;
@@ -17,7 +17,6 @@ mod update;
 mod users;
 mod util;
 mod webhttp;
-mod wheel;
 
 use crate::store::{csrf_token, session_cookie, store};
 use crate::webhttp::*;
@@ -618,42 +617,6 @@ async fn h_user_wallet(headers: HeaderMap) -> Response {
     user_api::wallet(&headers).await
 }
 
-async fn h_user_wheels(headers: HeaderMap) -> Response {
-    user_api::wheels(&headers).await
-}
-
-async fn h_user_wheels_draw(headers: HeaderMap, body: Bytes) -> Response {
-    user_api::wheels_draw(&headers, body).await
-}
-
-async fn h_user_prize_keys(headers: HeaderMap) -> Response {
-    user_api::prize_keys(&headers).await
-}
-
-async fn h_user_draw_logs(headers: HeaderMap) -> Response {
-    user_api::draw_logs(&headers).await
-}
-
-async fn h_wheels_admin(headers: HeaderMap) -> Response {
-    admin::wheels_admin(&headers).await
-}
-
-async fn h_wheels_save(headers: HeaderMap, body: Bytes) -> Response {
-    admin::wheels_save(&headers, body).await
-}
-
-async fn h_wheels_delete(headers: HeaderMap, body: Bytes) -> Response {
-    admin::wheels_delete(&headers, body).await
-}
-
-async fn h_prize_keys_admin(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
-    admin::prize_keys_admin(&headers, raw_query.0).await
-}
-
-async fn h_prize_keys_op(headers: HeaderMap, body: Bytes) -> Response {
-    admin::prize_keys_op(&headers, body).await
-}
-
 async fn h_user_keys(headers: HeaderMap) -> Response {
     user_api::keys(&headers).await
 }
@@ -686,30 +649,6 @@ async fn h_user_reset_pw(body: Bytes) -> Response {
     user_api::reset_pw(body).await
 }
 
-async fn h_user_promo(headers: HeaderMap) -> Response {
-    user_api::promo_overview(&headers).await
-}
-
-async fn h_user_promo_join(headers: HeaderMap, body: Bytes) -> Response {
-    user_api::promo_join(&headers, body).await
-}
-
-async fn h_user_promo_claim(headers: HeaderMap, body: Bytes) -> Response {
-    user_api::promo_claim(&headers, body).await
-}
-
-async fn h_promo_list(headers: HeaderMap) -> Response {
-    admin::promo_list(&headers).await
-}
-
-async fn h_promo_save(headers: HeaderMap, body: Bytes) -> Response {
-    admin::promo_save(&headers, body).await
-}
-
-async fn h_promo_op(headers: HeaderMap, body: Bytes) -> Response {
-    admin::promo_op(&headers, body).await
-}
-
 async fn h_user_models(headers: HeaderMap) -> Response {
     user_api::models(&headers).await
 }
@@ -738,10 +677,6 @@ async fn h_user_logs_admin(headers: HeaderMap, raw_query: axum::extract::RawQuer
 
 async fn h_user_funds_admin(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
     admin::user_funds_admin(&headers, raw_query.0).await
-}
-
-async fn h_user_draws_admin(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
-    admin::user_draws_admin(&headers, raw_query.0).await
 }
 
 async fn h_prices_list(headers: HeaderMap) -> Response {
@@ -1399,23 +1334,10 @@ fn build_router() -> Router {
         .route("/api/user/me", get(h_user_me))
     .route("/api/user/sign", get(h_user_sign_status).post(h_user_sign))
     .route("/api/user/wallet", get(h_user_wallet))
-    .route("/api/user/wheels", get(h_user_wheels))
-    .route("/api/user/wheels/draw", post(h_user_wheels_draw))
     .route("/api/user/register", post(h_user_register))
     .route("/api/user/register/send-code", post(h_user_register_code))
     .route("/api/user/forgot", post(h_user_forgot))
     .route("/api/user/reset", post(h_user_reset_pw))
-    .route("/api/user/promo", get(h_user_promo))
-    .route("/api/user/promo/join", post(h_user_promo_join))
-    .route("/api/user/promo/claim", post(h_user_promo_claim))
-    .route("/api/promo", get(h_promo_list))
-    .route("/api/promo/save", post(h_promo_save))
-    .route("/api/promo/op", post(h_promo_op))
-    .route("/api/user/prize-keys", get(h_user_prize_keys))
-    .route("/api/user/draw-logs", get(h_user_draw_logs))
-    .route("/api/wheels", get(h_wheels_admin).post(h_wheels_save))
-    .route("/api/wheels/delete", post(h_wheels_delete))
-    .route("/api/prize-keys", get(h_prize_keys_admin).post(h_prize_keys_op))
         .route("/api/user/keys", get(h_user_keys).post(h_user_keys_add))
         .route("/api/user/keys/op", post(h_user_keys_op))
         .route("/api/user/logs", get(h_user_logs))
@@ -1425,7 +1347,6 @@ fn build_router() -> Router {
         .route("/api/users/op", post(h_users_op))
         .route("/api/user-logs", get(h_user_logs_admin))
     .route("/api/user-funds", get(h_user_funds_admin))
-    .route("/api/user-draws", get(h_user_draws_admin))
         .route("/api/prices", get(h_prices_list).post(h_prices_save))
         .route("/api/user/stats", get(h_user_stats))
         // axum 默认把请求体限制在 2MB：不显式放宽，MAX_BODY=20MB 永远不会生效，

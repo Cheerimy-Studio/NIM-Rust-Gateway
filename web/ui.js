@@ -2,7 +2,14 @@
 'use strict';
 let dialogCount = 0;
 window.NGW_UI = {
-  dialog({title = '确认操作', body = '', input = null, danger = false, okText = '确定'}) {
+  pricingText(p) {
+    if (!p || typeof p === 'number') return p > 0 ? '¥' + p + ' / 次' : '免费';
+    if (p.mode !== 'token') return '未配置';
+    let text = '输入 ¥' + p.input + ' · 输出 ¥' + p.output + ' / 百万 token';
+    for (const t of p.tiers || []) text += '；输入 ≥ ' + t.min_input + '：¥' + t.input + ' / ¥' + t.output;
+    return text;
+  },
+  dialog({title = '确认操作', body = '', input = null, danger = false, okText = '确定', signal = null}) {
     return new Promise(resolve => {
       const previous = document.activeElement;
       const mask = document.createElement('div'); mask.className = 'ui-mask';
@@ -28,6 +35,7 @@ window.NGW_UI = {
       const finish = value => {
         if (closed) return; closed = true;
         mask.remove(); document.removeEventListener('keydown', onKey, true);
+        if (signal) signal.removeEventListener('abort', dismiss);
         if (previous && previous.isConnected) previous.focus();
         resolve(value);
       };
@@ -45,6 +53,7 @@ window.NGW_UI = {
       cancel.onclick = dismiss; ok.onclick = () => finish(field ? field.value.trim() : true);
       mask.onclick = e => { if (e.target === mask) dismiss(); };
       document.addEventListener('keydown', onKey, true);
+      if (signal) { signal.addEventListener('abort', dismiss, {once:true}); if (signal.aborted) { dismiss(); return; } }
       (field || (danger ? cancel : ok)).focus();
       if (field) field.select();
     });

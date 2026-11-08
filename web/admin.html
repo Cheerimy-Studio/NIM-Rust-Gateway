@@ -220,8 +220,6 @@ details.upgrp[open]{background:#fff}
     <a href="javascript:void(0)" data-pane="import"><i class="bi bi-upload"></i>导入</a>
     <a href="javascript:void(0)" data-pane="tokens"><i class="bi bi-shield-lock"></i>访问令牌</a>
     <a href="javascript:void(0)" data-pane="users"><i class="bi bi-people"></i>用户</a>
-    <a href="javascript:void(0)" data-pane="promo"><i class="bi bi-megaphone"></i>邀请活动</a>
-    <a href="javascript:void(0)" data-pane="wheels"><i class="bi bi-database"></i>大转盘</a>
     <a href="javascript:void(0)" data-pane="intercept"><i class="bi bi-slash-circle"></i>拦截</a>
     <div class="nav-label">数据</div>
     <a href="/webclaw" target="_blank" rel="noopener"><i class="bi bi-chat-dots"></i>WebClaw 测试台</a>
@@ -582,19 +580,19 @@ details.upgrp[open]{background:#fff}
     <div class="card-header"><i class="bi bi-tags me-2 text-muted"></i>模型定价</div>
     <div class="card-body">
 
-  <div class="hint mb-3">按客户端调用的模型名设置单次成功调用单次价格 · 元，仅成功计费；模型映射后请对映射前的名字（客户端用的名字）设价。未设价的模型为免费模型。</div>
+  <div class="hint mb-3">按客户端模型名设价。支持按次或输入/输出 token 计费，单价单位为元。长度档位按输入 token 总数选档，整次使用该档单价；只对成功请求结算。未设置的模型免费。</div>
   <div class="card mb-3"><div class="card-body d-flex gap-2 align-items-end flex-wrap">
     <div style="min-width:180px"><label class="form-label" for="price-channel">渠道</label>
       <select class="form-select form-select-sm" id="price-channel"></select></div>
     <div style="min-width:180px"><label class="form-label" for="price-model">模型名</label>
       <input class="form-control form-control-sm" id="price-model" placeholder="模型名"></div>
     <div style="min-width:120px"><label class="form-label" for="price-val" title="元/次">价格 · 元/次</label>
-      <input type="number" step="0.001" min="0" class="form-control form-control-sm" id="price-val" placeholder="0=免费"></div>
+      <input type="number" step="0.001" min="0" class="form-control form-control-sm" id="price-val" value="0" placeholder="0=免费"></div>
     <button class="btn btn-sm btn-primary" id="price-add">添加</button>
   </div></div>
   <div class="card"><div class="table-responsive">
     <table class="table table-hover align-middle">
-      <thead><tr><th>渠道</th><th>模型</th><th>单次价格 · 元</th><th>类型</th><th class="text-end">操作</th></tr></thead>
+      <thead><tr><th>渠道</th><th>模型</th><th>计费方式与单价</th><th>类型</th><th class="text-end">操作</th></tr></thead>
       <tbody id="price-rows"></tbody>
     </table>
   </div></div>
@@ -647,99 +645,6 @@ details.upgrp[open]{background:#fff}
       <thead><tr><th>令牌</th><th>可用模型</th><th style="width:110px">最近使用</th><th style="width:130px">来源 IP</th><th class="text-end">操作</th></tr></thead>
       <tbody id="tok-rows"></tbody>
     </table>
-    </div>
-  </div>
-</section>
-
-
-<section class="pane" id="pane-promo">
-  <h2 class="pane-title">邀请活动</h2>
-  <div class="card mb-3">
-    <div class="card-header">新建活动</div>
-    <div class="card-body">
-      <div class="row g-2 align-items-end">
-        <div class="col-md-3"><label class="form-label" for="promo-name">活动名称</label>
-          <input class="form-control form-control-sm" id="promo-name" placeholder="如：新人 Register 送豪礼"></div>
-        <div class="col-md-2"><label class="form-label" for="promo-amount" title="元">奖励金额 · 元</label>
-          <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" id="promo-amount" value="20"></div>
-        <div class="col-md-2"><label class="form-label" for="promo-target">拉人次数</label>
-          <input type="number" step="1" min="1" class="form-control form-control-sm" id="promo-target" value="100"></div>
-        <div class="col-md-2">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="promo-enabled" checked>
-            <label class="form-check-label small" for="promo-enabled">立即开启</label>
-          </div>
-        </div>
-        <div class="col-md-1"><button id="promo-add" class="btn btn-sm btn-primary w-100">创建</button></div>
-      </div>
-      <div class="form-text small mt-2 mb-0">累计邀请达到目标后，一次性发放赠金。邀请进度按 1、3、7、目标人数分阶段展示。</div>
-    </div>
-  </div>
-  <div class="card">
-    <div class="table-responsive">
-      <table class="table table-hover align-middle">
-        <thead><tr><th>活动</th><th>奖励金额</th><th>拉人目标</th><th>参与 / 拉新</th><th>模式</th><th>剩余</th><th>状态</th><th class="text-end">操作</th></tr></thead>
-        <tbody id="promo-rows"></tbody>
-      </table>
-    </div>
-  </div>
-</section>
-
-<section class="pane" id="pane-wheels">
-  <h2 class="pane-title">大转盘</h2>
-  <div class="card mb-3">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <span>转盘编辑</span>
-      <button id="wh-new" class="btn btn-sm btn-primary">新建转盘</button>
-    </div>
-    <div class="card-body" id="wh-editor" style="display:none">
-      <div class="row g-2 mb-2">
-        <div class="col-md-4"><label class="form-label" for="wh-name">转盘名称</label>
-          <input class="form-control form-control-sm" id="wh-name" placeholder="活动名称"></div>
-        <div class="col-md-3"><label class="form-label" for="wh-cost">单次消耗 · 元</label>
-          <input type="number" step="0.001" min="0" class="form-control form-control-sm" id="wh-cost" value="0.01"></div>
-        <div class="col-md-3 d-flex align-items-end pb-1">
-          <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="wh-enabled" checked>
-            <label class="form-check-label small" for="wh-enabled">启用</label>
-          </div>
-        </div>
-        <input type="hidden" id="wh-id">
-      </div>
-      <div class="table-responsive">
-        <table class="table table-sm align-middle mb-2">
-          <thead><tr><th>奖品名</th><th>类型</th><th>颜色</th><th style="min-width:90px">展示权重</th><th style="min-width:90px">抽取权重</th><th>金额 / 模型</th><th>参数</th><th></th></tr></thead>
-          <tbody id="wh-prize-rows"></tbody>
-        </table>
-      </div>
-      <div class="d-flex gap-2 align-items-center">
-        <button id="wh-prize-add" class="btn btn-sm btn-outline-secondary">加奖品</button>
-        <button id="wh-save" class="btn btn-sm btn-primary">保存转盘</button>
-        <button id="wh-cancel" class="btn btn-sm btn-outline-secondary">取消</button>
-        <span class="small ms-auto">展示权重合计：<span id="wh-sum" class="fw-semibold">0</span> / 100</span>
-      </div>
-      <div class="hint mt-2 mb-0">展示权重控制扇区大小，合计为 100。抽取权重决定中奖概率，留空时沿用展示权重；用户端显示实际中奖概率。余额奖品填金额，奖品 Key 填模型名及有效期。</div>
-    </div>
-  </div>
-  <div class="card mb-3">
-    <div class="card-header">转盘列表</div>
-    <div class="table-responsive">
-      <table class="table table-hover align-middle">
-        <thead><tr><th>名称</th><th>单次消耗</th><th>奖品数</th><th>状态</th><th class="text-end">操作</th></tr></thead>
-        <tbody id="wh-rows"></tbody>
-      </table>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <span>奖品 Key</span>
-      <button id="pk-refresh" class="btn btn-sm btn-outline-secondary">刷新</button>
-    </div>
-    <div class="table-responsive">
-      <table class="table table-hover align-middle">
-        <thead><tr><th>Key</th><th>类型</th><th>模型</th><th>额度 / 已用</th><th>到期</th><th>状态</th><th class="text-end">操作</th></tr></thead>
-        <tbody id="pk-rows"></tbody>
-      </table>
     </div>
   </div>
 </section>
@@ -891,10 +796,6 @@ details.upgrp[open]{background:#fff}
   </div>
 </section>
 
-
-
-
-
 <section class="pane" id="pane-training">
   <h2 class="pane-title">训练资料</h2>
   <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
@@ -926,8 +827,6 @@ details.upgrp[open]{background:#fff}
   </div>
   <div id="sessions-list"></div>
 </section>
-
-
 
 <section class="pane" id="pane-settings">
   <h2 class="pane-title">设置</h2>

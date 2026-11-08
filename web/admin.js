@@ -118,71 +118,7 @@ const LOADERS = {
   settings: () => loadSettings(),
   docs: () => fillDocs(),
   users: loadUsers,
-  promo: loadPromoAdmin,
-  wheels: loadWheels
 };
-async function loadPromoAdmin() {
-  const d = await run(() => api('promo'));
-  const tb = $('#promo-rows');
-  if (!tb) return;
-  tb.innerHTML = '';
-  if (!d) return;
-  const rows = d.rows || [];
-  if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="text-muted small text-center py-4">还没有活动，先创建一个</td></tr>';
-    return;
-  }
-  for (const e of rows) {
-    const tr = document.createElement('tr');
-    if (!e.enabled) tr.classList.add('table-light');
-    const mode = '<span class="badge bg-primary-subtle text-primary">正式</span>';
-    const st = e.expired ? '<span class="badge bg-secondary">已过期</span>'
-      : e.enabled ? '<span class="badge bg-success">进行中</span>' : '<span class="badge bg-secondary">已停用</span>';
-    tr.innerHTML = '<td class="fw-semibold">' + esc(e.name || e.id) + '</td>'
-      + '<td class="fw-semibold">¥' + (e.amount ?? 0) + '</td>'
-      + '<td>' + (e.target ?? 0) + ' 人</td>'
-      + '<td class="small">' + (e.members ?? 0) + ' / ' + (e.invites ?? 0) + '</td>'
-      + '<td>' + mode + '</td>'
-      + '<td class="small">' + (e.expired ? '—' : e.left_days + ' 天') + '</td>'
-      + '<td>' + st + '</td>'
-      + '<td class="text-end text-nowrap"></td>';
-    const td = tr.lastElementChild;
-    const mk = (label, op, cls) => {
-      const b = document.createElement('button');
-      b.className = 'btn btn-sm ' + cls + ' me-1';
-      b.textContent = label;
-      b.onclick = () => run(async () => {
-        await api('promo/op', {method: 'POST', json: {id: e.id, op: op}});
-        toast('已' + label);
-        await loadPromoAdmin();
-      });
-      return b;
-    };
-    if (!e.expired) td.appendChild(mk(e.enabled ? '停用' : '启用', e.enabled ? 'disable' : 'enable',
-      e.enabled ? 'btn-outline-secondary' : 'btn-outline-success'));
-    const del = document.createElement('button');
-    del.className = 'btn btn-sm btn-outline-danger';
-    del.textContent = '删除';
-    del.onclick = () => uiConfirm('删除活动「' + esc(e.name || e.id) + '」？参与进度将一并删除。', {danger: true, okText: '删除'})
-      .then(ok => { if (ok) run(async () => { await api('promo/op', {method: 'POST', json: {id: e.id, op: 'delete'}}); toast('已删除'); loadPromoAdmin(); }); });
-    td.appendChild(del);
-    tb.appendChild(tr);
-  }
-}
-
-$('#promo-add').onclick = guard(async () => {
-  const name = $('#promo-name').value.trim();
-  if (!name) { toast('请填写活动名称', 'danger'); return; }
-  await api('promo/save', {method: 'POST', json: {
-    name: name,
-    amount: parseFloat($('#promo-amount').value) || 0,
-    target: parseInt($('#promo-target').value) || 0,
-    enabled: $('#promo-enabled').checked,
-  }});
-  toast('活动已创建');
-  loadPromoAdmin();
-});
-
 function activate(name) {
   if (!Object.hasOwn(LOADERS, name)) name = 'dash';
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
@@ -301,7 +237,7 @@ async function runBatch(op) {
     const payload = {op, ids};
     if (op === 'move') payload.upstream_id = $('#batch-up').value;
     const r = await api('keys/batch', {method: 'POST', json: payload});
-    if (op === 'delete' || op === 'move') batchSel.clear();  
+    if (op === 'delete' || op === 'move') batchSel.clear();
     if (op === 'test') {
       const okN = Object.values(r.results).filter(t => t && t.ok).length;
       toast(`测试完成：${okN}/${Object.keys(r.results).length} 可用`);
@@ -345,7 +281,7 @@ async function loadKeys() {
     const tr = el('tr'); const td = el('td', 'text-muted text-center py-4', '—');
     td.colSpan = 16; tr.appendChild(td); tb.appendChild(tr);
   }
-  
+
   const groups = new Map();
   for (const k of d.rows) {
     const g = k.upstream_name || '-';
@@ -436,7 +372,7 @@ async function loadKeys() {
     tdOp.appendChild(grp);
     tr.appendChild(tdOp);
     tb.appendChild(tr);
-    
+
     tr.addEventListener('click', e => {
       if (e.target.closest('button') || e.target.closest('a') || e.target.closest('code') || e.target.closest('input')) return;
       toggleKeyDetail(k.id, tr);
@@ -476,7 +412,7 @@ function toggleKeyDetail(id, tr, force) {
     if (keysState2.openId === id) keysState2.openId = null;
     return;
   }
-  
+
   $$('#keys-rows tr.detail-row').forEach(r => r.remove());
   $$('#keys-rows tr.krow.open').forEach(r => r.classList.remove('open'));
   keysState2.openId = id;
@@ -629,9 +565,9 @@ async function loadUpstreams() {
       $('#up-form-title').scrollIntoView({block: 'center'});
     });
     mk(u.enabled ? '停用' : '启用', 'btn-outline-secondary', guard(async () => {
-      
-      
-      
+
+
+
       await api('upstreams', {
         method: 'POST',
         json: {id: u.id, name: u.name, base: u.base, enabled: !u.enabled},
@@ -647,7 +583,7 @@ async function loadUpstreams() {
     tr.appendChild(tdOp);
     tb.appendChild(tr);
   }
-  
+
   const sel = $('#import-up');
   const cur = sel.value;
   sel.innerHTML = '';
@@ -676,8 +612,8 @@ const UP_FIELDS = [
 ];
 
 
-let poverData = {};  
-let tdefData = {};   
+let poverData = {};
+let tdefData = {};
 
 function poverLoad(obj) {
   poverData = {};
@@ -793,7 +729,7 @@ async function fillModelSelects() {
   const sel2 = $('#tdef-model');
   if (!sel1 && !sel2) return;
   const models = new Set();
-  
+
   try {
     const d = await api('upstreams');
     for (const u of (d.rows || [])) {
@@ -801,7 +737,7 @@ async function fillModelSelects() {
       for (const src of Object.keys(u.model_map || {})) models.add(src);
     }
   } catch (e) {  }
-  
+
   const upModels = $('#up-models');
   if (upModels && upModels.value.trim()) {
     upModels.value.split(/[\n,]/).forEach(m => { m = m.trim(); if (m) models.add(m); });
@@ -877,12 +813,12 @@ function bindUpstreams() {
     loadUpstreams(); refreshBatchUps(); loadPresets();
   });
   $('#up-cancel').onclick = resetUpstreamForm;
-  
+
   const poverBtn = $('#pover-add');
   if (poverBtn) poverBtn.onclick = () => { poverAdd(); };
   const tdefBtn = $('#tdef-add');
   if (tdefBtn) tdefBtn.onclick = () => { tdefAdd(); };
-  
+
   const upModels = $('#up-models');
   if (upModels) upModels.addEventListener('input', fillModelSelects);
   const upMap = $('#up-map');
@@ -1044,7 +980,7 @@ function renderLogs() {
     return;
   }
   for (const r of rows) {
-    
+
     const t = r[0], ep = r[1], model = r[2], key = r[3], st = r[4], ms = r[5], err = r[6], ip = r[7], att = r[8];
     const upModel = r[9] || '', isStream = !!r[10], ttfb = r[11] || 0, inTok = r[12] || 0, outTok = r[13] || 0, tok = r[14] || '';
     const stCls = st >= 400 || st === 0 ? 'bg-danger-subtle text-danger' : 'bg-success-subtle text-success';
@@ -1074,7 +1010,7 @@ function renderLogs() {
         td.appendChild(el('span', 'badge ' + stCls, statusText(st)));
         return td;
       })(),
-      
+
       (() => {
         const td = el('td', 'text-end small text-muted');
         if (inTok || outTok) {
@@ -1084,7 +1020,7 @@ function renderLogs() {
         }
         return td;
       })(),
-      
+
       (() => {
         const td = el('td', 'text-end small');
         if (isStream && ttfb > 0 && ttfb < ms) {
@@ -1094,7 +1030,7 @@ function renderLogs() {
         }
         return td;
       })(),
-      
+
       el('td', 'small text-danger err-cell', err || '-'),
     );
     tr.style.cursor = 'pointer';
@@ -1370,7 +1306,7 @@ function renderCatalog() {
       '<td><input type="number" min="0" class="form-control form-control-sm cat-ctx" value="' + (r.ctx || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-out" value="' + (r.out || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-tps" value="' + (r.tps || 0) + '"></td>' +
-      '<td><input type="number" step="0.001" min="0" class="form-control form-control-sm cat-price" value="' + (r.price || 0) + '" title="0=免费"></td>' +
+      '<td class="small">' + esc(window.NGW_UI.pricingText(r.price)) + '</td>' +
       '<td>' + st + '</td>' +
       '<td class="text-end"><button class="btn btn-sm btn-primary cat-save">保存</button></td>';
     tr.querySelector('.cat-save').onclick = guard(async () => {
@@ -1378,10 +1314,9 @@ function renderCatalog() {
       const ctx = parseInt(tr.querySelector('.cat-ctx').value, 10) || 0;
       const out = parseInt(tr.querySelector('.cat-out').value, 10) || 0;
       const tps = parseInt(tr.querySelector('.cat-tps').value, 10) || 0;
-      const price = parseFloat(tr.querySelector('.cat-price').value) || 0;
       if (alias && /[=|#]/.test(alias)) throw new Error('别名不能包含 = | # 字符');
       if (alias && CHAIN_CANDS.some(m => m.chain && m.name === alias)) throw new Error('别名与模型路由重名，会让其中一个不可达');
-      await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out, tps, price}});
+      await api('upstream-models/op', {method: 'POST', json: {channel_id: r.channel_id, upstream: r.upstream, alias, ctx, out, tps}});
       toast(alias ? '已接入：' + alias : '已隐藏');
       loadCatalog();
     });
@@ -1831,7 +1766,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#btn-logout').onclick = guard(async () => { await api('logout', {method: 'POST'}); location.href = B + 'admin'; });
   bindImport(); bindSettings(); bindUpstreams(); bindBatch(); bindCatalog();
   refreshBatchUps();
-  fillModelSelects();  
+  fillModelSelects();
 
   let qTimer = null;
   $('#keys-q').addEventListener('input', () => {
@@ -1871,55 +1806,85 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ---------------- 模型定价 ----------------
 let _priceRows = [];
-
+let _priceChannels = [];
 async function loadPrices() {
-  const data = await api('prices');
+  const [data, channels] = await Promise.all([api('prices'), api('upstreams')]);
   _priceRows = data.rows || [];
+  _priceChannels = channels.rows || [];
+  const sel = $('#price-channel'); const previous = sel.value;
+  sel.innerHTML = '<option value="">选择渠道</option>' + _priceChannels.map(c => '<option value="' + esc(c.id) + '">' + esc(c.name || c.id) + '</option>').join('');
+  if (_priceChannels.some(c => c.id === previous)) sel.value = previous;
   renderPrices();
-  const sel = $('#price-channel');
-  const chs = [...new Set(_priceRows.map(r => r.channel_name))];
-  sel.innerHTML = '<option value="">选择渠道</option>' + chs.map(c => `<option>${esc(c)}</option>`).join('');
 }
-
-function renderPrices() {
-  const tb = $('#price-rows');
-  tb.innerHTML = '';
-  for (const r of _priceRows) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td>' + esc(r.channel_name) + '</td>'
-      + '<td class="mono fw-semibold">' + esc(r.model) + '</td>'
-      + '<td><input type="number" step="0.001" min="0" class="form-control form-control-sm price-input" '
-      + 'data-ch="' + esc(r.channel_id) + '" data-model="' + esc(r.model) + '" value="' + (r.price || 0) + '" style="width:100px"></td>'
-      + '<td>' + (r.free ? '<span class="badge badge-free">免费</span>' : '<span class="badge badge-paid">付费</span>') + '</td>'
-      + '<td class="small text-muted">' + (r.enabled ? '' : '<span class="badge bg-secondary">渠道停用</span>') + '</td>';
-    tb.appendChild(tr);
+function priceFields(price = 0) {
+  const token = price && price.mode === 'token';
+  const tiers = token ? (price.tiers || []).map(t => t.min_input + ' ' + t.input + ' ' + t.output).join('\n') : '';
+  return '<div class="price-fields"><select class="form-select form-select-sm price-mode" aria-label="计费方式"><option value="request">按次 · 元/次</option><option value="token"' + (token ? ' selected' : '') + '>按 token · 元/百万</option></select>'
+    + '<div class="d-flex gap-2 mt-2"><label>输入 / 单次<input type="number" min="0" max="100000" step="0.000001" class="form-control form-control-sm price-input" value="' + esc(token ? price.input : price) + '"></label>'
+    + '<label class="price-token"' + (token ? '' : ' hidden') + '>输出<input type="number" min="0" max="100000" step="0.000001" class="form-control form-control-sm price-output" value="' + esc(token ? price.output : 0) + '"></label></div>'
+    + '<label class="price-token small mt-2 w-100"' + (token ? '' : ' hidden') + '>长度档位（可选，每行：输入起点 输入单价 输出单价）<textarea class="form-control form-control-sm price-tiers" rows="2" placeholder="128001 4 16">' + esc(tiers) + '</textarea></label></div>';
+}
+function bindPriceFields(node) {
+  node.querySelector('.price-mode').onchange = e => {
+    node.querySelectorAll('.price-token').forEach(n => n.hidden = e.target.value !== 'token');
+  };
+}
+function readPrice(node) {
+  const number = field => {
+    const raw = field.value.trim(), n = Number(raw);
+    if (!raw || !Number.isFinite(n) || n < 0 || n > 100000) throw new Error('价格应为 0 到 100000 之间的数字');
+    return n;
+  };
+  const input = number(node.querySelector('.price-input'));
+  if (node.querySelector('.price-mode').value !== 'token') return input;
+  const price = {mode:'token', input, output:number(node.querySelector('.price-output')), tiers:[]};
+  let previous = 0;
+  for (const line of node.querySelector('.price-tiers').value.split('\n').filter(l => l.trim())) {
+    const parts = line.trim().split(/\s+/).map(Number);
+    if (parts.length !== 3 || !parts.every(Number.isFinite) || !Number.isSafeInteger(parts[0]) || parts[0] <= previous || parts[0] > 100000000 || parts.slice(1).some(n => n < 0 || n > 100000)) throw new Error('档位应为递增起点及两个非负单价，例如 128001 4 16');
+    previous = parts[0]; price.tiers.push({min_input:parts[0], input:parts[1], output:parts[2]});
   }
+  if (price.tiers.length > 16) throw new Error('最多设置 16 个长度档位');
+  return price;
 }
-
-$('#price-add').onclick = guard(async () => {
-  const ch = $('#price-channel').value;
+function collectPrices() {
+  document.querySelectorAll('#price-rows tr[data-index]').forEach(tr => { _priceRows[Number(tr.dataset.index)].price = readPrice(tr); });
+}
+function renderPrices() {
+  const tb = $('#price-rows'); tb.innerHTML = '';
+  _priceRows.forEach((r, index) => {
+    const tr = document.createElement('tr'); tr.dataset.index = index;
+    tr.innerHTML = '<td>' + esc(r.channel_name || r.channel_id) + '</td><td class="font-monospace">' + esc(r.model) + '</td><td>' + priceFields(r.price) + '</td><td class="small text-muted">' + (r.enabled ? '已启用' : '渠道停用') + '</td><td><button class="btn btn-sm btn-outline-secondary price-reset">设为免费</button></td>';
+    bindPriceFields(tr);
+    tr.querySelector('.price-reset').onclick = guard(() => { collectPrices(); r.price = 0; renderPrices(); });
+    tb.appendChild(tr);
+  });
+}
+$('#price-add').onclick = guard(() => {
+  collectPrices();
+  const ch = _priceChannels.find(c => c.id === $('#price-channel').value);
   const model = $('#price-model').value.trim();
-  const val = parseFloat($('#price-val').value) || 0;
-  if (!ch || !model) { toast('请选择渠道并填写模型名', 'danger'); return; }
-  const exist = _priceRows.find(r => r.channel_name === ch && r.model === model);
-  if (exist) { exist.price = val; exist.free = val <= 0; renderPrices(); return; }
-  _priceRows.push({channel_id: _priceRows.find(r => r.channel_name === ch)?.channel_id || '',
-    channel_name: ch, model: model, price: val, free: val <= 0, enabled: true});
+  if (!ch || !model) throw new Error('请选择渠道并填写模型名');
+  if (_priceRows.some(r => r.channel_id === ch.id && r.model === model)) throw new Error('该模型已在下方列表，请直接修改');
+  const raw = $('#price-val').value.trim(), price = Number(raw);
+  if (!raw || !Number.isFinite(price) || price < 0 || price > 100000) throw new Error('价格无效');
+  _priceRows.push({channel_id:ch.id, channel_name:ch.name, model, price, enabled:ch.enabled});
   renderPrices();
 });
-
 $('#prices-save').onclick = guard(async () => {
-  const byChannel = {};
-  document.querySelectorAll('.price-input').forEach(inp => {
-    const ch = inp.dataset.ch, model = inp.dataset.model, val = parseFloat(inp.value) || 0;
-    if (!byChannel[ch]) byChannel[ch] = {};
-    byChannel[ch][model] = val;
-  });
-  for (const [chId, prices] of Object.entries(byChannel)) {
-    await api('prices', {method: 'POST', json: {channel_id: chId, prices: prices}});
+  collectPrices();
+  const byChannel = new Map();
+  for (const r of _priceRows) {
+    if (!byChannel.has(r.channel_id)) byChannel.set(r.channel_id, Object.create(null));
+    byChannel.get(r.channel_id)[r.model] = r.price;
   }
-  toast('定价已保存');
-  loadPrices();
+  $('#prices-save').disabled = true;
+  let saved = 0;
+  try {
+    for (const [channel_id, prices] of byChannel) { await api('prices', {method:'POST', json:{channel_id, prices}}); saved++; }
+    toast('定价已保存'); await loadPrices();
+  } catch (e) { throw new Error('已保存 ' + saved + ' 个渠道；' + e.message + '。未保存内容仍保留，可重试。'); }
+  finally { $('#prices-save').disabled = false; }
 });
 
 // ---------------- 用户管理 ----------------
@@ -1936,8 +1901,8 @@ async function loadUsers() {
   for (const u of rows) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td class="fw-semibold">' + esc(u.username) + '</td>'
-      + '<td class="small text-nowrap"><div>¥' + (u.grant ?? 0).toFixed(4) + '</div><div class="text-muted">累计 ¥' + (u.grant_total ?? 0).toFixed(4) + '</div></td>'
-      + '<td class="small text-nowrap"><div>¥' + (u.balance ?? 0).toFixed(4) + '</div><div class="text-muted">累计 ¥' + (u.recharge_total ?? 0).toFixed(4) + '</div></td>'
+      + '<td class="small text-nowrap"><div>¥' + (u.grant ?? 0).toFixed(6) + '</div><div class="text-muted">累计 ¥' + (u.grant_total ?? 0).toFixed(6) + '</div></td>'
+      + '<td class="small text-nowrap"><div>¥' + (u.balance ?? 0).toFixed(6) + '</div><div class="text-muted">累计 ¥' + (u.recharge_total ?? 0).toFixed(6) + '</div></td>'
       + '<td class="small text-nowrap"><div>免费 ' + (u.free_calls ?? 0) + '</div><div class="text-muted">付费 ' + (u.paid_calls ?? 0) + '</div></td>'
       + '<td>' + (u.key_count ?? 0) + '</td>'
       + '<td class="small">' + (u.free_rpm > 0 ? u.free_rpm + ' 次/分' : '不限') + '</td>'
@@ -1991,11 +1956,8 @@ async function loadUsers() {
     const fin = document.createElement('button');
     fin.className = 'btn btn-sm btn-outline-secondary me-1'; fin.textContent = '资金';
     fin.onclick = () => run(async () => {
-      const [fd, dd] = await Promise.all([
-        api('user-funds?id=' + encodeURIComponent(u.id) + '&page=1&per=100'),
-        api('user-draws?id=' + encodeURIComponent(u.id) + '&page=1&per=100'),
-      ]);
-      showUserFinance(u, fd, dd);
+      const fd = await api('user-funds?id=' + encodeURIComponent(u.id) + '&page=1&per=100');
+      showUserFinance(u, fd);
     });
     const tog = document.createElement('button');
     tog.className = 'btn btn-sm btn-outline-secondary me-1';
@@ -2035,7 +1997,7 @@ function showUserLogs(u, rows, total) {
       + '<td class="text-end small">' + r.ms + 'ms</td>'
       + '<td class="text-end small">' + (r.in_tok || 0) + '</td>'
       + '<td class="text-end small">' + (r.out_tok || 0) + '</td>'
-      + '<td class="text-end small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
+      + '<td class="text-end small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(6) : '免费') + '</td>';
     body.appendChild(tr);
   }
   tb.appendChild(body);
@@ -2047,10 +2009,10 @@ function showUserLogs(u, rows, total) {
 
 const FUND_KINDS = {
   signup: '建户', adjust: '余额调整', grant: '赠金发放', recharge: '充值',
-  sign: '签到', draw: '抽奖消耗', prize: '抽奖中奖', call: '调用计费',
+  sign: '签到', draw: '历史支出', prize: '历史入账', call: '调用计费',
 };
 
-function showUserFinance(u, fd, dd) {
+function showUserFinance(u, fd) {
   const wrap = el('div');
   const mk = (title, rows, cols, render) => {
     const box = el('div', 'mb-3');
@@ -2076,19 +2038,9 @@ function showUserFinance(u, fd, dd) {
     const cls = v => v > 0 ? 'text-success fw-semibold' : v < 0 ? 'text-danger fw-semibold' : 'text-muted';
     tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
       + '<td class="small">' + esc(FUND_KINDS[r.kind] || r.kind) + '</td>'
-      + '<td class="small ' + cls(dg) + '">' + (dg > 0 ? '+' : '') + dg.toFixed(4) + '</td>'
-      + '<td class="small ' + cls(dr) + '">' + (dr > 0 ? '+' : '') + dr.toFixed(4) + '</td>'
+      + '<td class="small ' + cls(dg) + '">' + (dg > 0 ? '+' : '') + dg.toFixed(6) + '</td>'
+      + '<td class="small ' + cls(dr) + '">' + (dr > 0 ? '+' : '') + dr.toFixed(6) + '</td>'
       + '<td class="small text-muted">' + esc(r.note || '-') + '</td>';
-    return tr;
-  }));
-  const drawRows = dd.rows || [];
-  wrap.appendChild(mk('抽奖记录', drawRows, ['时间', '转盘', '奖品', '消耗赠金', '消耗充值'], r => {
-    const tr = el('tr');
-    tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
-      + '<td class="small">' + esc(r.wheel_name || '-') + '</td>'
-      + '<td class="small">' + esc(r.label || '-') + '</td>'
-      + '<td class="small text-danger">' + (-(r.cost_grant ?? 0)).toFixed(4) + '</td>'
-      + '<td class="small text-danger">' + (-(r.cost_recharge ?? 0)).toFixed(4) + '</td>';
     return tr;
   }));
   uiPanel('资金明细 · ' + u.username, wrap);
@@ -2107,223 +2059,5 @@ $('#usr-add').onclick = guard(async () => {
   toast('用户已添加'); loadUsers();
 });
 
-// ---------------- 大转盘 ----------------
-
-const PRIZE_TYPES = [
-  ['recharge', '充值余额'],
-  ['grant', '赠金'],
-  ['model_unlimited', '体验卡'],
-  ['model_quota', '专属额度'],
-  ['none', '谢谢参与'],
-];
-const PRIZE_COLORS = [
-  ['gold', '金色'], ['blue', '蓝色'], ['orange', '橙色'],
-  ['green', '绿色'], ['purple', '紫色'], ['gray', '灰色'],
-];
-
-function prizeRowHtml(p = {}) {
-  const tr = document.createElement('tr');
-  const typeOpts = PRIZE_TYPES.map(([v, t]) =>
-    `<option value="${v}"${p.type === v ? ' selected' : ''}>${t}</option>`).join('');
-  const colorOpts = PRIZE_COLORS.map(([v, t]) =>
-    `<option value="${v}"${p.color === v ? ' selected' : ''}>${t}</option>`).join('');
-  // 金额和模型分别保留编辑值，切换类型不丢失输入。
-  const initialType = p.type || PRIZE_TYPES[0][0];
-  const isAmt = initialType === 'recharge' || initialType === 'grant';
-  const amVal = isAmt ? (p.amount ? String(p.amount) : '') : (p.model ?? '');
-  tr.innerHTML = '<td><input class="form-control form-control-sm wz-label" value="' + esc(p.label || '') + '"></td>'
-    + '<td><select class="form-select form-select-sm wz-type">' + typeOpts + '</select></td>'
-    + '<td><select class="form-select form-select-sm wz-color">' + colorOpts + '</select></td>'
-    + '<td><input type="number" step="0.01" min="0.01" class="form-control form-control-sm wz-weight" value="' + (p.weight ?? 25) + '"></td>'
-    + '<td><input type="number" step="0.01" min="0" class="form-control form-control-sm wz-real" value="' + (p.real_weight ?? '') + '" placeholder="同展示"></td>'
-    + '<td><input class="form-control form-control-sm wz-amount-model" value="' + esc(amVal) + '" placeholder="' + (isAmt ? '金额' : '模型名') + '"></td>'
-    + '<td class="text-nowrap"><input type="number" step="0.1" min="0" class="form-control form-control-sm wz-hours d-inline-block" style="width:74px" value="' + (p.duration_hours ?? '') + '" placeholder="小时"> '
-    + '<input type="number" min="1" max="64" class="form-control form-control-sm wz-conc d-inline-block" style="width:66px" value="' + (p.concurrency ?? '') + '" placeholder=" "> '
-    + '<input type="number" step="1" min="0" class="form-control form-control-sm wz-quota d-inline-block" style="width:70px" value="' + (p.quota ?? '') + '" placeholder="次数"></td>'
-    + '<td><button class="btn btn-sm btn-outline-danger wz-del">删</button></td>';
-  tr._prize = p;
-  tr.querySelector('.wz-del').onclick = () => { tr.remove(); wheelSum(); };
-  tr.querySelector('.wz-weight').addEventListener('input', wheelSum);
-  const values = {amount: p.amount ? String(p.amount) : '', model: p.model || ''};
-  let valueKind = isAmt ? 'amount' : 'model';
-  const syncType = () => {
-    const type = tr.querySelector('.wz-type').value;
-    const input = tr.querySelector('.wz-amount-model');
-    const next = type === 'recharge' || type === 'grant' ? 'amount' : 'model';
-    values[valueKind] = input.value;
-    if (next !== valueKind) input.value = values[next];
-    valueKind = next;
-    input.placeholder = next === 'amount' ? '金额' : '模型名';
-    input.disabled = type === 'none';
-    const isKey = type === 'model_unlimited' || type === 'model_quota';
-    tr.querySelector('.wz-hours').disabled = !isKey;
-    tr.querySelector('.wz-conc').disabled = !isKey;
-    tr.querySelector('.wz-quota').disabled = type !== 'model_quota';
-  };
-  tr.querySelector('.wz-type').addEventListener('change', syncType);
-  syncType();
-  return tr;
-}
-
-function wheelSum() {
-  let sum = 0;
-  for (const tr of document.querySelectorAll('#wh-prize-rows tr')) {
-    sum += parseFloat(tr.querySelector('.wz-weight').value) || 0;
-  }
-  const el = $('#wh-sum');
-  if (el) {
-    el.textContent = Math.round(sum * 100) / 100;
-    el.className = Math.abs(sum - 100) < 0.01 ? 'fw-semibold text-success' : 'fw-semibold text-danger';
-  }
-  return sum;
-}
-
-function openWheelEditor(w) {
-  $('#wh-editor').style.display = 'block';
-  $('#wh-id').value = w?.id || '';
-  $('#wh-name').value = w?.name || '';
-  $('#wh-cost').value = w?.cost ?? '0.01';
-  $('#wh-enabled').checked = w ? !!w.enabled : true;
-  const tb = $('#wh-prize-rows');
-  tb.innerHTML = '';
-  for (const p of (w?.prizes || [{label: '', type: 'grant', color: 'blue', weight: 100}])) tb.appendChild(prizeRowHtml(p));
-  wheelSum();
-  $('#wh-editor').scrollIntoView({behavior: 'smooth', block: 'nearest'});
-}
-
-function closeWheelEditor() {
-  $('#wh-editor').style.display = 'none';
-}
-
-function collectWheel() {
-  const prizes = [];
-  for (const tr of document.querySelectorAll('#wh-prize-rows tr')) {
-    const q = c => tr.querySelector(c);
-    const amountModel = q('.wz-amount-model').value.trim();
-    const type = q('.wz-type').value;
-    const p = {
-      label: q('.wz-label').value.trim(),
-      type,
-      color: q('.wz-color').value,
-      weight: parseFloat(q('.wz-weight').value) || 0,
-      amount: (type === 'recharge' || type === 'grant') ? (parseFloat(amountModel) || 0) : 0,
-      model: (type === 'model_unlimited' || type === 'model_quota') ? amountModel : '',
-      duration_hours: parseFloat(q('.wz-hours').value) || 0,
-      concurrency: parseInt(q('.wz-conc').value) || 1,
-      quota: parseFloat(q('.wz-quota').value) || 0,
-    };
-    if (q('.wz-real').value.trim() !== '') p.real_weight = parseFloat(q('.wz-real').value) || 0;
-    // 保留原奖品 id：编辑保存不换 id，抽中结果定位与历史流水引用才稳定
-    if (tr._prize && tr._prize.id) p.id = tr._prize.id;
-    prizes.push(p);
-  }
-  return {
-    id: $('#wh-id').value,
-    name: $('#wh-name').value.trim(),
-    cost: parseFloat($('#wh-cost').value) || 0,
-    enabled: $('#wh-enabled').checked,
-    prizes,
-  };
-}
-
-async function loadWheels() {
-  const d = await run(() => api('wheels'));
-  if (!d) return;
-  const rows = d.rows || [];
-  const tb = $('#wh-rows');
-  tb.innerHTML = '';
-  if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="text-muted small text-center py-4">还没有转盘，点右上「新建转盘」</td></tr>';
-  }
-  for (const w of rows) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td class="fw-semibold">' + esc(w.name) + '</td>'
-      + '<td>' + (w.cost > 0 ? '¥' + w.cost : '免费') + '</td>'
-      + '<td>' + (w.prizes?.length ?? 0) + '</td>'
-      + '<td>' + (w.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">停用</span>') + '</td>'
-      + '<td class="text-end text-nowrap"></td>';
-    const td = tr.lastElementChild;
-    const edit = document.createElement('button');
-    edit.className = 'btn btn-sm btn-outline-secondary me-1'; edit.textContent = '编辑';
-    edit.onclick = () => openWheelEditor(w);
-    const del = document.createElement('button');
-    del.className = 'btn btn-sm btn-outline-danger';
-    del.textContent = '删除';
-    del.onclick = () => run(async () => {
-      if (!(await uiConfirm('删除转盘「' + w.name + '」？奖品 Key 不受影响', {danger: true}))) return;
-      await api('wheels/delete', {method: 'POST', json: {id: w.id}});
-      toast('已删除'); loadWheels();
-    });
-    td.append(edit, del);
-    tb.appendChild(tr);
-  }
-  await loadPrizeKeys();
-}
-
-async function loadPrizeKeys() {
-  const d = await run(() => api('prize-keys'));
-  if (!d) return;
-  const rows = d.rows || [];
-  const tb = $('#pk-rows');
-  tb.innerHTML = '';
-  if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="text-muted small text-center py-4">暂无奖品 Key</td></tr>';
-    return;
-  }
-  const now = Math.floor(Date.now() / 1000);
-  for (const k of rows) {
-    const tr = document.createElement('tr');
-    const expired = k.expires_at > 0 && now >= k.expires_at;
-    const exhausted = k.type === 'model_quota' && (k.used ?? 0) >= k.quota;
-    const st = !k.enabled ? '<span class="badge bg-secondary">停用</span>'
-      : expired ? '<span class="badge bg-danger">已过期</span>'
-      : exhausted ? '<span class="badge bg-danger">已用尽</span>'
-      : '<span class="badge bg-success">可用</span>';
-    tr.innerHTML = '<td class="key-mono small">' + esc(k.key.slice(0, 14)) + '…</td>'
-      + '<td class="small">' + (k.type === 'model_unlimited' ? '体验卡' : '专属额度') + '</td>'
-      + '<td class="small mono">' + esc(k.model || '-') + '</td>'
-      + '<td class="small">' + (k.type === 'model_quota' ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
-      + '<td class="small text-muted">' + (k.expires_at > 0 ? new Date(k.expires_at * 1000).toLocaleString() : '不限') + '</td>'
-      + '<td>' + st + '</td>'
-      + '<td class="text-end text-nowrap"></td>';
-    const td = tr.lastElementChild;
-    const copy = document.createElement('button');
-    copy.className = 'btn btn-sm btn-outline-secondary me-1'; copy.textContent = '复制';
-    copy.onclick = () => copyText(k.key);
-    const tog = document.createElement('button');
-    tog.className = 'btn btn-sm btn-outline-secondary';
-    tog.textContent = k.enabled ? '停用' : '启用';
-    tog.onclick = () => run(async () => {
-      await api('prize-keys', {method: 'POST', json: {id: k.id, op: k.enabled ? 'disable' : 'enable'}});
-      loadPrizeKeys();
-    });
-    td.append(copy, tog);
-    tb.appendChild(tr);
-  }
-}
-
-$('#wh-new').onclick = () => openWheelEditor(null);
-$('#wh-cancel').onclick = () => closeWheelEditor();
-$('#wh-prize-add').onclick = () => { $('#wh-prize-rows').appendChild(prizeRowHtml()); wheelSum(); };
-let savingWheel = false;
-$('#wh-save').onclick = guard(async () => {
-  if (savingWheel) return;
-  const body = collectWheel();
-  if (!body.name) return toast('请输入转盘名称', 'danger');
-  const sum = body.prizes.reduce((a, p) => a + (p.weight || 0), 0);
-  if (Math.abs(sum - 100) > 0.01) return toast('展示权重合计必须为 100，当前 ' + Math.round(sum * 100) / 100, 'danger');
-  savingWheel = true;
-  $('#wh-save').disabled = true;
-  try {
-    await api('wheels', {method: 'POST', json: body});
-    toast('转盘已保存');
-    closeWheelEditor();
-    await loadWheels();
-  } finally {
-    savingWheel = false;
-    $('#wh-save').disabled = false;
-  }
-});
-$('#pk-refresh').onclick = () => run(() => loadPrizeKeys());
 
 })();

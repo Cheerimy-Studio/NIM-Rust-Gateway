@@ -5,6 +5,7 @@ const B = (window.NGW && window.NGW.base) || '/';
 const CSRF = (window.NGW && window.NGW.csrf) || '';
 // 管理员在后台打开 /webclaw，普通用户在用户中心打开；两者令牌来源与可见模型不同
 const MODE = (window.NGW && window.NGW.mode) === 'user' ? 'user' : 'admin';
+const AGENT = window.NGW_AGENT;
 const WHO = (window.NGW && window.NGW.who) || 'admin';
 // 按身份分键：同一台机器上换了账号也不会看到上一个人的项目
 const LS_KEY = 'webclaw.projects.v1::' + WHO;
@@ -77,6 +78,7 @@ function openMask(build, keyHandler) {
 }
 
 function uiConfirm(msg, opts = {}) {
+  if (window.NGW_UI) return window.NGW_UI.dialog({title:opts.title || '确认操作',body:msg,danger:!!opts.danger,okText:opts.okText || '确定',signal:opts.signal});
   return new Promise(resolve => {
     let dlg = null;
     const done = v => { if (dlg) dlg.close(); resolve(v); };
@@ -179,7 +181,7 @@ let lastBubble = null;
 function blankProject(name) {
   const t = Date.now();
   return {id: uid(), name: name || '未命名项目', model: '', system: '', stream: true,
-    messages: [], created_at: t, updated_at: t};
+    agent: false, files: {}, messages: [], created_at: t, updated_at: t};
 }
 
 function clip(s, n) {
@@ -194,12 +196,16 @@ function normalizeStored(raw) {
     if (messages.length >= MAX_MESSAGES) break;
     if (!m || typeof m !== 'object') continue;
     // 只接受对话双方；system 等角色由系统提示单独承载，混进历史会改变上游语义
-    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    if (!['user','assistant','tool'].includes(m.role)) continue;
     const content = clip(m.content, MAX_CONTENT);
     const reasoning = clip(m.reasoning, MAX_CONTENT);
     const err = clip(m.err, 2000);
-    if (!content && !reasoning && !err) continue;
-    messages.push({role: m.role, content, reasoning, err, at: Number(m.at) || 0});
+    const tool_calls = sanitizeCalls(m.tool_calls);
+    const tool_call_id = clip(m.tool_call_id,100);
+    if (m.role === 'tool' && !tool_call_id) continue;
+    if (!content && !reasoning && !err && !tool_calls.length) continue;
+    messages.push({role:m.role, content, reasoning, err, at:Number(m.at) || 0,
+      ...(tool_calls.length ? {tool_calls} : {}), ...(tool_call_id ? {tool_call_id} : {})});
   }
   return {
     id: (typeof raw.id === 'string' && raw.id) ? raw.id : uid(),
@@ -207,6 +213,8 @@ function normalizeStored(raw) {
     model: clip(raw.model, 200),
     system: clip(raw.system, MAX_CONTENT),
     stream: raw.stream !== false,
+    agent: raw.agent === true,
+    files: AGENT ? AGENT.cleanFiles(raw.files) : {},
     messages,
     created_at: Number(raw.created_at) || Date.now(),
     updated_at: Number(raw.updated_at) || Date.now(),
@@ -277,6 +285,7 @@ function active() {
 /* ---------------------------------------------------------------- 项目操作 */
 
 function createProject() {
+  if (busy) { toast('请先停止当前任务，再操作项目', 'warning'); return; }
   if (state.projects.length >= MAX_PROJECTS) {
     toast('项目数量已达上限，先删掉一些', 'warning');
     return;
@@ -293,6 +302,7 @@ function createProject() {
 }
 
 function switchProject(id) {
+  if (busy) { toast('请先停止当前任务，再操作项目', 'warning'); return; }
   if (id === state.active) return;
   if (!state.projects.some(p => p.id === id)) return;
   stop();
@@ -315,11 +325,13 @@ async function renameProject(id) {
 }
 
 async function deleteProject(id) {
+  if (busy) { toast('请先停止当前任务，再操作项目', 'warning'); return; }
   const p = state.projects.find(x => x.id === id);
   if (!p) return;
   const ok = await uiConfirm('删除「' + p.name + '」？删掉就找不回来了。', {danger: true, okText: '删除'});
   if (!ok) return;
   stop();
+  if (AGENT) AGENT.disconnect(p);
   state.projects = state.projects.filter(x => x.id !== id);
   if (!state.projects.length) state.projects.push(blankProject('默认项目'));
   if (!state.projects.some(x => x.id === state.active)) state.active = state.projects[0].id;
@@ -328,6 +340,7 @@ async function deleteProject(id) {
 }
 
 async function clearChat() {
+  if (busy) { toast('请先停止当前任务，再操作项目', 'warning'); return; }
   const p = active();
   if (!p || !p.messages.length) return;
   const ok = await uiConfirm('清空当前对话？', {danger: true, okText: '清空'});
@@ -386,6 +399,8 @@ function renderProjects() {
 }
 
 function buildBubble(m) {
+  if (m.role === 'tool') m = {...m, content:'工具结果\n' + m.content};
+  else if (m.tool_calls?.length) m = {...m, content:(m.content || '') + '\n调用工具：' + m.tool_calls.map(c => c.function.name).join('、')};
   const mine = m.role === 'user';
   const bubble = el('div', 'tmsg ' + (mine ? 'me' : 'ai'));
   const out = {bubble, md: null};
@@ -468,6 +483,7 @@ function syncInputs() {
   const sys = $('#wc-system');
   const st = $('#wc-stream');
   if (sys) sys.value = p.system || '';
+  if ($('#wc-agent')) $('#wc-agent').checked = !!p.agent;
   if (st) st.checked = p.stream !== false;
   if (sel && p.model) {
     const has = Array.from(sel.options).some(o => o.value === p.model);
@@ -477,6 +493,7 @@ function syncInputs() {
 }
 
 function renderAll() {
+  renderWorkspace();
   renderProjects();
   syncInputs();
   renderChat();
@@ -605,14 +622,27 @@ async function loadModels(preferred) {
 
 /* ---------------------------------------------------------------- 发送 */
 
+function sanitizeCalls(calls) {
+  if (!Array.isArray(calls)) return [];
+  return calls.slice(0,16).filter(c => c && typeof c.id === 'string' && c.id.length <= 100 && c.type === 'function'
+    && c.function && typeof c.function.name === 'string' && typeof c.function.arguments === 'string' && c.function.arguments.length <= 512 * 1024)
+    .map(c => ({id:c.id,type:'function',function:{name:c.function.name,arguments:c.function.arguments}}));
+}
 function buildMessages(p, sys) {
   const out = [];
-  if (sys) out.push({role: 'system', content: sys});
-  for (const m of p.messages) {
-    if (m.pending) continue;
-    if (m.role !== 'user' && m.role !== 'assistant') continue;
-    if (!m.content) continue;
-    out.push({role: m.role, content: m.content});
+  if (sys) out.push({role:'system',content:sys});
+  for (let index = 0; index < p.messages.length; index++) {
+    const m = p.messages[index];
+    if (m.pending || m.err) continue;
+    if (m.role === 'assistant' && m.tool_calls?.length) {
+      const results = [];
+      for (let i = index + 1; i < p.messages.length && p.messages[i].role === 'tool'; i++) results.push(p.messages[i]);
+      // Match only the immediately following batch; model call IDs may recur in later turns.
+      if (results.length !== m.tool_calls.length || !m.tool_calls.every(c => results.filter(r => r.tool_call_id === c.id).length === 1)) continue;
+      out.push({role:'assistant',content:m.content || null,tool_calls:m.tool_calls});
+      for (const r of results) out.push({role:'tool',tool_call_id:r.tool_call_id,content:r.content || ''});
+      index += results.length;
+    } else if ((m.role === 'user' || m.role === 'assistant') && m.content) out.push({role:m.role,content:m.content});
   }
   return out;
 }
@@ -647,7 +677,19 @@ function parseDelta(j, reply, stats) {
   if (typeof d.content === 'string') reply.content += d.content;
   const rc = typeof d.reasoning_content === 'string' ? d.reasoning_content
     : (typeof d.reasoning === 'string' ? d.reasoning : '');
-  if (rc) reply.reasoning += rc;
+  if (rc) reply.reasoning = clip(reply.reasoning + rc, MAX_CONTENT);
+  if (Array.isArray(d.tool_calls)) {
+    reply.tool_calls ||= [];
+    for (const call of d.tool_calls) {
+      const index = Number.isInteger(call.index) ? call.index : reply.tool_calls.length;
+      if (index < 0 || index >= 16) throw new Error('一次最多调用 16 个工具');
+      const target = reply.tool_calls[index] ||= {id:'',type:'function',function:{name:'',arguments:''}};
+      if (call.id) target.id = clip(call.id,100);
+      if (call.function?.name) target.function.name += clip(call.function.name,100);
+      if (call.function?.arguments) target.function.arguments += call.function.arguments;
+      if (target.function.arguments.length > 512 * 1024 || target.function.name.length > 100) throw new Error('工具参数超过上限');
+    }
+  }
   if (j.model) stats.upModel = j.model;
   if (j.usage) {
     if (j.usage.prompt_tokens) stats.inTok = j.usage.prompt_tokens;
@@ -664,6 +706,8 @@ async function send() {
   const text = (input && input.value || '').trim();
   if (!model) { toast('先配置一个模型', 'warning'); return; }
   if (!text) return;
+  if (text.length > MAX_CONTENT) { toast('消息过长，请拆分后发送', 'warning'); return; }
+  if (p.messages.length >= MAX_MESSAGES - 40) { toast('对话已达上限，请导出后新建项目', 'warning'); return; }
 
   const sys = ($('#wc-system').value || '').trim();
   const stream = $('#wc-stream').checked;
@@ -672,7 +716,7 @@ async function send() {
   p.stream = stream;
 
   p.messages.push({role: 'user', content: text, reasoning: '', err: '', at: Date.now()});
-  const reply = {role: 'assistant', content: '', reasoning: '', err: '', pending: true, at: Date.now()};
+  let reply = {role: 'assistant', content: '', reasoning: '', err: '', pending: true, at: Date.now()};
   p.messages.push(reply);
   p.updated_at = Date.now();
   input.value = '';
@@ -682,7 +726,9 @@ async function send() {
   setBusy(true);
   aborter = new AbortController();
 
-  const messages = buildMessages(p, sys);
+  const agentEnabled = !!(AGENT && $('#wc-agent')?.checked);
+  p.agent = agentEnabled;
+  let messages = buildMessages(p, sys);
   const stats = {upModel: '', inTok: 0, outTok: 0};
   const t0 = performance.now();
   const raw = [];
@@ -694,9 +740,15 @@ async function send() {
     const tok = await ensureToken(false);
     if (tok) headers.Authorization = 'Bearer ' + tok;
 
+    for (let round = 0; round < (agentEnabled ? 8 : 1); round++) {
+    if (aborter.signal.aborted) throw new DOMException('已停止','AbortError');
+    const roundStats = {upModel:'',inTok:0,outTok:0};
+    const request = {model,messages,stream};
+    if (agentEnabled) { request.tools = AGENT.tools; request.tool_choice = 'auto'; }
+    if (stream) request.stream_options = {include_usage:true};
     const r = await fetch(B + 'v1/chat/completions', {
       method: 'POST', headers, signal: aborter.signal, credentials: 'same-origin',
-      body: JSON.stringify({model, messages, stream}),
+      body: JSON.stringify(request),
     });
     status = r.status;
     format = (r.headers.get('content-type') || '').split(';')[0];
@@ -721,9 +773,13 @@ async function send() {
         reply.content = clip(typeof msg.content === 'string' ? msg.content : '', MAX_CONTENT);
         reply.reasoning = clip(typeof msg.reasoning_content === 'string' ? msg.reasoning_content
           : (typeof msg.reasoning === 'string' ? msg.reasoning : ''), MAX_CONTENT);
-        stats.upModel = j.model || '';
-        stats.inTok = (j.usage || {}).prompt_tokens || 0;
-        stats.outTok = (j.usage || {}).completion_tokens || 0;
+        roundStats.upModel = j.model || '';
+        roundStats.inTok = (j.usage || {}).prompt_tokens || 0;
+        roundStats.outTok = (j.usage || {}).completion_tokens || 0;
+        if (msg.tool_calls) {
+          reply.tool_calls = sanitizeCalls(msg.tool_calls);
+          if (!Array.isArray(msg.tool_calls) || reply.tool_calls.length !== msg.tool_calls.length) throw new Error('模型返回的工具调用格式无效');
+        }
         if (j.error) reply.err = j.error.message || JSON.stringify(j.error);
       } else {
         reply.err = txt.slice(0, 300) || '响应不是合法 JSON';
@@ -746,7 +802,7 @@ async function send() {
           let j = null;
           try { j = JSON.parse(payload); } catch (e) { return; }
           if (j.error) { reply.err = j.error.message || JSON.stringify(j.error); return; }
-          parseDelta(j, reply, stats);
+          parseDelta(j, reply, roundStats);
           if (reply.content.length > MAX_CONTENT) reply.content = reply.content.slice(0, MAX_CONTENT);
           scheduleRender(true);
           scheduleSave();
@@ -756,6 +812,7 @@ async function send() {
         const chunk = await reader.read();
         if (chunk.done) break;
         buf += dec.decode(chunk.value, {stream: true});
+        if (buf.length > 1024 * 1024) throw new Error('事件流单帧过大，已停止接收');
         buf = consumeFrames(buf, handleFrame);
       }
       // 上游可能不发末尾空行就断开：残留的最后一帧仍然算数
@@ -764,7 +821,33 @@ async function send() {
     } else {
       reply.err = '无响应体（HTTP ' + status + '）';
     }
+    stats.inTok += roundStats.inTok; stats.outTok += roundStats.outTok; stats.upModel = roundStats.upModel;
+    if (reply.err || !reply.tool_calls?.length) break;
+    if (!agentEnabled) { reply.err = '模型返回了工具调用，请启用本地工具后重试'; break; }
+    const calls = sanitizeCalls(reply.tool_calls);
+    if (p.messages.length + calls.length + 1 > MAX_MESSAGES) throw new Error('对话已达上限，请导出后新建项目');
+    if (calls.length !== reply.tool_calls.length || new Set(calls.map(c => c.id)).size !== calls.length || calls.some(c => !c.id)) throw new Error('模型返回的工具调用格式无效');
+    reply.pending = false;
+    for (const call of calls) {
+      if (aborter.signal.aborted) throw new DOMException('已停止','AbortError');
+      let result;
+      try {
+        result = await AGENT.execute(p,call,{signal:aborter.signal,
+          confirmWrite: (path,content) => uiConfirm('将写入本机目录中的 ' + path + '，已有文件会被替换。\n\n内容预览：\n' + content.slice(0,1200), {title:'写入文件',okText:'写入',danger:true,signal:aborter.signal})});
+      } catch (e) { if (e.name === 'AbortError') throw e; result = {error:e.message || String(e)}; }
+      p.messages.push({role:'tool', tool_call_id:call.id, content:JSON.stringify(result), at:Date.now()});
+      save(); renderWorkspace(); renderChat();
+    }
+    if (round === 7) {
+      reply = {role:'assistant',content:'',reasoning:'',err:'已达到 8 轮上限。可继续发送消息处理剩余任务。',at:Date.now()};
+      p.messages.push(reply); break;
+    }
+    messages = buildMessages(p,sys);
+    reply = {role:'assistant',content:'',reasoning:'',err:'',pending:true,at:Date.now()};
+    p.messages.push(reply); renderChat();
+    }
   } catch (e) {
+    if (aborter) aborter.abort();
     reply.err = e && e.name === 'AbortError'
       ? '已停止'
       : String((e && e.message) || e).slice(0, 300);
@@ -793,12 +876,16 @@ function projectForExport(p) {
     model: p.model || '',
     system: p.system || '',
     stream: p.stream !== false,
+    agent: p.agent === true,
+    files: p.files || {},
     created_at: p.created_at || 0,
     updated_at: p.updated_at || 0,
     messages: p.messages
       .filter(m => !m.pending)
       .map(m => ({
         role: m.role,
+        ...(m.tool_calls ? {tool_calls:m.tool_calls} : {}),
+        ...(m.tool_call_id ? {tool_call_id:m.tool_call_id} : {}),
         content: m.content || '',
         reasoning: m.reasoning || '',
         err: m.err || '',
@@ -894,6 +981,7 @@ function extractProjects(data) {
 }
 
 async function handleImport(file) {
+  if (busy) { toast('请先停止当前任务，再操作项目', 'warning'); return; }
   if (!file) return;
   if (file.size > MAX_IMPORT_BYTES) {
     toast('文件过大（上限 ' + Math.round(MAX_IMPORT_BYTES / 1048576) + 'MB）', 'danger');
@@ -920,6 +1008,7 @@ async function handleImport(file) {
     const ok = await uiConfirm('覆盖会删掉本机现有的 ' + state.projects.length + ' 个项目。', {danger: true, okText: '覆盖'});
     if (!ok) return;
     stop();
+    if (AGENT) state.projects.forEach(p => AGENT.disconnect(p));
     state.projects = list;
     state.active = list[0].id;
   } else {
@@ -939,6 +1028,46 @@ async function handleImport(file) {
   save();
   renderAll();
   toast('已导入 ' + list.length + ' 个项目');
+}
+
+function renderWorkspace() {
+  const box = $('#wc-files'), p = active();
+  if (!box || !p || !AGENT) return;
+  box.innerHTML = '';
+  const connected = AGENT.connected(p);
+  $('#wc-workspace-status').textContent = connected ? '已连接本机目录' : Object.keys(p.files || {}).length + ' 个浏览器文件';
+  $('#wc-disconnect').hidden = !connected;
+  for (const [path,content] of Object.entries(p.files || {})) {
+    const row = el('div','workspace-file');
+    const download = el('button','',path); download.title = '下载文件';
+    download.onclick = () => {
+      const blob = new Blob([content],{type:'text/plain;charset=utf-8'}), url = URL.createObjectURL(blob);
+      const a = el('a'); a.href = url; a.download = path.split('/').pop(); document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url),1000);
+    };
+    const remove = el('button','','移除');
+    remove.onclick = guard(async () => { if (busy) throw new Error('请先停止当前任务'); if (await uiConfirm('移除工作区文件 ' + path + '？')) { delete p.files[path]; save(); renderWorkspace(); } });
+    row.append(download,remove); box.appendChild(row);
+  }
+}
+function bindWorkspace() {
+  if (!AGENT) return;
+  $('#wc-agent').onchange = () => { const p = active(); if (p) { p.agent = $('#wc-agent').checked; save(); } };
+  $('#wc-attach').onclick = () => { if (busy) return toast('请先停止当前任务','warning'); $('#wc-attach-file').click(); };
+  $('#wc-attach-file').onchange = guard(async e => {
+    const files = Array.from(e.target.files || []); e.target.value = '';
+    if (busy) throw new Error('请先停止当前任务');
+    const p = active(); const draft = {...p,files:AGENT.cleanFiles(p.files)};
+    for (const file of files) {
+      if (file.size > AGENT.MAX_FILE) throw new Error(file.name + ' 超过 256 KiB');
+      const text = await file.text();
+      if (text.includes('\u0000') || text.includes('\ufffd')) throw new Error(file.name + ' 不是 UTF-8 文本');
+      AGENT.putFile(draft,file.name,text);
+    }
+    p.files = draft.files; save(); renderWorkspace(); toast('文件已添加，启用本地工具后可供 Agent 读取');
+  });
+  $('#wc-directory').onclick = guard(async () => { if (busy) throw new Error('请先停止当前任务'); const p = active(); await AGENT.connect(p); renderWorkspace(); });
+  $('#wc-disconnect').onclick = () => { if (busy) return toast('请先停止当前任务','warning'); AGENT.disconnect(active()); renderWorkspace(); };
 }
 
 /* ---------------------------------------------------------------- 初始化 */
@@ -1056,7 +1185,7 @@ function bindUI() {
   // 另一个标签页改了存储：先把本页待写的内容落定，再采用对方的版本
   window.addEventListener('storage', e => {
     if (e.key !== LS_KEY || busy) return;
-    flushSave();
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     state = loadState();
     renderAll();
   });
@@ -1068,6 +1197,7 @@ async function init() {
   state = loadState();
   applyMode();
   bindUI();
+  bindWorkspace();
   renderAll();
   tokenHint();
   await ensureToken(false);

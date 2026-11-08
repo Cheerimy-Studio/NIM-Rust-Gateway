@@ -71,8 +71,6 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("intercepted", &["intercepted"]),
     ("queue", &["queue"]),
     ("users", &["users", "user_tokens", "user_logs", "user_logs_paid", "user_logs_free", "user_rpm", "fund_logs"]),
-    ("wheels", &["wheels", "prize_keys", "draw_logs", "draw_receipts"]),
-    ("promo", &["invite_events", "invite_members", "invite_hits"]),
     ("mail", &["email_codes", "pw_resets"]),
     (
         "metrics",
@@ -282,7 +280,12 @@ fn recover_reward_journal() -> Result<(), String> {
     let journal: Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
     let groups = journal.as_object().ok_or("奖励事务格式错误")?;
     for (group, value) in groups {
-        let (_, keys) = GROUPS.iter().find(|(name, _)| name == group).ok_or("奖励事务包含未知表")?;
+        let keys: &[&str] = match group.as_str() {
+            // Recover transactions committed by pre-1.7.60 releases, then leave these files archived.
+            "wheels" => &["wheels", "prize_keys", "draw_logs", "draw_receipts"],
+            "promo" => &["invite_events", "invite_members", "invite_hits"],
+            _ => GROUPS.iter().find(|(name, _)| name == group).map(|(_,keys)|*keys).ok_or("奖励事务包含未知表")?,
+        };
         let obj = value.as_object().ok_or("奖励事务表格式错误")?;
         if obj.keys().any(|k| !keys.contains(&k.as_str())) {
             return Err("奖励事务包含未知字段".into());
@@ -702,17 +705,12 @@ pub fn migrate(db: &mut Value) {
         "user_logs_free",
         "user_rpm",
         "fund_logs",
-        "wheels",
-        "prize_keys",
-        "draw_logs",
-        "draw_receipts",
     ] {
         obj.entry(k)
             .or_insert(if k == "upstreams" || k == "keys" || k == "logs" || k == "queue" || k == "sessions"
                 || k == "users" || k == "user_tokens" || k == "user_logs"
                 || k == "user_logs_paid" || k == "user_logs_free"
-                || k == "fund_logs"
-                || k == "wheels" || k == "prize_keys" || k == "draw_logs" || k == "draw_receipts" {
+                || k == "fund_logs" {
                 Value::Array(vec![])
             } else {
                 Value::Object(Obj::new())
@@ -741,17 +739,10 @@ pub fn migrate(db: &mut Value) {
         ("user_logs", "arr"),
         ("email_codes", "obj"),
         ("pw_resets", "arr"),
-        ("invite_events", "arr"),
-        ("invite_members", "arr"),
-        ("invite_hits", "arr"),
         ("user_logs_paid", "arr"),
         ("user_logs_free", "arr"),
         ("user_rpm", "obj"),
         ("fund_logs", "arr"),
-        ("wheels", "arr"),
-        ("prize_keys", "arr"),
-        ("draw_logs", "arr"),
-        ("draw_receipts", "arr"),
         ("buckets", "obj"),
         ("pool_buckets", "obj"),
         ("pool_daily", "obj"),
@@ -907,18 +898,22 @@ pub(crate) fn reward_recovery_regressions() {
     fs::create_dir(&tmp).unwrap();
     let failed=s.reward_transaction(|db| {db["users"]=serde_json::json!([]);Ok(())});
     assert!(failed.is_err());assert_eq!(s.load(),before);fs::remove_dir(tmp).unwrap();
-    // Simulate interruption between users.json and wheels.json writeback.
-    let wheel_file=group_file("wheels");let saved=wheel_file.with_extension("test-backup");
-    fs::rename(&wheel_file,&saved).unwrap();fs::create_dir(&wheel_file).unwrap();
-    s.reward_transaction(|db| {db["users"]=serde_json::json!([{"id":"recovery","grant":1}]);db["wheels"]=serde_json::json!([{"id":"recovered"}]);Ok(())}).unwrap();
+    // Simulate interruption between users.json and mail.json writeback.
+    let mail_file=group_file("mail");let saved=mail_file.with_extension("test-backup");
+    fs::rename(&mail_file,&saved).unwrap();fs::create_dir(&mail_file).unwrap();
+    s.reward_transaction(|db| {db["users"]=serde_json::json!([{"id":"recovery","grant":1}]);db["pw_resets"]=serde_json::json!([{"id":"recovered"}]);Ok(())}).unwrap();
     assert!(group_file(REWARD_JOURNAL).is_file());
     s.update(|db|db["users"][0]["grant"]=serde_json::json!(2));s.flush();
     let journal:Value=serde_json::from_slice(&fs::read(group_file(REWARD_JOURNAL)).unwrap()).unwrap();
     assert_eq!(journal["users"]["users"][0]["grant"],2,"pending journal must include newer ordinary updates");
-    fs::remove_dir(&wheel_file).unwrap();fs::rename(&saved,&wheel_file).unwrap();
+    fs::remove_dir(&mail_file).unwrap();fs::rename(&saved,&mail_file).unwrap();
     s.discard_memory();recover_reward_journal().unwrap();
-    let recovered=s.load();assert_eq!(recovered["users"][0]["grant"],2);assert_eq!(recovered["wheels"][0]["id"],"recovered");
+    let recovered=s.load();assert_eq!(recovered["users"][0]["grant"],2);assert_eq!(recovered["pw_resets"][0]["id"],"recovered");
     assert!(!group_file(REWARD_JOURNAL).exists());
+    let legacy_journal=serde_json::json!({"users":extract_group(&recovered,&["users","user_tokens","user_logs","user_logs_paid","user_logs_free","user_rpm","fund_logs"]),"wheels":{"prize_keys":[]},"promo":{"invite_events":[]}});
+    write_group_file(REWARD_JOURNAL,&serde_json::to_string(&legacy_journal).unwrap()).unwrap();
+    recover_reward_journal().unwrap();
+    assert!(group_file("wheels").is_file());assert!(!group_file(REWARD_JOURNAL).exists());
     write_group_file(REWARD_JOURNAL,"{bad").unwrap();
     assert!(recover_reward_journal().is_err());assert_eq!(fs::read(group_file("users")).unwrap(),serde_json::to_vec(&extract_group(&recovered,&["users","user_tokens","user_logs","user_logs_paid","user_logs_free","user_rpm","fund_logs"])).unwrap());
     fs::remove_file(group_file(REWARD_JOURNAL)).unwrap();

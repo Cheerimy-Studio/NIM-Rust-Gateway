@@ -1265,16 +1265,6 @@ impl Drop for HoldGuard {
     }
 }
 
-/// 奖品 Key 并发位守卫：Drop 时释放（断连/panic 也安全）。
-struct PrizeGuard {
-    key: String,
-}
-impl Drop for PrizeGuard {
-    fn drop(&mut self) {
-        crate::wheel::prize_key_release(&self.key);
-    }
-}
-
 // ---------------------------------------------------------------- 统一流式 pump
 
 fn money_of(u: &Value) -> f64 {
@@ -1312,8 +1302,6 @@ pub(crate) fn member_admission(kind: &str, balance: f64, paid: bool, model: &str
     }
     Ok(())
 }
-
-/// 链成员准入（带用户上下文）。None = 可用（含网关令牌/奖品 Key 恒可用）；
 /// Some((状态码, 错误码, 文案)) = 该成员需跳过。用户已停用同样走跳过通道：
 /// 每个成员都会被同一错误挡下，链耗尽时如实收口 401，无需单独的终止通道。
 fn member_gate(user_ctx: &Option<UserCtx>, model: &str) -> Option<(i64, &'static str, String)> {
@@ -1338,16 +1326,9 @@ pub struct UserCtx {
     pub id: String,
     pub key_id: String,
     pub kind: &'static str,
+    pub charge: Option<std::sync::Arc<crate::billing::Reservation>>,
 }
 
-/// 奖品 Key 上下文：体验卡（限时+并发限制）/ 专属额度（计次）。
-/// 不计费、不做用户 RPM；模型锁定 prize.model。
-#[derive(Clone)]
-pub struct PrizeCtx {
-    pub key: String,
-    pub model: String,
-    pub metered: bool,
-}
 
 pub struct StreamCtx {
     pub ep: String,
@@ -1365,9 +1346,7 @@ pub struct StreamCtx {
     pub ttfb_deadline: f64,
     pub protocol: Option<String>, // None = chat 直通；Some("responses"/"messages") = 转换
     pub capture_train: bool,
-    pub user: Option<(String, String)>, // (用户id, Key id) —— 成功后计费
-    pub prize_key: Option<String>, // 奖品 Key（专属额度计次）
-    pub prize_metered: bool, // 该奖品 Key 是否计次（quota>0）；不限次卡不计 used
+    pub user: Option<UserCtx>, // (用户id, Key id) —— 成功后计费
     // 客户端原始请求声明了 stream_options.include_usage（与每次尝试的上游体无关：
     // 400 自愈剥离 stream_options 后仍需为客户端合成 usage 尾帧）
     pub want_usage: bool,
@@ -1560,11 +1539,9 @@ async fn run_pump(
     first_chunk: Option<Bytes>,
     ctx: StreamCtx,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
-    prize_guard: Option<PrizeGuard>,
     mut hold: HoldGuard,
 ) {
     // Keep both RAII guards alive until accounting has completed, including task cancellation.
-    let _prize_guard = prize_guard;
     let idle_to = util::cfg_int(&cfg_all(), "sse_idle_timeout", 0).max(0) as f64;
     let byte_limit = if ctx.ttfb_deadline > 0.0 { ctx.ttfb_deadline } else { 300.0 };
     let mut decoder = crate::sse::Decoder::default();
@@ -1838,22 +1815,19 @@ async fn run_pump(
     // 多用户计费：仅完整成功的调用计费（「仅成功计费」口径与面板提示一致）；
     // 客户端断连（499）与上游截断/中断的半截回复不扣费
     if st == ctx.status && !client_gone && truncated.is_empty() {
-        if let Some((uid, kid)) = &ctx.user {
+        if let Some(uc) = &ctx.user {
             crate::users::bill(
-                uid, kid,
+                &uc.id, &uc.key_id,
                 &util::str_or(key.get("upstream_id"), ""),
-                &ctx.model, &ctx.up_model,
+                uc.charge.as_ref().map(|c| c.model.as_str()).unwrap_or(&ctx.model), &ctx.up_model,
                 st, ms,
                 util::int_or(usage.get("prompt_tokens"), 0),
                 util::int_or(usage.get("completion_tokens"), 0),
                 true,
+                uc.charge.as_ref().map(|c| &c.pricing),
             );
         }
-        if let Some(pk) = &ctx.prize_key {
-            if ctx.prize_metered {
-                crate::wheel::prize_key_consume(pk);
-            }
-        }
+
     }
     // 训练资料：正常结束的流式对话全文（截断/断连的半截语料污染训练集，不要）
     if !client_gone && truncated.is_empty() && ctx.capture_train {
@@ -1873,7 +1847,6 @@ async fn run_pump(
     // 响应体在「释放 + 记录」全部完成之后才关闭：客户端一收到流结束，
     // 训练记录/释放日志就必须已经在库里（与 Python 生成器 finally 的语义一致），
     // 否则紧接着的查询会看不到刚结束的对话（实测套件就因此失败）
-    drop(_prize_guard);
     drop(tx);
 }
 
@@ -1883,11 +1856,10 @@ fn spawn_pump(
     key: Value,
     first_chunk: Option<Bytes>,
     ctx: StreamCtx,
-    prize_guard: Option<PrizeGuard>,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     let hold = HoldGuard::new(Some(key.clone()), &ctx.ep, &ctx.model, &ctx.ip, &ctx.tok, true);
-    tokio::spawn(run_pump(resp, key, first_chunk, ctx, tx, prize_guard, hold));
+    tokio::spawn(run_pump(resp, key, first_chunk, ctx, tx, hold));
     sse_body_response(rx)
 }
 
@@ -1907,11 +1879,12 @@ fn sse_body_response(rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Erro
 pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Bytes) -> Response {
     let cfg = cfg_all();
     let entry = token_entry(&ctx, &cfg);
-    // 奖品 Key（sk-prz-…）：体验卡/专属额度，单模型受限调用，不走用户计费
-    let mut prize_ctx: Option<PrizeCtx> = None;
     // 用户 Key（sk-usr-…）：多用户计费链路
     let mut user_ctx: Option<UserCtx> = None;
     if let Some(b) = ctx.bearer() {
+        if b.starts_with("sk-prz-") {
+            return error_resp(401, "此 Key 已停用，请在用户中心创建 API Key", "invalid_request_error", Some("invalid_api_key"), false);
+        }
         if b.starts_with(crate::users::user_key_prefix()) {
             match crate::users::lookup_user_key(&b) {
                 Some((u, t)) => {
@@ -1919,6 +1892,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         id: util::str_or(u.get("id"), ""),
                         key_id: util::str_or(t.get("id"), ""),
                         kind: crate::users::key_kind(&t),
+                        charge: None,
                     });
                 }
                 None => {
@@ -1931,22 +1905,9 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     );
                 }
             }
-        } else if b.starts_with(crate::wheel::PRIZE_KEY_PREFIX) {
-            match crate::wheel::lookup_prize_key(&b) {
-                Ok(row) => {
-                    prize_ctx = Some(PrizeCtx {
-                        key: b.clone(),
-                        model: util::str_or(row.get("model"), ""),
-                        metered: row.get("type").and_then(Value::as_str) == Some("model_quota"),
-                    });
-                }
-                Err(e) => {
-                    return error_resp(401, e, "invalid_request_error", Some("invalid_api_key"), false);
-                }
-            }
         }
     }
-    if user_ctx.is_none() && prize_ctx.is_none() && has_auth(&cfg) && entry.is_none() {
+    if user_ctx.is_none() && has_auth(&cfg) && entry.is_none() {
         return error_resp(
             401,
             "访问令牌无效。请在后台「系统设置」中配置访问令牌，并以 Authorization: Bearer <令牌> 调用。",
@@ -1991,31 +1952,12 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
     // 模型上下文/输出上限：按客户端可见名匹配，发送前钳制（只降不升）
     let model_limits = upstreams::parse_model_limits(&cfg);
     let tok = util::str_or(entry.as_ref().and_then(|e| e.get("t")), "");
-    // 链解析无条件执行（含奖品 Key 锁定链名场景），延迟初始化
     let chain: Option<upstreams::ModelChain>;
     let mut chain_pos: usize = 0;
     let mut advance_member = false;
     let requested_model = model.clone();
-    // 奖品 Key：模型范围由奖品自身锁定。请求名与锁定名经别名互通即可放行，
-    // 并统一改写为锁定的规范名（路由/计费口径一致）；跳过通用 404 校验
-    // （锁定名可能是被隐藏的映射目标名，通用校验会误杀）
-    if let Some(pc) = &prize_ctx {
-        if !crate::upstreams::models_alias_linked(&model, &pc.model) {
-            return error_resp(
-                403,
-                &format!("该奖品 Key 仅限模型 {}，本次请求模型 {}", util::char_prefix(&pc.model, 80), util::char_prefix(&model, 80)),
-                "invalid_request_error",
-                Some("prize_model_not_allowed"),
-                false,
-            );
-        }
-        if model != pc.model {
-            req["model"] = Value::from(pc.model.clone());
-            model = pc.model.clone();
-        }
-    }
+
     // 降级链：链名请求按成员路由，正文输出前的失败静默换下一个成员。
-    // 奖品 Key 锁定链名时同样生效（此前 chat 路径奖品+链名会 404，与 convert 不一致）
     let chains = upstreams::parse_model_chains(&cfg);
     chain = upstreams::chain_by_name(&chains, &model).cloned();
     if let Some(c) = &chain {
@@ -2039,27 +1981,12 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                 }
             }
         }
-    } else if prize_ctx.is_none() {
-        // 通用 404 校验；奖品 Key 跳过（锁定名可能是被隐藏的映射目标名，通用校验会误杀）
+    } else {
         if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, false) {
             return bad;
         }
     }
-    // 奖品 Key：模型锁定 + 并发占位（超限 429）。占位由 HoldGuard 式 Drop 释放。
-    let mut prize_guard: Option<PrizeGuard> = None;
-    if let Some(pc) = &prize_ctx {
-        // 模型锁定已在入口统一校验/改写（别名互通口径）
-        if let Err(message) = crate::wheel::prize_key_acquire(&pc.key) {
-            return error_resp(
-                429,
-                message,
-                "rate_limit_error",
-                None,
-                false,
-            );
-        }
-        prize_guard = Some(PrizeGuard { key: pc.key.clone() });
-    }
+
     // 多用户链路：Key 类型限制（免费/付费专用 Key）+ 余额预检 + 用户级每分钟限速
     if let Some(uc) = &user_ctx {
         let Some(u) = crate::users::auth_user(&uc.id) else {
@@ -2264,6 +2191,16 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         convert::normalize_body_types(&mut wire_body);
         wire_body["model"] = Value::from(up_model.clone());
         wire_body["stream"] = Value::Bool(stream);
+        if let Some(uc) = &mut user_ctx {
+            uc.charge = None;
+            match crate::billing::reserve(&uc.id, &util::str_or(key.get("upstream_id"), ""), &model, &wire_body, est, ep_tag == "emb") {
+                Ok(charge) => uc.charge = Some(charge),
+                Err(message) => {
+                    hold.clear(); pool::dec_inflight(&util::str_or(key.get("id"), ""));
+                    break 'attempts Some(error_resp(402, &message, "insufficient_quota", Some("insufficient_quota"), false));
+                }
+            }
+        }
         let body = serde_json::to_string(&wire_body).unwrap_or_default();
         let t0 = Instant::now();
         let mut rerr = String::new();
@@ -2357,11 +2294,9 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             hold.handoff();
             break 'attempts Some(slow_start_response(
                 fut, key, ctx, body, rdial_chat, ep_tag, &requested_model, &up_model, attempt, t0, tok, None, stream,
-                user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
-                prize_ctx.as_ref().map(|p| p.key.clone()),
+                user_ctx.clone(),
                 client_wants_usage,
-                prize_guard.take(),
-                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false), wire_plan,
+                wire_plan,
             ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
@@ -2475,13 +2410,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                         protocol: None,
                         capture_train: !no_training(&ctx.headers)
                             && util::cfg_int(&cfg, "training_log_max", 500) > 0,
-                        user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
-                        prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
-                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
+                        user: user_ctx.clone(),
                         want_usage: client_wants_usage,
                         recovery: rdial_chat,
                     },
-                    prize_guard.take(),
                 ));
             } else {
                 let text = first_chunk
@@ -2555,13 +2487,10 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                             protocol: None,
                             capture_train: !no_training(&ctx.headers)
                                 && util::cfg_int(&cfg, "training_log_max", 500) > 0,
-                            user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
-                            prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
-                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
+                            user: user_ctx.clone(),
                             want_usage: client_wants_usage,
                             recovery: rdial_chat,
                     },
-                        prize_guard.take(),
                 ));
                 }
             }
@@ -2726,23 +2655,19 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
         )
         .await;
         if success {
-            if let Some((uid, kid)) = user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())) {
+            if let Some(uc) = &user_ctx {
                 crate::users::bill(
-                    &uid, &kid,
+                    &uc.id, &uc.key_id,
                     &util::str_or(key.get("upstream_id"), ""),
                     &model, &up_model,
                     rstatus, ms,
                     util::int_or(usage.get("prompt_tokens"), 0),
                     util::int_or(usage.get("completion_tokens"), 0),
                     false,
+                    uc.charge.as_ref().map(|c| &c.pricing),
                 );
             }
-            // 奖品 Key：专属额度计次（仅成功调用）
-            if let Some(pc) = &prize_ctx {
-                if pc.metered {
-                    crate::wheel::prize_key_consume(&pc.key);
-                }
-            }
+
         }
         if success {
             let mut j: Value = serde_json::from_str(&rbody).unwrap_or(Value::Null);
@@ -2918,11 +2843,8 @@ fn slow_start_response(
     tok: String,
     protocol: Option<String>,
     _stream: bool,
-    user: Option<(String, String)>,
-    prize_key: Option<String>,
+    user: Option<UserCtx>,
     want_usage: bool,
-    prize_guard: Option<PrizeGuard>,
-    prize_metered: bool,
     wire_plan: crate::bridge::Plan,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
@@ -3048,12 +2970,10 @@ fn slow_start_response(
             protocol,
             capture_train,
             user,
-            prize_key,
             want_usage,
-            prize_metered,
             recovery,
         };
-        run_pump(wire_plan.stream(resp), key, None, sctx, tx, prize_guard, hold).await;
+        run_pump(wire_plan.stream(resp), key, None, sctx, tx, hold).await;
     });
     sse_body_response(rx)
 }
@@ -3123,9 +3043,11 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     let ep = if protocol == "responses" { "resp" } else { "msg" };
     let cfg = cfg_all();
     let entry = token_entry(&ctx, &cfg);
-    let mut prize_ctx: Option<PrizeCtx> = None;
     let mut user_ctx: Option<UserCtx> = None;
     if let Some(b) = ctx.bearer() {
+        if b.starts_with("sk-prz-") {
+            return error_resp(401, "此 Key 已停用，请在用户中心创建 API Key", "invalid_request_error", Some("invalid_api_key"), anthropic);
+        }
         if b.starts_with(crate::users::user_key_prefix()) {
             match crate::users::lookup_user_key(&b) {
                 Some((u, t)) => {
@@ -3133,6 +3055,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         id: util::str_or(u.get("id"), ""),
                         key_id: util::str_or(t.get("id"), ""),
                         kind: crate::users::key_kind(&t),
+                        charge: None,
                     });
                 }
                 None => {
@@ -3148,23 +3071,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     );
                 }
             }
-        } else if b.starts_with(crate::wheel::PRIZE_KEY_PREFIX) {
-            match crate::wheel::lookup_prize_key(&b) {
-                Ok(row) => {
-                    prize_ctx = Some(PrizeCtx {
-                        key: b.clone(),
-                        model: util::str_or(row.get("model"), ""),
-                        metered: row.get("type").and_then(Value::as_str) == Some("model_quota"),
-                    });
-                }
-                Err(e) => {
-                    let msg = if anthropic { "invalid x-api-key" } else { e };
-                    return error_resp(401, msg, "invalid_request_error", Some("invalid_api_key"), anthropic);
-                }
-            }
         }
     }
-    if user_ctx.is_none() && prize_ctx.is_none() && has_auth(&cfg) && entry.is_none() {
+    if user_ctx.is_none() && has_auth(&cfg) && entry.is_none() {
         if anthropic {
             return error_resp(401, "invalid x-api-key", "invalid_request_error", None, true);
         }
@@ -3189,7 +3098,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     if !req0.is_object() {
         return error_resp(400, "请求体不是合法 JSON", "invalid_request_error", None, anthropic);
     }
-    let mut req = req0.clone();
+    let req = req0.clone();
     let chat_req_v = if anthropic {
         convert::anthropic_to_chat(&req)
     } else {
@@ -3206,23 +3115,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
     let mut chain_pos: usize = 0;
     let mut advance_member = false;
     let requested_model = model.clone();
-    // 奖品 Key：模型锁定口径与 chat 直通一致（别名互通 + 跳过通用 404）
-    if let Some(pc) = &prize_ctx {
-        if !crate::upstreams::models_alias_linked(&model, &pc.model) {
-            return error_resp(
-                403,
-                &format!("该奖品 Key 仅限模型 {}，本次请求模型 {}", util::char_prefix(&pc.model, 80), util::char_prefix(&model, 80)),
-                "invalid_request_error",
-                Some("prize_model_not_allowed"),
-                anthropic,
-            );
-        }
-        if model != pc.model {
-            req["model"] = Value::from(pc.model.clone());
-            chat_req["model"] = Value::from(pc.model.clone());
-            model = pc.model.clone();
-        }
-    }
+
     let stream = match stream_value(req.get("stream")) {
         Ok(stream) => stream,
         Err(message) => return error_resp(400, &message, "invalid_request_error", None, anthropic),
@@ -3250,7 +3143,6 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         "max_output_tokens": req.get("max_output_tokens").cloned().unwrap_or(Value::Null),
         "reasoning_effort": reasoning_effort,
     });
-    // 降级链：链名请求按成员路由（奖品 Key 锁定链名时同样生效）
     if chain.is_none() {
         let chains = upstreams::parse_model_chains(&cfg);
         chain = upstreams::chain_by_name(&chains, &model).cloned();
@@ -3276,28 +3168,12 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             }
         }
     }
-    if chain.is_none() && prize_ctx.is_none() {
-        // 通用 404 校验；奖品 Key 跳过（锁定名可能是被隐藏的映射目标名，通用校验会误杀）。
-        // 此前 convert 缺这个豁免，与 chat 口径不一致：锁定隐藏名的奖品 Key 会 404
+    if chain.is_none() {
         if let Some(bad) = check_model(&model, entry.as_ref(), &cfg, anthropic) {
             return bad;
         }
     }
-    // 奖品 Key：模型锁定 + 并发占位
-    let mut prize_guard: Option<PrizeGuard> = None;
-    if let Some(pc) = &prize_ctx {
-        // 模型锁定已在入口统一校验/改写（别名互通口径）
-        if let Err(message) = crate::wheel::prize_key_acquire(&pc.key) {
-            return error_resp(
-                429,
-                message,
-                "rate_limit_error",
-                None,
-                anthropic,
-            );
-        }
-        prize_guard = Some(PrizeGuard { key: pc.key.clone() });
-    }
+
     if let Some(uc) = &user_ctx {
         let Some(u) = crate::users::auth_user(&uc.id) else {
             return error_resp(401, "用户已被停用", "invalid_request_error", None, anthropic);
@@ -3491,6 +3367,16 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         convert::normalize_body_types(&mut wire_body);
         wire_body["model"] = Value::from(up_model.clone());
         wire_body["stream"] = Value::Bool(stream);
+        if let Some(uc) = &mut user_ctx {
+            uc.charge = None;
+            match crate::billing::reserve(&uc.id, &util::str_or(key.get("upstream_id"), ""), &model, &wire_body, est, false) {
+                Ok(charge) => uc.charge = Some(charge),
+                Err(message) => {
+                    hold.clear(); pool::dec_inflight(&util::str_or(key.get("id"), ""));
+                    break 'attempts Some(error_resp(402, &message, "insufficient_quota", Some("insufficient_quota"), anthropic));
+                }
+            }
+        }
         let raw = serde_json::to_string(&wire_body).unwrap_or_default();
         let t0 = Instant::now();
         let mut rerr = String::new();
@@ -3582,13 +3468,9 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             break 'attempts Some(slow_start_response(
                 fut, key, ctx, raw, rdial_conv, ep, &requested_model, &up_model, attempt, t0, tok,
                 Some(protocol.to_string()), stream,
-                user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
-                prize_ctx.as_ref().map(|p| p.key.clone()),
+                user_ctx.clone(),
                 false,
-                prize_guard.take(),
-                // 计次必须跟 chat 端点同口径：写死 false 会让专属额度奖品 Key
-                // 走兜底流时 used 永不累加，额度上限形同虚设
-                prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false), wire_plan,
+                wire_plan,
             ));
         }
         if rstatus == 0 && !rerr.is_empty() && got_resp.is_none() {
@@ -3692,13 +3574,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                         protocol: Some(protocol.to_string()),
                         capture_train: !no_training(&ctx.headers)
                             && util::cfg_int(&cfg, "training_log_max", 500) > 0,
-                        user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
-                        prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
-                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
+                        user: user_ctx.clone(),
                             want_usage: false,
                             recovery: rdial_conv,
                     },
-                    prize_guard.take(),
                 ));
             } else {
                 let text = first_chunk
@@ -3770,13 +3649,10 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                             protocol: Some(protocol.to_string()),
                             capture_train: !no_training(&ctx.headers)
                                 && util::cfg_int(&cfg, "training_log_max", 500) > 0,
-                            user: user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())),
-                            prize_key: prize_ctx.as_ref().map(|p| p.key.clone()),
-                        prize_metered: prize_ctx.as_ref().map(|p| p.metered).unwrap_or(false),
+                            user: user_ctx.clone(),
                                 want_usage: false,
                                 recovery: rdial_conv,
                     },
-                        prize_guard.take(),
                 ));
                 }
             }
@@ -3933,23 +3809,19 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
         )
         .await;
         if success {
-            if let Some((uid, kid)) = user_ctx.as_ref().map(|u| (u.id.clone(), u.key_id.clone())) {
+            if let Some(uc) = &user_ctx {
                 crate::users::bill(
-                    &uid, &kid,
+                    &uc.id, &uc.key_id,
                     &util::str_or(key.get("upstream_id"), ""),
                     &model, &up_model,
                     rstatus, ms,
                     util::int_or(usage.get("prompt_tokens"), 0),
                     util::int_or(usage.get("completion_tokens"), 0),
                     false,
+                    uc.charge.as_ref().map(|c| &c.pricing),
                 );
             }
-            // 奖品 Key：专属额度计次（仅成功调用）
-            if let Some(pc) = &prize_ctx {
-                if pc.metered {
-                    crate::wheel::prize_key_consume(&pc.key);
-                }
-            }
+
         }
         if success {
             let mut chat: Value = serde_json::from_str(&rbody).unwrap_or(Value::Null);
@@ -4094,9 +3966,10 @@ pub async fn v1_models(ctx: Ctx) -> Response {
     let entry = token_entry(&ctx, &cfg);
     // 用户 Key：按 Key 类型过滤可见模型（免费 Key 只见免费模型，付费 Key 只见付费模型）
     let mut user_kind: Option<&'static str> = None;
-    // 奖品 Key：只见锁定的单个模型
-    let mut prize_model: Option<String> = None;
     if let Some(b) = ctx.bearer() {
+        if b.starts_with("sk-prz-") {
+            return error_resp(401, "此 Key 已停用，请在用户中心创建 API Key", "invalid_request_error", Some("invalid_api_key"), false);
+        }
         if b.starts_with(crate::users::user_key_prefix()) {
             match crate::users::lookup_user_key(&b) {
                 Some((_u, t)) => user_kind = Some(crate::users::key_kind(&t)),
@@ -4104,28 +3977,16 @@ pub async fn v1_models(ctx: Ctx) -> Response {
                     return error_resp(401, "调用 Key 无效或已被停用", "invalid_request_error", Some("invalid_api_key"), false);
                 }
             }
-        } else if b.starts_with(crate::wheel::PRIZE_KEY_PREFIX) {
-            match crate::wheel::lookup_prize_key(&b) {
-                Ok(row) => prize_model = Some(util::str_or(row.get("model"), "")),
-                Err(e) => {
-                    return error_resp(401, e, "invalid_request_error", Some("invalid_api_key"), false);
-                }
-            }
         }
     }
-    if user_kind.is_none() && prize_model.is_none() && has_auth(&cfg) && entry.is_none() {
+    if user_kind.is_none() && has_auth(&cfg) && entry.is_none() {
         return error_resp(401, "访问令牌无效", "invalid_request_error", Some("invalid_api_key"), false);
     }
     let out: Vec<Value> = gateway_model_ids()
         .into_iter()
         .filter(|m| model_allowed(m, entry.as_ref(), &cfg))
-        .filter(|m| match &prize_model {
-            Some(pm) => m == pm,
-            None => true,
-        })
         .filter(|m| match user_kind {
-            Some("free") => !crate::users::model_is_paid(m),
-            Some("paid") => crate::users::model_is_paid(m),
+            Some(kind) => crate::users::key_allows_model(kind, m),
             _ => true,
         })
         .map(|m| {
@@ -4139,8 +4000,10 @@ pub async fn v1_model_retrieve(ctx: Ctx, model_id: String) -> Response {
     let cfg = cfg_all();
     let entry = token_entry(&ctx, &cfg);
     let mut user_kind: Option<&'static str> = None;
-    let mut prize_model: Option<String> = None;
     if let Some(b) = ctx.bearer() {
+        if b.starts_with("sk-prz-") {
+            return error_resp(401, "此 Key 已停用，请在用户中心创建 API Key", "invalid_request_error", Some("invalid_api_key"), false);
+        }
         if b.starts_with(crate::users::user_key_prefix()) {
             match crate::users::lookup_user_key(&b) {
                 Some((_u, t)) => user_kind = Some(crate::users::key_kind(&t)),
@@ -4148,30 +4011,14 @@ pub async fn v1_model_retrieve(ctx: Ctx, model_id: String) -> Response {
                     return error_resp(401, "调用 Key 无效或已被停用", "invalid_request_error", Some("invalid_api_key"), false);
                 }
             }
-        } else if b.starts_with(crate::wheel::PRIZE_KEY_PREFIX) {
-            match crate::wheel::lookup_prize_key(&b) {
-                Ok(row) => prize_model = Some(util::str_or(row.get("model"), "")),
-                Err(e) => {
-                    return error_resp(401, e, "invalid_request_error", Some("invalid_api_key"), false);
-                }
-            }
         }
     }
-    if user_kind.is_none() && prize_model.is_none() && has_auth(&cfg) && entry.is_none() {
+    if user_kind.is_none() && has_auth(&cfg) && entry.is_none() {
         return error_resp(401, "访问令牌无效", "invalid_request_error", Some("invalid_api_key"), false);
     }
-    if prize_model.is_some() && prize_model.as_deref() != Some(model_id.as_str()) {
-        return error_resp(
-            404,
-            &format!("The model '{}' does not exist", model_id),
-            "invalid_request_error",
-            Some("model_not_found"),
-            false,
-        );
-    }
+
     if user_kind.is_some() && !match user_kind {
-        Some("free") => !crate::users::model_is_paid(&model_id),
-        Some("paid") => crate::users::model_is_paid(&model_id),
+        Some(kind) => crate::users::key_allows_model(kind, &model_id),
         _ => true,
     } {
         return error_resp(
@@ -4274,6 +4121,8 @@ mod tests {
         let _g = crate::store::test_lock();
         let dir = std::env::temp_dir().join(format!("nim-gateway-test-{}", util::rand_hex(8)));
         std::env::set_var("NGW_DATA_DIR", &dir);
+        std::fs::create_dir_all(dir.join("db")).unwrap();
+        store().discard_memory();
         store().update(|db| {
             db["config"]["sse_idle_timeout"] = json!(1);
             db["upstreams"] = json!([{"id":"test", "enabled":true, "prices":{"public":1.0}}]);
@@ -4317,10 +4166,10 @@ mod tests {
                     body:"{}".into(), ip:"test".into(), tok:"test".into(), status:200, attempt:1,
                     t0:Instant::now(), rewrite:true, heartbeat:true, ttfb_deadline:1.0,
                     protocol:protocol.map(str::to_string), capture_train:false,
-                    user:Some(("user".into(), "key".into())), prize_key:None, prize_metered:false, want_usage:protocol.is_none(),
+                    user:Some(UserCtx {id:"user".into(),key_id:"key".into(),kind:"all",charge:None}), want_usage:protocol.is_none(),
                     recovery:None,
                 };
-                let output = spawn_pump(response, key, first, ctx, None);
+                let output = spawn_pump(response, key, first, ctx);
                 let bytes = tokio::time::timeout(Duration::from_secs(5), axum::body::to_bytes(output.into_body(), 1024*1024))
                     .await.unwrap().unwrap();
                 let text = String::from_utf8(bytes.to_vec()).unwrap();
@@ -4368,13 +4217,13 @@ mod tests {
             ep:"chat".into(), ep_tag:"chat".into(), model:"public".into(), up_model:"private".into(),
             body:"{}".into(), ip:"test".into(), tok:"test".into(), status:200, attempt:1,
             t0:Instant::now(), rewrite:false, heartbeat:false, ttfb_deadline:300.0,
-            protocol:None, capture_train:false, user:None, prize_key:None, prize_metered:false, want_usage:false,
+            protocol:None, capture_train:false, user:None, want_usage:false,
             recovery:None,
         };
         let hold = HoldGuard::new(Some(key.clone()), "chat", "public", "test", "test", true);
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(rx);
-        tokio::time::timeout(Duration::from_secs(1), run_pump(response, key, None, ctx, tx, None, hold)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), run_pump(response, key, None, ctx, tx, hold)).await.unwrap();
         assert_eq!(pool::inflight_of(&id), 0);
         server.abort();
 
@@ -4434,7 +4283,6 @@ mod tests {
         upstream_server.abort();
         crate::bridge::tests::gateway_matrix().await;
         crate::store::reward_recovery_regressions();
-        crate::wheel::tests::reward_regressions();
         assert_eq!(pool::inflight_odd_releases(), odd_before);
         std::fs::remove_dir_all(dir).unwrap();
     }

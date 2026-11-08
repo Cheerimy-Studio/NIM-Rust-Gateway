@@ -24,9 +24,10 @@ jobs:
           node --check web/admin.js
           node --check web/user.js
           node --check web/webclaw.js
+          node --check web/webclaw-agent.js
           node --check web/ui.js
           node tests/frontend-console.cjs
-          node tests/frontend-rewards.cjs
+          node tests/frontend-user-init.cjs
       - name: Check WebClaw project file format and send path
         run: |
           node tests/frontend-webclaw.cjs
@@ -44,4 +45,7 @@ jobs:
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m playwright install --with-deps chromium
       - name: Console HTTP and browser regressions
-        run: python tests/console_e2e.py --ui
+        run: |
+          python tests/console_e2e.py
+          python tests/billing_e2e.py
+          python tests/console_e2e.py --ui

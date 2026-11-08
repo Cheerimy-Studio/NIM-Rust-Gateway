@@ -1,6 +1,6 @@
 # NIM Rust Gateway
 
-免费、免注册的 OpenAI 兼容 AI 网关。聚合 NVIDIA NIM 与任意 OpenAI 兼容上游，单文件二进制，web 控制台内嵌，无运行时依赖。
+OpenAI 与 Anthropic 兼容网关。聚合 NVIDIA NIM 与任意 OpenAI 兼容上游，单文件二进制，web 控制台内嵌，无运行时依赖。
 
 ## 功能
 
@@ -9,11 +9,11 @@
 - 请求处理：失败自动换号重试、429 吸收、同号快速重试、无可用账号时排队等待
 - 流式：SSE 逐块透传，慢推理模型心跳保活，首字节超时与空闲超时独立控制
 - 协议：OpenAI Chat / Completions / Embeddings / Responses 与 Anthropic Messages，含流式事件转换
-- 多用户计费：用户与调用 Key（可限定免费 / 付费 / 全部模型）、按渠道模型定价、余额预检、用户级限速、调用日志与模型广场
+- 多用户计费：用户与调用 Key（可限定免费 / 付费 / 全部模型）、按次 / 输入输出 token / 输入长度档位定价、并发额度预占、用户级限速、调用日志与模型广场
 - 账本：赠金与充值分离记账，计费优先扣赠金；累计调用与累计消费按用户持久累计（不受日志裁剪影响）
-- 福利：每日签到（可选开启）、抽奖活动（多活动、奖项概率合计 100%、可设真实权重）
-- 奖品：余额 / 赠金直接入账；模型体验卡与专属额度发放独立 Key（单模型锁定、并发上限、次数额度、到期时间）
-- 管理后台：账号、渠道、限额、日志、排队、拦截规则、训练资料、用户、模型定价、抽奖、配置导入导出
+- 每日签到：可选开启，赠金与余额统一入账
+- 管理后台：账号、渠道、限额、日志、排队、拦截规则、训练资料、用户、模型定价、配置导入导出
+- WebClaw：在浏览器运行 Agent 工具循环，支持本机文本文件、目录读写确认与文件下载；模型推理通过网关
 - 自动更新：GitHub Releases 正式版，手动触发或定时自动检查，带备份与一键回滚
 
 ## 构建
@@ -76,7 +76,6 @@ data/db/intercepted.json  拦截记录
 data/db/queue.json        排队
 data/db/metrics.json      统计、限速窗口、熔断与负缓存
 data/db/users.json        用户、调用 Key、调用日志、限速窗口
-data/db/wheels.json       抽奖活动、奖品 Key、抽奖记录、幂等回执
 data/db/signs/            旧版每日签到记录，新签到标记与余额同存 users.json
 data/db/reward_journal.json 奖励事务恢复日志，仅在提交与写回之间存在
 ```
@@ -88,12 +87,13 @@ data/db/reward_journal.json 奖励事务恢复日志，仅在提交与写回之�
 
 ```bash
 cargo test --locked --all-targets
-node tests/frontend-rewards.cjs
 node tests/frontend-console.cjs
 node tests/frontend-webclaw.cjs
 node tests/frontend-webclaw-send.cjs
 python tests/webclaw_e2e.py
 python tests/console_e2e.py
+python tests/billing_e2e.py
+node tests/frontend-user-init.cjs
 ```
 
 浏览器回归需要 `pip install -r requirements-dev.txt` 和 `python -m playwright install chromium`，
@@ -211,22 +211,19 @@ GET  /queue                    公开排队页
 ```
 
 
-鉴权：用户在用户中心生成 API Key（`sk-usr-` 前缀），`Authorization: Bearer <Key>` 调用；也可在后台生成访问令牌。奖品 Key（`sk-prz-` 前缀）仅能调用其锁定的模型。
+鉴权：用户在用户中心生成 API Key（`sk-usr-` 前缀），`Authorization: Bearer <Key>` 调用；也可在后台生成访问令牌。旧版奖品 Key 已停用。
 
 ## 许可
 
 [AGPL-3.0](LICENSE)
 
-## 签到与抽奖
+## 签到
 
-签到标记、赠金和流水在同一奖励事务内提交；抽奖的扣费、发奖、抵扣次数与回执也统一提交。
-提交日志在分表写回前同步落盘，异常退出后先恢复未完成事务。旧版每日签到文件继续读取，损坏时拒绝领奖。
-日期按服务进程本地时区计算；使用北京时间时设置 `TZ=Asia/Shanghai`。
+签到标记、赠金和流水在同一事务内提交，启动时先恢复未完成的提交日志。
+旧版每日签到文件继续读取，损坏时拒绝重复入账。日期按服务进程本地时区计算，
+使用北京时间时设置 `TZ=Asia/Shanghai`。
 
-抽奖请求可携带 `request_id`、`requested_at` 和 `expected_cost`。网页自动填写这些字段：
-同一用户的重复 ID 返回原回执，确认价格变化时拒绝扣费。回执保留最近 24 小时内最多 100 条；
-带请求时间的过期或已归档请求会拒绝重新抽取，避免网络重试再次扣费。自建客户端应保留同一 ID 和原请求时间重试。
-未提供这些字段的旧客户端仍可调用，但没有完整的重试与价格确认保护。
+## 按 token 计费与 WebClaw
 
-用户端显示实际中奖概率，扇区大小仍由展示权重控制。奖品次数必须为正整数；有效时长、金额和权重会在保存时校验。
-奖品 Key 的在途请求预留剩余次数，失败释放，仅成功消耗额度。详细修复和兼容说明见 `docs/REWARDS-REVIEW-2026-10-18.md`。
+1.7.60 的计费单位、长度档位、浏览器文件工具和升级注意事项见
+[本次修复说明](docs/FIX-1.7.60-20261108.md)。

@@ -1033,7 +1033,7 @@ fn upstream_alias_rows(db: &Value) -> Vec<Value> {
             let (ctx, out, tps) = (meta.ctx, meta.out, meta.tps);
             let routable = crate::upstreams::channel_serves_model(u, &client, global_hide, transparent)
                 || models_list.iter().any(|m| m == upstream);
-            let price = prices.get(&client).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let price = prices.get(&client).cloned().unwrap_or(json!(0));
             rows.push(json!({
                 "channel_id": uid, "channel_name": uname,
                 "upstream": upstream, "alias": alias,
@@ -1146,7 +1146,7 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     let out = util::int_or(body.get("out"), 0);
     let tps = util::int_or(body.get("tps"), 0);
     // 价格可选：不传 = 不动现有定价（批量标注场景只发 ctx/out/tps）
-    let price_req: Option<f64> = body.get("price").and_then(|v| v.as_f64());
+    let price_req = body.get("price").cloned();
     if ch_id.is_empty() || upstream.is_empty() || upstream.chars().count() > 160 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "参数缺失或模型名过长"}}))).into_response();
     }
@@ -1173,8 +1173,8 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
     if tps < 0 || tps > 1_000_000 {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "速度数值非法"}}))).into_response();
     }
-    if let Some(price) = price_req {
-        if !(0.0..=100_000.0).contains(&price) {
+    if let Some(price) = &price_req {
+        if crate::billing::validate(price).is_err() {
             return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "价格数值非法"}}))).into_response();
         }
     }
@@ -1230,8 +1230,8 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
             if let Some(o) = u.as_object_mut() {
                 let prices = o.entry("prices".to_string()).or_insert_with(|| json!({}));
                 if let Some(pm) = prices.as_object_mut() {
-                    if price > 0.0 {
-                        pm.insert(client.clone(), json!(util::round6(price)));
+                    if crate::billing::paid(&price) {
+                        pm.insert(client.clone(), price);
                     } else {
                         pm.remove(&client);
                     }
@@ -2359,205 +2359,28 @@ pub async fn user_logs_admin(headers: &HeaderMap, raw_query: Option<String>) -> 
     json_resp(json!({"rows": rows, "total": total, "kind": kind, "per": per.clamp(1, 300)}))
 }
 
-// ============================================================ 拉人活动
-
-/// 活动列表
-pub async fn promo_list(headers: &HeaderMap) -> Response {
-    if let Err(e) = require(headers, false) {
-        return e;
-    }
-    json_resp(json!({"rows": crate::promo::admin_list()}))
-}
-
-/// 保存（新建/编辑）活动。body: {id?, name, amount, target, enabled}
-pub async fn promo_save(headers: &HeaderMap, body: Bytes) -> Response {
-    if let Err(e) = require(headers, true) {
-        return e;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
-        )
-            .into_response();
-    };
-    let name = util::str_or(body.get("name"), "").trim().to_string();
-    let amount = util::f64_or(body.get("amount"), 0.0);
-    let target = util::int_or(body.get("target"), 0);
-    if name.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "活动名称不能为空"}})),
-        )
-            .into_response();
-    }
-    if !(amount > 0.0) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "奖励金额必须大于 0"}})),
-        )
-            .into_response();
-    }
-    if target < 1 {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "拉人次数至少 1"}})),
-        )
-            .into_response();
-    }
-    let id_in = util::str_or(body.get("id"), "");
-    let enabled = body.get("enabled").map(util::truthy).unwrap_or(false);
-    let now = util::now_i();
-    let mut err = String::new();
-    let mut out_id = String::new();
-    store().update(|db| {
-        let arr = crate::promo::events_arr(db);
-        if !id_in.is_empty() {
-            let Some(row) = arr.iter_mut().find(|e| util::str_or(e.get("id"), "") == id_in) else {
-                err = "活动不存在".into();
-                return;
-            };
-            // 7 天期活动过期后不可重开（新开活动请新建）
-            if enabled {
-                let exp = util::int_or(row.get("expires_at"), 0);
-                if exp > 0 && now >= exp {
-                    err = "活动已过 7 天有效期，无法重新开启（请新建活动）".into();
-                    return;
-                }
-            }
-            if let Some(o) = row.as_object_mut() {
-                o.insert("name".into(), json!(util::str_cut(&name, 40)));
-                o.insert("amount".into(), json!(util::round6(amount)));
-                o.insert("target".into(), json!(target));
-                o.insert("enabled".into(), json!(enabled));
-            }
-            out_id = id_in;
-        } else {
-            let id = format!("pe_{}", util::rand_hex(6));
-            arr.push(json!({
-                "id": id,
-                "name": util::str_cut(&name, 40),
-                "amount": util::round6(amount),
-                "target": target,
-                "enabled": enabled,
-                "created_at": now,
-                "expires_at": now + crate::promo::EVENT_TTL_SECS,
-            }));
-            out_id = id;
-        }
-    });
-    if !err.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": err}})),
-        )
-            .into_response();
-    }
-    store().flush();
-    json_resp(json!({"ok": true, "id": out_id}))
-}
-
-/// 活动操作：启用/停用/删除
-pub async fn promo_op(headers: &HeaderMap, body: Bytes) -> Response {
-    if let Err(e) = require(headers, true) {
-        return e;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
-        )
-            .into_response();
-    };
-    let id = util::str_or(body.get("id"), "");
-    let op = util::str_or(body.get("op"), "");
-    let op = op.as_str();
-    let now = util::now_i();
-    let mut err = String::new();
-    store().update(|db| {
-        let arr = crate::promo::events_arr(db);
-        let Some(row) = arr.iter_mut().find(|e| util::str_or(e.get("id"), "") == id) else {
-            err = "活动不存在".into();
-            return;
-        };
-        match op {
-            "enable" => {
-                let exp = util::int_or(row.get("expires_at"), 0);
-                if exp > 0 && now >= exp {
-                    err = "活动已过 7 天有效期，无法重新开启（请新建活动）".into();
-                    return;
-                }
-                if let Some(o) = row.as_object_mut() {
-                    o.insert("enabled".into(), json!(true));
-                }
-            }
-            "disable" => {
-                if let Some(o) = row.as_object_mut() {
-                    o.insert("enabled".into(), json!(false));
-                }
-            }
-            "delete" => {
-                arr.retain(|e| util::str_or(e.get("id"), "") != id);
-            }
-            _ => err = "未知操作".into(),
-        }
-    });
-    if !err.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": err}})),
-        )
-            .into_response();
-    }
-    store().flush();
-    json_resp(json!({"ok": true}))
-}
-
 // ============================================================ 模型定价
 
 /// 聚合所有渠道的模型定价，供管理端定价面板展示。
 pub async fn prices_list(headers: &HeaderMap) -> Response {
     if let Err(e) = require(headers, false) { return e; }
     let db = store().load();
-    let ups = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
-    let mut rows: Vec<Value> = Vec::new();
-    for u in &ups {
-        let ch_id = util::str_or(u.get("id"), "");
-        let ch_name = util::str_or(u.get("name"), "");
-        let enabled = u.get("enabled").map(util::truthy).unwrap_or(false);
-        let prices = u.get("prices").and_then(|p| p.as_object()).cloned().unwrap_or_default();
-        let mut seen = std::collections::HashSet::new();
-        // models 白名单里的模型
-        if let Some(ms) = u.get("models").and_then(|m| m.as_array()) {
-            for m in ms {
-                let model = util::str_or(Some(m), "");
-                if model.is_empty() || !seen.insert(model.clone()) { continue; }
-                let price = prices.get(&model).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                rows.push(json!({"channel_id": ch_id, "channel_name": ch_name,
-                    "model": model, "price": if price > 0.0 { json!(util::round6(price)) } else { json!(0) },
-                    "free": price <= 0.0, "enabled": enabled}));
-            }
+    let mut rows = Vec::new();
+    for u in db.get("upstreams").and_then(Value::as_array).into_iter().flatten() {
+        let prices = u.get("prices").and_then(Value::as_object).cloned().unwrap_or_default();
+        let mut models = std::collections::BTreeSet::new();
+        if let Some(ms) = u.get("models").and_then(Value::as_array) {
+            for m in ms.iter().filter_map(Value::as_str) { models.insert(m.to_string()); }
         }
-        // model_map 别名（按别名自身计价，与计费/保存口径一致）
-        if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
-            for (alias, _target) in mm {
-                if alias.is_empty() || !seen.insert(alias.clone()) { continue; }
-                let price = prices.get(alias).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                rows.push(json!({"channel_id": ch_id, "channel_name": ch_name,
-                    "model": alias, "price": if price > 0.0 { json!(util::round6(price)) } else { json!(0) },
-                    "free": price <= 0.0, "enabled": enabled}));
-            }
-        }
-        // prices 里已设价但不在 models/model_map 里的（透传渠道场景）
-        for (model, pv) in &prices {
-            if seen.contains(model) { continue; }
-            let price = pv.as_f64().unwrap_or(0.0);
-            rows.push(json!({"channel_id": ch_id, "channel_name": ch_name,
-                "model": model, "price": if price > 0.0 { json!(util::round6(price)) } else { json!(0) },
-                "free": price <= 0.0, "enabled": enabled}));
+        if let Some(mm) = u.get("model_map").and_then(Value::as_object) { models.extend(mm.keys().cloned()); }
+        models.extend(prices.keys().cloned());
+        for model in models {
+            let price = prices.get(&model).cloned().unwrap_or(json!(0));
+            rows.push(json!({"channel_id":u["id"],"channel_name":u["name"],"model":model,
+                "free":!crate::billing::paid(&price),"price":price,"enabled":u["enabled"]}));
         }
     }
-    json_resp(json!({"rows": rows}))
+    json_resp(json!({"rows":rows}))
 }
 
 /// 保存某个渠道的模型定价。body: {channel_id, prices: {model: price}}
@@ -2573,148 +2396,30 @@ pub async fn prices_save(headers: &HeaderMap, body: Bytes) -> Response {
     if ch_id.is_empty() {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "缺少 channel_id"}}))).into_response();
     }
+    if new_prices.len() > 500 { return (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"message":"最多配置 500 个模型"}}))).into_response(); }
+    for (model, price) in new_prices {
+        if model.is_empty() || model.chars().count() > 160 || model.chars().any(char::is_control) {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"message":"模型名称无效"}}))).into_response();
+        }
+        if let Err(e) = crate::billing::validate(price) {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"message":format!("{model}: {e}")}}))).into_response();
+        }
+    }
+    let mut found = false;
     store().update(|db| {
-        if let Some(ups) = db.get_mut("upstreams").and_then(|u| u.as_array_mut()) {
-            for u in ups.iter_mut() {
-                if util::str_or(u.get("id"), "") != ch_id { continue; }
-                if let Some(o) = u.as_object_mut() {
-                    let mut cleaned = serde_json::Map::new();
-                    for (k, v) in new_prices {
-                        let price = v.as_f64().unwrap_or(0.0);
-                        if price > 0.0 {
-                            cleaned.insert(k.clone(), json!(util::round6(price)));
-                        }
-                    }
-                    o.insert("prices".into(), Value::Object(cleaned));
-                }
-                break;
+        if let Some(ups) = db.get_mut("upstreams").and_then(Value::as_array_mut) {
+            if let Some(u) = ups.iter_mut().find(|u| util::str_or(u.get("id"), "") == ch_id) {
+                u["prices"] = Value::Object(new_prices.clone()); found = true;
             }
         }
     });
+    if !found { return (StatusCode::NOT_FOUND, axum::Json(json!({"error":{"message":"渠道不存在"}}))).into_response(); }
+
     store().flush();
     json_resp(json!({"ok": true}))
 }
 
-// ---------------------------------------------------------------- 大转盘
-
-/// GET /api/wheels — 全量（含 real_weight，仅管理端）。
-pub async fn wheels_admin(headers: &HeaderMap) -> Response {
-    if let Err(e) = require(headers, false) {
-        return e;
-    }
-    json_resp(json!({"rows": crate::wheel::all_wheels()}))
-}
-
-/// POST /api/wheels — 新建/保存。
-pub async fn wheels_save(headers: &HeaderMap, body: Bytes) -> Response {
-    if let Err(e) = require(headers, true) {
-        return e;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
-        )
-            .into_response();
-    };
-    let (row, err) = crate::wheel::save_wheel(&body);
-    if let Some(e) = (!err.is_empty()).then_some(err) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": e}})),
-        )
-            .into_response();
-    }
-    json_resp(json!({"ok": true, "wheel": row}))
-}
-
-/// POST /api/wheels/delete。
-pub async fn wheels_delete(headers: &HeaderMap, body: Bytes) -> Response {
-    if let Err(e) = require(headers, true) {
-        return e;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
-        )
-            .into_response();
-    };
-    let id = util::str_or(body.get("id"), "");
-    match crate::wheel::delete_wheel(&id) {
-        Ok(()) => json_resp(json!({"ok":true})),
-        Err(message) => (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":message}}))).into_response(),
-    }
-}
-
-/// GET /api/prize-keys?wheel=<id> — 奖品 Key 列表。
-pub async fn prize_keys_admin(headers: &HeaderMap, raw_query: Option<String>) -> Response {
-    if let Err(e) = require(headers, false) {
-        return e;
-    }
-    let mut wid = String::new();
-    if let Some(q) = raw_query {
-        for kv in q.split('&') {
-            if let Some((k, v)) = kv.split_once('=') {
-                if k == "wheel" {
-                    wid = v.to_string();
-                }
-            }
-        }
-    }
-    json_resp(json!({"rows": crate::wheel::list_prize_keys(&wid)}))
-}
-
-/// POST /api/prize-keys/op — enable/disable/delete。
-pub async fn prize_keys_op(headers: &HeaderMap, body: Bytes) -> Response {
-    if let Err(e) = require(headers, true) {
-        return e;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "请求体格式错误"}})),
-        )
-            .into_response();
-    };
-    let id = util::str_or(body.get("id"), "");
-    let op = util::str_or(body.get("op"), "");
-    if !["enable", "disable", "delete"].contains(&op.as_str()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "未知操作"}})),
-        )
-            .into_response();
-    }
-    let mut ok = false;
-    let persisted=store().reward_transaction(|db| {
-        if let Some(a) = db.get_mut("prize_keys").and_then(|k| k.as_array_mut()) {
-            if op == "delete" {
-                let before = a.len();
-                a.retain(|k| util::str_or(k.get("id"), "") != id);
-                ok = a.len() < before;
-            } else {
-                for k in a.iter_mut() {
-                    if util::str_or(k.get("id"), "") == id {
-                        if let Some(o) = k.as_object_mut() {
-                            o.insert("enabled".into(), Value::from(op == "enable"));
-                        }
-                        ok = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if !ok { return Err("奖品 Key 不存在".into()); }
-        Ok(())
-    });
-    match persisted {
-        Ok(()) => json_resp(json!({"ok":true})),
-        Err(message) => (StatusCode::BAD_REQUEST,axum::Json(json!({"error":{"message":message}}))).into_response(),
-    }
-}
-
-// ---------------------------------------------------------------- 用户资金/抽奖明细（管理端）
+// ---------------------------------------------------------------- 用户资金明细（管理端）
 
 fn parse_id_page(raw: &Option<String>) -> (String, i64, usize) {
     let mut id = String::new();
@@ -2756,30 +2461,6 @@ pub async fn user_funds_admin(headers: &HeaderMap, raw_query: Option<String>) ->
             .into_response();
     }
     let (rows, total) = crate::users::user_funds_page(&id, page, per);
-    json_resp(json!({"rows": rows, "total": total, "per": per}))
-}
-
-/// GET /api/user-draws?id=&page=&per= — 用户抽奖记录。
-pub async fn user_draws_admin(headers: &HeaderMap, raw_query: Option<String>) -> Response {
-    if let Err(e) = require(headers, false) {
-        return e;
-    }
-    let (id, page, per) = parse_id_page(&raw_query);
-    if id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": {"message": "缺少 id 参数"}})),
-        )
-            .into_response();
-    }
-    if crate::users::get_user_by_id(&id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            axum::Json(json!({"error": {"message": "用户不存在"}})),
-        )
-            .into_response();
-    }
-    let (rows, total) = crate::users::user_draws_page(&id, page, per);
     json_resp(json!({"rows": rows, "total": total, "per": per}))
 }
 

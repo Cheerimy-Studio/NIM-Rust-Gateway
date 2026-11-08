@@ -93,27 +93,7 @@ function showLogin() {
   $('#login-view').style.display = 'flex';
   $('#panel-view').style.display = 'none';
   showLoginTab('main');
-  maybeShowNotice();
 }
-
-// 使用须知：登录/注册前先弹一次（同一浏览器确认过就不再打扰）
-function maybeShowNotice() {
-  const mask = document.getElementById('notice-mask');
-  if (!mask) return;
-  let seen = false;
-  try { seen = localStorage.getItem('yz-notice-ok') === '1'; } catch (e) { }
-  if (seen) return;
-  mask.style.display = 'flex';
-}
-(function bindNotice() {
-  const mask = document.getElementById('notice-mask');
-  if (!mask) return;
-  const go = document.getElementById('notice-go');
-  if (go) go.onclick = () => {
-    try { localStorage.setItem('yz-notice-ok', '1'); } catch (e) { }
-    mask.style.display = 'none';
-  };
-})();
 
 function showLoginTab(tab) {
   for (const t of ['main', 'register', 'forgot', 'reset']) {
@@ -133,9 +113,6 @@ function lgErr(msg) {
 function resetTokenFromUrl() {
   return new URLSearchParams(location.search).get('reset') || '';
 }
-function invFromUrl() {
-  return new URLSearchParams(location.search).get('inv') || '';
-}
 function showPanel() {
   $('#login-view').style.display = 'none';
   $('#panel-view').style.display = 'block';
@@ -143,7 +120,9 @@ function showPanel() {
 
 async function loadMe() {
   ME = await api('me');
-  $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
+  const endpoint = $('#api-base');
+  if (endpoint) endpoint.value = location.origin + '/v1';
+  $('#ov-balance').textContent = rewardMoney(ME.balance);
   $('#ov-grant').textContent = '¥' + rewardMoney(ME.grant);
   $('#ov-grant-total').textContent = '¥' + rewardMoney(ME.grant_total);
   $('#ov-recharge').textContent = '¥' + rewardMoney(ME.recharge);
@@ -152,7 +131,7 @@ async function loadMe() {
     const s = await api('stats');
     $('#ov-calls').textContent = s.total_calls ?? 0;
     $('#ov-calls-sub').textContent = '免费 ' + (s.free_calls ?? 0) + ' / 付费 ' + (s.paid_calls ?? 0);
-    $('#ov-cost').textContent = '¥' + (s.total_cost ?? 0).toFixed(2);
+    $('#ov-cost').textContent = '¥' + rewardMoney(s.total_cost);
     $('#ov-keys').textContent = s.key_count ?? 0;
     const tb = $('#ov-recent');
     tb.innerHTML = '';
@@ -166,9 +145,9 @@ async function loadMe() {
         ? '<span class="badge bg-success">OK</span>'
         : '<span class="badge bg-danger">' + r.st + '</span>';
       tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
-        + '<td class="small text-truncate" style="max-width:160px">' + esc(r.model || '-') + '</td>'
+        + '<td class="small text-truncate" style="max-width:160px">' + esc(r.model || '-') + (r.billing ? '<div class="small text-muted">' + esc(r.billing.mode === 'token' ? '按 token · 输入 ' + r.billing.input + ' / 输出 ' + r.billing.output + ' 元/百万' : '按次') + '</div>' : '') + '</td>'
         + '<td>' + st + '</td>'
-        + '<td class="text-end small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
+        + '<td class="text-end small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(6) : '免费') + '</td>';
       tb.appendChild(tr);
     }
   } catch (e) { }
@@ -211,7 +190,7 @@ $('#btn-sign').onclick = () => run(async () => {
 
 async function refreshWallet() {
   ME = await api('me');
-  $('#ov-balance').textContent = (ME.balance ?? 0).toFixed(2);
+  $('#ov-balance').textContent = rewardMoney(ME.balance);
   for (const name of ['grant','grant_total','recharge','recharge_total']) {
     $('#ov-' + name.replace('_','-')).textContent = '¥' + rewardMoney(ME[name]);
   }
@@ -299,12 +278,12 @@ async function loadLogs() {
       ? '<span class="badge bg-success">' + r.st + '</span>'
       : '<span class="badge bg-danger">' + r.st + '</span>';
     tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
-      + '<td>' + esc(r.model || '-') + '</td>'
+      + '<td>' + esc(r.model || '-') + (r.billing ? '<div class="small text-muted">' + esc(r.billing.mode === 'token' ? '按 token · 输入 ' + r.billing.input + ' / 输出 ' + r.billing.output + ' 元/百万' : '按次') + '</div>' : '') + '</td>'
       + '<td>' + st + '</td>'
       + '<td class="small">' + r.ms + 'ms</td>'
       + '<td class="small">' + (r.in_tok || 0) + '</td>'
       + '<td class="small">' + (r.out_tok || 0) + '</td>'
-      + '<td class="small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
+      + '<td class="small fw-semibold">' + (r.cost > 0 ? '¥' + r.cost.toFixed(6) : '免费') + '</td>';
     tb.appendChild(tr);
   }
   $('#logs-meta').textContent = '共 ' + total + ' 条 · 每页 ' + per + ' 条';
@@ -339,7 +318,7 @@ function renderModels() {
   const query = ($('#model-search').value || '').trim().toLowerCase();
   const kind = $('#model-kind').value;
   const rows = MODEL_ROWS.filter(m => m.model.toLowerCase().includes(query)
-    && (kind === 'all' || (kind === 'free' ? m.free : !m.free)));
+    && (kind === 'all' || (kind === 'free' ? m.free : (m.paid ?? !m.free))));
   const box = $('#model-cards');
   box.innerHTML = '';
   $('#model-count').textContent = rows.length + ' / ' + MODEL_ROWS.length + ' 个模型';
@@ -351,8 +330,8 @@ function renderModels() {
   }
   for (const m of rows) {
     const col = document.createElement('div'); col.className = 'col-md-6 col-xl-4';
-    const badge = m.free ? '<span class="badge badge-free">免费</span>'
-      : '<span class="badge badge-paid">¥' + esc(m.price) + ' 起 / 次</span>';
+    const rules = [...new Set((m.pricing || [{rule:m.price}]).map(p => window.NGW_UI.pricingText(p.rule)))];
+    const badge = rules.map(text => '<div class="small mt-1">' + esc(text) + '</div>').join('');
     col.innerHTML = '<div class="card model-card h-100"><div class="card-body">'
       + '<div class="model-name">' + esc(m.model) + '</div><div class="mt-2">' + badge + '</div>'
       + '<div class="small mt-3 text-muted">'
@@ -363,7 +342,7 @@ function renderModels() {
       + '<div class="model-actions"></div></div></div>';
     const actions = col.querySelector('.model-actions');
     const test = document.createElement('a'); test.className = 'btn btn-sm btn-primary';
-    test.textContent = '对话测试'; test.href = '/webclaw?model=' + encodeURIComponent(m.model);
+    test.textContent = '打开 Agent'; test.href = '/webclaw?model=' + encodeURIComponent(m.model);
     test.target = '_blank'; test.rel = 'noopener';
     const copy = document.createElement('button'); copy.className = 'btn btn-sm btn-outline-secondary'; copy.textContent = '复制名称';
     copy.onclick = () => run(async () => { if (!await copyText(m.model)) throw new Error('复制失败，请检查浏览器权限'); toast('模型名称已复制'); });
@@ -373,6 +352,9 @@ function renderModels() {
 $('#model-search').addEventListener('input', renderModels);
 $('#model-kind').addEventListener('change', renderModels);
 $('#model-refresh').onclick = () => run(() => loadModels());
+$('#api-base-copy').onclick = () => run(async () => { if (!await copyText($('#api-base').value)) throw new Error('复制失败'); toast('API 地址已复制'); });
+$('#overview-keys').onclick = () => activateUser('keys');
+$('#overview-models').onclick = () => activateUser('models');
 
 function activateUser(name, loaded = false) {
   const pane = document.getElementById('pane-' + name);
@@ -384,7 +366,7 @@ function activateUser(name, loaded = false) {
   });
   document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + name));
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
-  const loaders = {overview: loadMe, keys: loadKeys, logs: loadLogs, models: loadModels, promo: loadPromo, wheel: loadWheels, prizes: loadPrizes};
+  const loaders = {overview: loadMe, keys: loadKeys, logs: loadLogs, models: loadModels};
   if (Object.hasOwn(loaders, name) && !(loaded && name === 'overview')) run(loaders[name]);
 }
 document.querySelectorAll('.sidebar nav a[data-p]').forEach(a => {
@@ -401,7 +383,6 @@ $('#key-add').onclick = () => run(async () => {
 
 $('#btn-logout').onclick = () => run(async () => { await api('logout', {method: 'POST'}); showLogin(); });
 
-$('#promo-refresh').onclick = () => run(() => loadPromo());
 
 $('#login-go').onclick = async () => {
   const err = $('#login-err');
@@ -433,7 +414,6 @@ function bindLoginTabs() {
   $('#go-forgot').onclick = () => showLoginTab('forgot');
   $('#back-login-1').onclick = () => showLoginTab('main');
   $('#back-login-2').onclick = () => showLoginTab('main');
-  if (invFromUrl()) showLoginTab('register');
   let codeLeft = 0;
   let codeSending = false;
   const codeBtn = $('#reg-send');
@@ -465,8 +445,6 @@ function bindLoginTabs() {
     if (!email || pass.length < 6) { lgErr('请输入邮箱和至少 6 位密码'); return; }
     if (!code) { lgErr('请先获取并填写邮箱验证码'); return; }
     const body = {email: email, password: pass, code: code};
-    const inv = invFromUrl();
-    if (inv) body.inv = inv;
     try {
       const res = await fetch('api/user/register', {method: 'POST',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
@@ -509,388 +487,6 @@ function bindLoginTabs() {
   };
 }
 
-// ---------------- 拉人活动 ----------------
-let PROMO = null;
-
-async function loadPromo() {
-  const d = await api('promo');
-  PROMO = d;
-  const box = $('#promo-body');
-  const evs = d.events || [];
-  box.innerHTML = '';
-  if (!evs.length) {
-    box.innerHTML = '<div class="promo-none text-center py-5"><div class="promo-none-ic">🧧</div>'
-      + '<div class="fw-bold mb-1">暂无进行中的活动</div>'
-      + '<div class="small text-muted">有新活动时这里会第一时间出现</div></div>';
-    promoStopTicker();
-    return;
-  }
-  for (const ev of evs) {
-    box.appendChild(promoCard(ev, d));
-  }
-  // 领取成功后的「揭晓」动画：新解锁的那一步弹出 + 从卡面撒彩带
-  const rev = window.__promoReveal;
-  window.__promoReveal = null;
-  if (rev && rev.id) {
-    const hero = box.querySelector('.promo-hero[data-evh="' + rev.id + '"]');
-    if (hero) {
-      const el = hero.querySelector('.promo-task') || hero.querySelector('.promo-success');
-      if (el) el.classList.add('revealed');
-      burstInto(hero, 26);
-    }
-  }
-  promoStartTicker();
-}
-
-// 剩余时间文案：永远不出现光秃秃的「0 天」（也是倒计时 span 的首帧兜底）
-function promoLeftText(exp) {
-  exp = exp || 0;
-  if (exp <= 0) return '长期有效';
-  const left = exp - Date.now() / 1000;
-  if (left <= 0) return '活动已结束';
-  if (left < 86400) return '今天结束';
-  return '剩余 ' + Math.ceil(left / 86400) + ' 天';
-}
-
-// 到秒倒计时单元格：promoStartTicker 每秒刷新 [data-cd]
-function promoCdHtml(exp) {
-  exp = exp || 0;
-  return '<span class="promo-cd" data-cd="' + exp + '">' + promoLeftText(exp) + '</span>';
-}
-// 无期限的活动不显示「距结束」，只显示「长期有效」
-function promoCdPart(exp) {
-  exp = exp || 0;
-  return exp > 0 ? '距结束 ' + promoCdHtml(exp) : '<span class="promo-cd">长期有效</span>';
-}
-
-let PROMO_TIMER = null;
-function promoStopTicker() {
-  if (PROMO_TIMER) { clearInterval(PROMO_TIMER); PROMO_TIMER = null; }
-}
-function promoStartTicker() {
-  promoStopTicker();
-  const pad = n => String(n).padStart(2, '0');
-  let reloading = false;
-  const tick = () => {
-    const els = document.querySelectorAll('[data-cd]');
-    if (!els.length) { promoStopTicker(); return; }
-    const nowS = Date.now() / 1000;
-    let anyOver = false;
-    els.forEach(el => {
-      const exp = +el.dataset.cd || 0;
-      if (exp <= 0) return; // 长期有效：不走秒
-      let left = Math.floor(exp - nowS);
-      if (left <= 0) { left = 0; anyOver = true; }
-      const dd = Math.floor(left / 86400);
-      const hms = pad(Math.floor(left % 86400 / 3600)) + ':' + pad(Math.floor(left % 3600 / 60)) + ':' + pad(left % 60);
-      el.textContent = (dd > 0 ? dd + ' 天 ' : '') + hms;
-      el.classList.toggle('urgent', left > 0 && left < 86400);
-      el.classList.toggle('over', left <= 0);
-    });
-    // 活动到点：稍候刷一次，让过期活动从列表里消失
-    if (anyOver && !reloading) {
-      reloading = true;
-      setTimeout(() => { reloading = false; if (document.querySelector('[data-cd]')) loadPromo(); }, 1500);
-    }
-  };
-  tick();
-  PROMO_TIMER = setInterval(tick, 1000);
-}
-
-// 通用彩带爆开：复用 .promo-confetti 的 pconf 位移动画
-function burstInto(el, n) {
-  const colors = ['#f59e0b', '#3b82f6', '#10b981', '#f97316', '#a78bfa', '#ef4444', '#fbbf24', '#f472b6'];
-  for (let i = 0; i < n; i++) {
-    const c = document.createElement('span');
-    c.className = 'promo-confetti';
-    c.style.background = colors[i % colors.length];
-    const ang = (Math.random() * 2 - 1) * Math.PI;
-    const dist = 70 + Math.random() * 150;
-    c.style.setProperty('--dx', Math.cos(ang) * dist + 'px');
-    c.style.setProperty('--dy', (Math.abs(Math.sin(ang)) * -140 - 30) + 'px');
-    c.style.left = (20 + Math.random() * 60) + '%';
-    c.style.top = (35 + Math.random() * 45) + '%';
-    el.appendChild(c);
-    setTimeout(() => c.remove(), 2200);
-  }
-}
-
-// 四个阶段按钮的固定 id（promo_funnel.py 断言依赖这些字面量）
-const PROMO_CLAIM_IDS = ['p-claim1', 'p-claim2', 'p-claim3', 'p-claim4'];
-
-// 「带文案复制」用的邀请语（链接拼在其后）
-const PROMO_SHARE_TEXT = '我在用「言灵中转」，注册就送 AI 额度～用我的专属链接注册，帮我解锁好友红包：';
-
-// 好友头像底色（按邮箱哈希取色，稳定不闪变）
-const PROMO_AV_COLORS = ['#f59e0b', '#3b82f6', '#10b981', '#f97316', '#a78bfa', '#ef4444', '#14b8a6', '#eab308'];
-function promoAvColor(s) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return PROMO_AV_COLORS[h % PROMO_AV_COLORS.length];
-}
-
-// 金额数字滚动：领取后 collected 变化时从旧值滚到新值
-function promoCountUp(el, from, to) {
-  if (Math.abs(to - from) < 0.005) { el.textContent = to.toFixed(2); return; }
-  const t0 = performance.now(), dur = 750;
-  const frame = now => {
-    const k = Math.min(1, (now - t0) / dur);
-    const e = 1 - Math.pow(1 - k, 3);
-    el.textContent = (from + (to - from) * e).toFixed(2);
-    if (k < 1) requestAnimationFrame(frame);
-  };
-  requestAnimationFrame(frame);
-}
-
-// 好友加入多久了
-function promoAgo(t) {
-  const s = Math.max(0, Math.floor(Date.now() / 1000 - (t || 0)));
-  if (s < 60) return '刚刚';
-  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
-  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
-  return Math.floor(s / 86400) + ' 天前';
-}
-
-// 复制成功的按钮反馈：短暂变绿 + 换成「已复制 ✓」
-function promoCopied(btn) {
-  if (!btn || btn.dataset.busy) return;
-  btn.dataset.busy = '1';
-  const old = btn.innerHTML;
-  btn.innerHTML = '已复制 ✓';
-  btn.classList.add('promo-copy-ok');
-  setTimeout(() => {
-    btn.innerHTML = old;
-    delete btn.dataset.busy;
-    btn.classList.remove('promo-copy-ok');
-  }, 1600);
-}
-
-function promoCard(ev, d) {
-  const card = document.createElement('div');
-  card.className = 'promo-hero mb-4';
-  card.setAttribute('data-evh', ev.id || '');
-  const st = ev.joined ? ev : null;
-  const exp = (st ? st.expires_at : ev.expires_at) || 0;
-  if (!st || !st.joined) {
-    card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-2">'
-      + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
-      + '</div>'
-      + '<div class="mb-2">邀请好友注册，赢 <b>¥' + ev.amount + '</b> 赠金！</div>'
-      + '<div class="small mb-3" style="opacity:.9">活动目标：邀请 ??? 位好友 · ' + promoCdPart(exp) + '</div>'
-      + '<button class="pbtn primary" id="promo-join">立即参与</button>';
-    const jb = card.querySelector('#promo-join');
-    jb.onclick = () => {
-      if (jb.dataset.busy) return;
-      jb.dataset.busy = '1';
-      const old = jb.textContent;
-      jb.textContent = '加入中…';
-      run(async () => {
-        try {
-          await api('promo/join', {method: 'POST', json: {id: ev.id}});
-          toast('已加入活动');
-        } catch (err) {
-          delete jb.dataset.busy;
-          jb.textContent = old;
-          throw err;
-        }
-        loadPromo();
-      });
-    };
-    return card;
-  }
-
-  const pct = ev.amount > 0 ? Math.min(100, Math.round(st.collected / ev.amount * 100)) : 0;
-  const paid = !!st.paid;
-  const eff = st.eff_invited || 0;
-  const money = ev.amount || 0;
-  const t1 = Math.max(1, st.t1 || 1);
-  const total = Math.max(1, st.total || ev.target || 1);
-  const step2 = Math.max(t1, Math.min(st.step2_need || Math.min(3, total), total));
-  const step3 = Math.max(step2, Math.min(st.step3_need || Math.min(7, total), total));
-  // 波次叠加曲线的累计门槛（1、3、7、T）：第 4 步领赠金也要拉满最后一波
-  const needs = [t1, step2, step3, total];
-  const flags = [!!st.p1, !!st.p2, !!st.p3, paid];
-  const can = [
-    eff >= needs[0],
-    flags[0] && eff >= needs[1],
-    flags[0] && flags[1] && eff >= needs[2],
-    flags[0] && flags[1] && flags[2] && eff >= needs[3],
-  ];
-  // 拼多多式分阶段解锁：只展示「当前这一步」，后面的一律打码
-  const cur = flags.indexOf(false);
-  const at = i => (money * (i + 1) / 4).toFixed(2);
-  // target=1 时 t1=step2_need=total=1，四阶段人数门槛全相等，
-  // 直接算差值会得到「再邀 0 位好友」——门槛没涨就改用累计说法
-  const d12 = needs[1] - needs[0];
-  const TASKS = [
-    {badge: '第 1 步', name: '初见礼', title: '邀请 ' + needs[0] + ' 位好友',
-     sub: '好友注册即计入 · 完成后进度到 ¥' + at(0)},
-    {badge: '第 2 步', name: '进阶礼',
-     title: d12 > 0 ? '再邀 ' + d12 + ' 位好友' : '累计邀满 ' + needs[1] + ' 位好友',
-     sub: '好友注册即计入 · 完成后进度到 ¥' + at(1)},
-    {badge: '第 3 步', name: '冲刺礼', title: '累计邀满 ??? 位好友',
-     sub: '总人数保密 · 完成最后冲刺解锁赠金领取'},
-    {badge: '最后一步', name: '领赠金', title: '领 ¥' + money.toFixed(2) + ' 赠金',
-     sub: '最后一波 · 达成即刻到账'},
-  ];
-  const stepProg = i => {
-    // 冲刺/领赠金波改用金额进度：人数百分比配合「已邀请 N 人」能反解出保密的总数
-    if (i >= 2) return money > 0 ? Math.max(0, Math.min(1, st.collected / money)) : 0;
-    const prev = i === 0 ? 0 : needs[i - 1];
-    const span = needs[i] - prev;
-    if (span <= 0) return eff >= needs[i] ? 1 : 0;
-    return Math.max(0, Math.min(1, (eff - prev) / span));
-  };
-
-  // 邀请链接以「用户当前访问的地址」生成为准：走 127.0.0.1 就是 127.0.0.1、
-  // 走域名就是域名、协议跟浏览器一致；服务器拼的 link_full 在反代转发头
-  // 缺失时会失真（http/内网地址），因此只作兜底
-  const inviteLink = st.link
-    ? (location.origin + '/user' + st.link)
-    : (st.link_full || '');
-
-  let html = '';
-  const doneN = paid ? 4 : cur;
-  for (let i = 0; i < doneN; i++) {
-    // 已完成的冲刺步直接亮出真实总人数（这时候公布反而有成就感）
-    const doneTitle = i === 2 ? '累计邀满 ' + needs[2] + ' 位好友' : TASKS[i].title;
-    html += '<div class="promo-stage done"><div class="ic">✓</div>'
-      + '<div class="tx">' + TASKS[i].badge + ' · ' + doneTitle + '</div>'
-      + '<span class="promo-tag">已完成</span></div>';
-  }
-  if (paid) {
-    html += '<div class="promo-success" data-ev="' + esc(ev.id) + '">'
-      + '<div class="promo-success-ic">🎉</div>'
-      + '<div><b>¥' + money.toFixed(2) + ' 赠金已到账！</b>'
-      + '<div>赠金已入账，可在「概览 · 我的钱包」查看</div></div></div>';
-  } else if (cur >= 0) {
-    const p = Math.round(stepProg(cur) * 100);
-    // 冲刺/领赠金阶段的差值和门槛不外露：eff + 差值 = 总人数，会把保密的 ??? 算出来
-    const waitTxt = cur < 2
-      ? '还差 ' + Math.max(0, needs[cur] - eff) + ' 位好友'
-      : '继续邀请好友，解锁赠金领取';
-    const foot = cur < 2
-      ? '<span>已邀请 <b>' + eff + '</b> / ' + needs[cur] + ' 人</span>'
-      : '<span>已邀请 <b>' + eff + '</b> 人</span>';
-    html += '<div class="promo-task promo-in" data-ev="' + esc(ev.id) + '">'
-      + '<div class="promo-task-top"><span class="promo-badge">' + TASKS[cur].badge + '</span>'
-      + '<span class="promo-task-name">' + TASKS[cur].name + '</span></div>'
-      + '<div class="promo-task-title">' + TASKS[cur].title + '</div>'
-      + '<div class="promo-task-sub">' + TASKS[cur].sub + '</div>'
-      + '<div class="promo-taskbar"><div style="width:' + p + '%"></div></div>'
-      + '<div class="promo-task-foot">' + foot + '<b>' + p + '%</b></div>'
-      + '<div class="promo-task-btn">'
-      + (can[cur]
-        ? '<button class="btn btn-warning promo-claim" id="' + PROMO_CLAIM_IDS[cur] + '">🎉 立即领取</button>'
-        : '<button class="btn promo-claim is-wait" disabled>' + waitTxt + '</button>')
-      + '</div></div>';
-  }
-
-  html += '<div class="small mb-1 mt-3" style="opacity:.85">你的专属邀请链接：</div>'
-    + '<div class="promo-link"><input readonly id="promo-link-input" value="' + esc(inviteLink) + '">'
-    + '<button class="btn btn-light btn-sm fw-bold text-nowrap" id="promo-copy">复制链接</button>'
-    + '<button class="btn btn-warning btn-sm fw-bold text-nowrap" id="promo-copy-msg">带文案复制</button></div>'
-    + '<div class="promo-how">'
-    + '<div class="promo-how-step"><span class="n">1</span><div><b>复制链接</b><span>点上方按钮</span></div></div>'
-    + '<div class="promo-how-arrow"><i class="bi bi-chevron-right"></i></div>'
-    + '<div class="promo-how-step"><span class="n">2</span><div><b>发给好友</b><span>微信 / QQ 都行</span></div></div>'
-    + '<div class="promo-how-arrow"><i class="bi bi-chevron-right"></i></div>'
-    + '<div class="promo-how-step"><span class="n">3</span><div><b>好友注册</b><span>进度秒到账</span></div></div>'
-    + '</div>';
-
-  // 引导条与神秘奖励之间加一条素分割线（不带文案）
-  if (cur >= 0) {
-    html += '<div class="promo-sep"></div>';
-    for (let i = cur + 1; i < 4; i++) {
-      html += '<div class="promo-lock promo-in" style="animation-delay:' + (0.08 * (i - cur)) + 's">'
-        + '<div class="promo-lock-ic"><i class="bi bi-lock-fill"></i></div>'
-        + '<div class="promo-lock-tx"><b>神秘奖励</b><span>完成当前任务后自动解锁</span></div>'
-        + '<div class="promo-lock-q">???</div></div>';
-    }
-  }
-
-  const chips = [];
-  if (st.draw_credits > 0) chips.push('<span class="promo-chip"><i class="bi bi-ticket-perforated"></i>抽奖次数 × ' + st.draw_credits + '</span>');
-  if (st.doubler > 0) chips.push('<span class="promo-chip"><i class="bi bi-stack"></i>翻倍卡 × ' + st.doubler + '</span>');
-  if (chips.length) html += '<div class="d-flex gap-2 flex-wrap my-3">' + chips.join('') + '</div>';
-
-  const friends = st.friends || [];
-  if (friends.length) {
-    html += '<div class="mt-3 mb-1 small" style="opacity:.85">已有 <b>' + friends.length + '</b> 位好友通过你的链接加入</div>'
-      + friends.slice(0, 8).map(f => {
-        const who = f.invitee || '?';
-        return '<div class="promo-friend"><span class="av" style="background:' + promoAvColor(who) + '">'
-          + esc(who.charAt(0).toUpperCase()) + '</span><span class="nm">' + esc(who)
-          + '</span><span class="tm">' + promoAgo(f.t) + '</span></div>';
-      }).join('');
-  } else if (!paid) {
-    html += '<div class="promo-friend promo-friend-empty mt-3">还没有好友加入——把上面的链接发给朋友，注册成功就计入进度～</div>';
-  }
-
-  html += '<details class="promo-rules"><summary><i class="bi bi-info-circle"></i> 活动规则</summary><ul>'
-    + '<li>活动自创建起 7 天有效，到期即止、不可重开；多个活动可同时参加。</li>'
-    + '<li>好友通过你的链接注册成功即计入进度；每拉 1 人进度 +1。</li>'
-    + '<li>四个阶段全部完成后，奖励以「赠金」一次性到账。</li>'
-    + '<li>本活动最终解释权归平台所有。</li>'
-    + '</ul></details>';
-
-  card.innerHTML = '<div class="d-flex justify-content-between align-items-center mb-1">'
-    + '<div class="fw-bold fs-5">' + esc(ev.name || '拉人活动') + '</div>'
-    + '</div>'
-    + '<div class="small mb-2" style="opacity:.9">' + promoCdPart(exp)
-    + ' · 已邀请 <b>' + st.invited + '</b> 人</div>'
-    + '<div class="promo-amount">¥<b class="promo-amt">' + st.collected.toFixed(2) + '</b><small> / ' + money.toFixed(2) + '</small></div>'
-    + '<div class="promo-bar my-2"><div style="width:' + pct + '%"></div></div>'
-    + '<div class="promo-gap">' + (paid ? '赠金已到账，可在「概览 · 我的钱包」查看！' : '还差 <b>¥' + st.remain.toFixed(2) + '</b> 即可领取赠金') + '</div>'
-    + html;
-
-  // 奖金数字滚动：只在上次渲染值与本次不同时播放（首次渲染不吵）
-  const amtEl = card.querySelector('.promo-amt');
-  if (amtEl) {
-    window.__promoAmt = window.__promoAmt || {};
-    const prev = Object.prototype.hasOwnProperty.call(window.__promoAmt, ev.id)
-      ? window.__promoAmt[ev.id] : st.collected;
-    window.__promoAmt[ev.id] = st.collected;
-    promoCountUp(amtEl, prev, st.collected);
-  }
-
-  const inp = card.querySelector('#promo-link-input');
-  const cp = card.querySelector('#promo-copy');
-  const cpm = card.querySelector('#promo-copy-msg');
-  if (inp) inp.onclick = () => inp.select();
-  if (cp) cp.onclick = () => copyText(inviteLink).then(ok => {
-    if (ok) { promoCopied(cp); toast('邀请链接已复制，发给好友吧'); }
-    else toast('复制失败，请手动选择链接复制', 'danger');
-  });
-  if (cpm) cpm.onclick = () => copyText(PROMO_SHARE_TEXT + inviteLink).then(ok => {
-    if (ok) { promoCopied(cpm); toast('邀请文案已复制'); }
-    else toast('复制失败，请手动复制', 'danger');
-  });
-  if (cur >= 0) {
-    const b = card.querySelector('#' + PROMO_CLAIM_IDS[cur]);
-    if (b) b.onclick = () => {
-      if (b.dataset.busy) return;
-      b.dataset.busy = '1';
-      const old = b.innerHTML;
-      b.innerHTML = '领取中…';
-      run(async () => {
-        try {
-          await api('promo/claim', {method: 'POST', json: {id: ev.id, step: cur + 1}});
-          window.__promoReveal = {step: cur + 1, id: ev.id};
-          toast('领取成功！');
-        } catch (err) {
-          delete b.dataset.busy;
-          b.innerHTML = old;
-          throw err;
-        }
-        loadPromo();
-      });
-    };
-  }
-  return card;
-}
-
-
 (async () => {
   bindLoginTabs();
   for (const id of ['login-go', 'reg-go', 'forgot-go', 'reset-go', 'key-add']) {
@@ -918,390 +514,3 @@ function promoCard(ev, d) {
     if (e.status !== 401) lgErr(e.message || '暂时无法连接服务，请稍后重试');
   }
 })();
-
-
-// ---------------- 抽奖活动 ----------------
-
-const WHEEL_COLORS = {
-  gold: {ring: '#f59e0b', chip: 'bg-warning-subtle text-warning-emphasis'},
-  blue: {ring: '#3b82f6', chip: 'bg-primary-subtle text-primary'},
-  orange: {ring: '#f97316', chip: 'bg-orange-subtle text-orange'},
-  green: {ring: '#10b981', chip: 'bg-success-subtle text-success'},
-  purple: {ring: '#8b5cf6', chip: 'bg-purple-subtle text-purple'},
-  gray: {ring: '#64748b', chip: 'bg-secondary-subtle text-secondary'},
-};
-const PRIZE_TYPE_NAMES = {
-  recharge: '充值余额', grant: '赠金', model_unlimited: '体验卡',
-  model_quota: '专属额度', none: '谢谢参与',
-};
-
-let WHEELS = [];
-
-function prizeDesc(p) {
-  const amt = rewardMoney(p.amount);
-  if (p.type === 'recharge') return '充值余额 ¥' + amt;
-  if (p.type === 'grant') return '赠金 ¥' + amt;
-  if (p.type === 'model_unlimited') {
-    const parts = [esc(p.model || '')];
-    parts.push(p.duration_hours > 0 ? p.duration_hours + ' 小时' : '长期有效');
-    return parts.join(' · ');
-  }
-  if (p.type === 'model_quota') {
-    const parts = [esc(p.model || ''), (p.quota ?? 0) + ' 次'];
-    if (p.duration_hours > 0) parts.push(p.duration_hours + ' 小时内有效');
-    else parts.push('长期有效');
-    return parts.join(' · ');
-  }
-  return '未中奖';
-}
-
-async function loadWheels() {
-  const d = await api('wheels');
-  WHEELS = d.rows || [];
-  const box = $('#wheel-cards');
-  box.innerHTML = '';
-  if (!WHEELS.length) {
-    box.innerHTML = '<div class="col-12"><div class="hint text-center py-5">暂无可参与的抽奖活动</div></div>';
-    return;
-  }
-  for (const w of WHEELS) {
-    const col = document.createElement('div');
-    col.className = 'col-md-6 col-lg-4';
-    const top = (w.prizes || []).slice(0, 3).map(p => {
-      const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
-      return '<span class="type-chip ' + c.chip + ' me-1">' + esc(p.label) + '</span>';
-    }).join('');
-    col.innerHTML = '<div class="card h-100 wheel-activity" data-w="' + esc(w.id) + '" role="button">'
-      + '<div class="card-body">'
-      + '<div class="d-flex justify-content-between align-items-center mb-2">'
-      + '<span class="fw-semibold fs-6">' + esc(w.name) + '</span>'
-      + '<span class="badge bg-dark-subtle text-dark">' + (w.cost > 0 ? '¥' + w.cost + ' / 次' : '免费') + '</span></div>'
-      + '<div class="small text-muted mb-2">' + (w.prizes?.length ?? 0) + ' 项奖品</div>'
-      + '<div>' + top + ((w.prizes?.length ?? 0) > 3 ? '<span class="small text-muted">等 ' + w.prizes.length + ' 项</span>' : '') + '</div>'
-      + '<div class="small text-primary mt-2">进入活动 →</div>'
-      + '</div></div>';
-    col.querySelector('.wheel-activity').onclick = () => openWheelDetail(w);
-    box.appendChild(col);
-  }
-}
-
-function openWheelDetail(w) {
-  if (drawing) return;
-  $('#wheel-list-view').style.display = 'none';
-  $('#wheel-detail-view').style.display = 'block';
-  $('#wd-name').textContent = w.name;
-  $('#wd-cost').textContent = w.cost > 0 ? '¥' + w.cost + ' / 次' : '免费';
-  // 转盘盘面按展示概率分段
-  const disc = $('#wd-disc');
-  const colors = (w.prizes || []).map(p => WHEEL_COLORS[p.color] || WHEEL_COLORS.gray);
-  let acc = 0;
-  const segs = (w.prizes || []).map((p, i) => {
-    const from = acc, to = acc + (p.percent ?? 0);
-    acc = to;
-    return `${colors[i].ring} ${from}% ${to}%`;
-  });
-  disc.style.background = 'conic-gradient(' + segs.join(',') + ')';
-  disc.style.transition = 'none';
-  disc.style.transform = 'rotate(0deg)';
-  $('#wd-center').textContent = 'GO';
-  // 盘面分段标签：按每格中心角定位（转盘明确写明奖项）
-  disc.querySelectorAll('.wheel-lbl').forEach(n => n.remove());
-  let a0 = 0;
-  for (const p of (w.prizes || [])) {
-    const mid = (a0 + (p.percent ?? 0) / 2) * 3.6;
-    a0 += (p.percent ?? 0);
-    const lbl = document.createElement('span');
-    lbl.className = 'wheel-lbl';
-    lbl.textContent = (p.label || '').slice(0, 8);
-    // 下半圈的标签旋转 180° 后再正向放置：文字永远保持可读方向
-    lbl.style.transform = (mid > 90 && mid < 270)
-      ? 'rotate(' + (mid + 180) + 'deg) translateY(99px) translateX(-50%)'
-      : 'rotate(' + mid + 'deg) translateY(-99px) translateX(-50%)';
-    disc.appendChild(lbl);
-  }
-  // 奖项表使用实际中奖概率；盘面布局使用 percent。
-  const tb = $('#wd-prizes');
-  tb.innerHTML = '';
-  for (const p of (w.prizes || [])) {
-    const c = WHEEL_COLORS[p.color] || WHEEL_COLORS.gray;
-    const pct = p.chance ?? p.percent ?? 0;
-    const chanceText = pct > 0 && pct < 0.000001 ? '<0.000001' : rewardMoney(pct);
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td class="text-nowrap"><span class="type-chip ' + c.chip + ' me-2" style="width:12px">&nbsp;</span>' + esc(p.label) + '</td>'
-      + '<td class="small text-nowrap">' + esc(PRIZE_TYPE_NAMES[p.type] || p.type) + '</td>'
-      + '<td class="small" style="color:var(--mut)">' + prizeDesc(p) + '</td>'
-      + '<td class="text-end text-nowrap"><div class="d-flex align-items-center justify-content-end gap-2">'
-      + '<div class="prob-bar"><div class="prob-fill" style="width:' + pct + '%"></div></div>'
-      + '<span class="fw-semibold" style="min-width:46px;display:inline-block;text-align:right">' + esc(chanceText) + '%</span></div></td>';
-    tb.appendChild(tr);
-  }
-  const btn = $('#wd-draw');
-  btn.disabled = false;
-  btn.onclick = () => confirmDraw(w, btn);
-}
-
-function backToWheelList() {
-  if (drawing) return;
-  $('#wheel-detail-view').style.display = 'none';
-  $('#wheel-list-view').style.display = 'block';
-}
-$('#wheel-back').onclick = backToWheelList;
-
-function wheelModal(title, bodyHtml, okText, onCancel) {
-  $('#wheel-modal-title').textContent = title;
-  $('#wheel-modal-body').innerHTML = bodyHtml;
-  $('#wheel-modal-ok').textContent = okText;
-  // 清除上次弹窗的确认操作。
-  $('#wheel-modal-ok').onclick = () => { $('#wheel-modal').style.display = 'none'; };
-  const mask = $('#wheel-modal');
-  mask.style.display = 'flex';
-  const close = () => { mask.style.display = 'none'; };
-  $('#wheel-modal-cancel').onclick = () => { close(); if (onCancel) onCancel(); };
-  mask.onclick = e => { if (e.target === mask) { close(); if (onCancel) onCancel(); } };
-  return {ok: $('#wheel-modal-ok'), close};
-}
-
-let drawing = false;
-
-function confirmDraw(w, btn) {
-  if (drawing) return;
-  const costHtml = w.cost > 0
-    ? '本次抽奖将消耗 <b>¥' + w.cost + '</b>。'
-    : '本次抽奖免费。';
-  const body = '<div>' + costHtml + '</div>'
-    + '<div class="mt-2 small" style="color:#dbe5f5">中奖结果以本次抽奖为准，余额奖品即时到账。</div>';
-  const m = wheelModal('确认抽奖 · ' + w.name, body, '开始抽奖');
-  m.ok.onclick = () => {
-    m.close();
-    doDraw(w, btn);
-  };
-}
-
-// 未收到确定结果时保留请求 ID，重试只取原回执。
-let pendingDraw = null;
-try { pendingDraw = JSON.parse(sessionStorage.getItem('pendingDraw') || 'null'); } catch (e) { }
-function savePendingDraw(value) {
-  pendingDraw = value;
-  try {
-    if (value) sessionStorage.setItem('pendingDraw', JSON.stringify(value));
-    else sessionStorage.removeItem('pendingDraw');
-  } catch (e) { }
-}
-function newDrawId() {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, n => n.toString(16).padStart(2, '0')).join('');
-}
-
-async function doDraw(w, btn) {
-  if (drawing) return;
-  if (pendingDraw && pendingDraw.uid === ME?.id && pendingDraw.wheel_id !== w.id) {
-    toast('请先返回上次活动，重试以确认抽奖结果', 'danger');
-    return;
-  }
-  drawing = true;
-  btn.disabled = true;
-  $('#wheel-back').disabled = true;
-  const disc = $('#wd-disc');
-  const center = $('#wd-center');
-  center.textContent = '…';
-  let finished = false;
-  let refreshActivity = false;
-  try {
-    if (!pendingDraw || pendingDraw.uid !== ME?.id) {
-      PROMO = await api('promo').catch(() => null);
-      const useCredit = !!(PROMO && (PROMO.events || []).some(e => e.joined && e.enabled && !e.expired && e.draw_credits > 0));
-      savePendingDraw({uid: ME?.id, wheel_id: w.id, request_id: newDrawId(), use_credit: useCredit, expected_cost: w.cost, requested_at: w.server_time || Math.floor(Date.now()/1000)});
-    }
-    const d = await api('wheels/draw', {method:'POST', json:{id:w.id, request_id:pendingDraw.request_id,
-      use_credit:pendingDraw.use_credit, expected_cost:pendingDraw.expected_cost, requested_at:pendingDraw.requested_at}});
-    savePendingDraw(null);
-    const actual = d.wheel || w;
-    // 管理员可能在请求前改过奖项，按服务端本次快照绘制落点。
-    drawing = false;
-    openWheelDetail(actual);
-    drawing = true;
-    btn.disabled = true;
-    const prizes = actual.prizes || [];
-    const idx = prizes.findIndex(p => p.id === d.prize?.id);
-    if (idx >= 0) {
-      const start = prizes.slice(0,idx).reduce((sum,p) => sum + (p.percent || 0),0);
-      const pct = prizes[idx].percent || 0;
-      const jitter = (Math.random() - 0.5) * 0.6 * pct;
-      const finalDeg = 5 * 360 + (360 - (start + pct / 2 + jitter) * 3.6);
-      disc.style.transition = 'none';
-      disc.style.transform = 'rotate(0deg)';
-      void disc.offsetWidth;
-      disc.style.transition = 'transform 2.8s cubic-bezier(.15,.6,.2,1)';
-      disc.style.transform = 'rotate(' + finalDeg + 'deg)';
-      await new Promise(resolve => setTimeout(resolve,2850));
-    }
-    showPrizeModal(d,actual,btn);
-    finished = true;
-    run(refreshWallet);
-    run(loadPrizes);
-  } catch (e) {
-    // 明确的业务拒绝不会产生扣费；网络或服务器异常保留原 ID。
-    if (e.status === 400 || e.status === 402) savePendingDraw(null);
-    wheelModal('抽奖未完成', esc(e.message || '网络中断，请重试确认结果'), '关闭');
-    if (e.status === 400) refreshActivity = true;
-  } finally {
-    if (!finished) { disc.style.transition = ''; disc.style.transform = ''; }
-    center.textContent = 'GO';
-    drawing = false;
-    btn.disabled = false;
-    $('#wheel-back').disabled = false;
-    if (refreshActivity) { backToWheelList(); run(loadWheels); }
-  }
-}
-
-// 抽奖结果弹窗
-
-let prizeStarsSeeded = false;
-
-function seedPrizeStars() {
-  if (prizeStarsSeeded) return;
-  prizeStarsSeeded = true;
-  const box = $('#prize-stars');
-  for (let i = 0; i < 70; i++) {
-    const s = document.createElement('i');
-    s.style.left = Math.random() * 100 + '%';
-    s.style.top = Math.random() * 100 + '%';
-    const sz = 1.5 + Math.random() * 2.5;
-    s.style.width = s.style.height = sz + 'px';
-    s.style.animationDelay = (Math.random() * 3).toFixed(2) + 's';
-    s.style.animationDuration = (2.2 + Math.random() * 2.4).toFixed(2) + 's';
-    box.appendChild(s);
-  }
-  for (let i = 0; i < 6; i++) {
-    const st = document.createElement('div');
-    st.className = 'prize-streak';
-    st.style.top = 6 + Math.random() * 55 + '%';
-    st.style.left = '-10%';
-    st.style.animationDelay = (Math.random() * 3).toFixed(2) + 's';
-    st.style.animationDuration = (2.6 + Math.random() * 2.2).toFixed(2) + 's';
-    box.appendChild(st);
-  }
-}
-
-function burstPrizeConfetti() {
-  const colors = ['#f59e0b', '#3b82f6', '#10b981', '#f97316', '#a78bfa', '#ef4444'];
-  const wrap = $('#prize-card');
-  for (let i = 0; i < 16; i++) {
-    const c = document.createElement('span');
-    c.className = 'prize-confetti';
-    c.style.background = colors[i % colors.length];
-    const ang = (Math.random() * 2 - 1) * Math.PI; // 左右半圆向上喷
-    const dist = 110 + Math.random() * 150;
-    c.style.setProperty('--dx', Math.cos(ang) * dist + 'px');
-    c.style.setProperty('--dy', (Math.abs(Math.sin(ang)) * -120 - 30) + 'px');
-    c.style.left = 50 + '%';
-    wrap.appendChild(c);
-    setTimeout(() => c.remove(), 1800);
-  }
-}
-
-function showPrizeModal(d, w, btn) {
-  const p = d.prize || {};
-  const cost = d.cost || {};
-  const won = !!(p.type && p.type !== 'none');
-  seedPrizeStars();
-  const ov = $('#prize-overlay');
-  const card = $('#prize-card');
-  card.classList.toggle('lost', !won);
-  // 重置入场动画
-  card.style.animation = 'none';
-  void card.offsetWidth;
-  card.style.animation = '';
-
-  const amt = $('#prize-amount');
-  const line = $('#prize-line');
-  const valid = $('#prize-valid');
-  amt.style.fontSize = '';
-  if (p.type === 'recharge' || p.type === 'grant') {
-    const n = rewardMoney(p.amount);
-    amt.innerHTML = '¥' + n;
-    line.innerHTML = '<i class="bi bi-wallet2"></i>已存入' + (p.type === 'recharge' ? '充值' : '赠金') + '账本';
-    valid.textContent = '资金即时到账 · 可在「概览」查看明细';
-  } else if (p.type === 'model_unlimited') {
-    amt.innerHTML = esc(p.model || '-');
-    line.innerHTML = '<i class="bi bi-crosshair"></i>限定模型：' + esc(p.model || '-');
-    valid.textContent = p.duration_hours > 0
-      ? '体验卡 · 不限次数，限时 ' + p.duration_hours + ' 小时'
-      : '体验卡 · 不限次数，长期有效';
-  } else if (p.type === 'model_quota') {
-    amt.innerHTML = (p.quota ?? 0) + ' <small>次</small>';
-    line.innerHTML = '<i class="bi bi-crosshair"></i>限定模型：' + esc(p.model || '-');
-    valid.textContent = p.duration_hours > 0
-      ? '共计 ' + (p.quota ?? 0) + ' 次体验机会，限时 ' + p.duration_hours + ' 小时'
-      : '共计 ' + (p.quota ?? 0) + ' 次体验机会，长期有效';
-  } else {
-    amt.innerHTML = '谢谢参与';
-    amt.style.fontSize = '30px';
-    line.innerHTML = '本次未中奖';
-    valid.textContent = '抽奖记录可在奖品中心查看';
-  }
-  $('#prize-title').textContent = won ? '「' + (p.label || '奖品') + '」领取成功' : '谢谢参与';
-  const subTail = (p.type === 'model_unlimited' || p.type === 'model_quota')
-    ? 'Key 已发放至「奖品中心」。'
-    : (won ? '已可使用。' : '');
-  $('#prize-sub').innerHTML = (won ? '<b>' + esc(p.label || '') + '</b> ' + subTail : '');
-  // 中奖撒花
-  card.querySelectorAll('.prize-confetti').forEach(x => x.remove());
-  if (won) burstPrizeConfetti();
-  // 按钮：收下（关闭）；再来一次（关闭并立即再抽）
-  $('#prize-ok').onclick = () => { ov.style.display = 'none'; };
-  $('#prize-again').onclick = () => {
-    ov.style.display = 'none';
-    if (w && btn) doDraw(w, btn);
-  };
-  ov.style.display = 'flex';
-}
-
-async function loadPrizes() {
-  const [kd, ld] = await Promise.all([api('prize-keys'), api('draw-logs')]);
-  const tb = $('#prize-rows');
-  tb.innerHTML = '';
-  const rows = kd.rows || [];
-  if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="hint text-center py-4">还没有奖品 Key，去抽奖活动试试手气</td></tr>';
-  }
-  const now = Math.floor(Date.now() / 1000);
-  for (const k of rows) {
-    const tr = document.createElement('tr');
-    const expired = k.expires_at > 0 && now >= k.expires_at;
-    const exhausted = k.type === 'model_quota' && (k.used ?? 0) >= k.quota;
-    const st = !k.enabled ? '<span class="badge bg-secondary">停用</span>'
-      : expired ? '<span class="badge bg-danger">已过期</span>'
-      : exhausted ? '<span class="badge bg-danger">已用尽</span>'
-      : '<span class="badge bg-success">可用</span>';
-    tr.innerHTML = '<td class="key-mono small">' + esc(k.key.slice(0, 14)) + '…</td>'
-      + '<td class="small">' + (k.type === 'model_unlimited' ? '体验卡' : '专属额度') + '</td>'
-      + '<td class="small mono">' + esc(k.model || '-') + '</td>'
-      + '<td class="small">' + (k.type === 'model_quota' ? (k.used ?? 0) + ' / ' + k.quota : '不限') + '</td>'
-      + '<td class="small text-muted">' + (k.expires_at > 0 ? new Date(k.expires_at * 1000).toLocaleString() : '不限') + '</td>'
-      + '<td>' + st + '</td>'
-      + '<td class="text-end"></td>';
-    const td = tr.lastElementChild;
-    const copy = document.createElement('button');
-    copy.className = 'btn btn-sm btn-outline-secondary';
-    copy.textContent = '复制 Key';
-    copy.onclick = () => copyText(k.key);
-    td.appendChild(copy);
-    tb.appendChild(tr);
-  }
-  const tb2 = $('#drawlog-rows');
-  tb2.innerHTML = '';
-  const logs = ld.rows || [];
-  if (!logs.length) {
-    tb2.innerHTML = '<tr><td colspan="4" class="hint text-center py-3">暂无抽奖记录</td></tr>';
-  }
-  for (const r of logs) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td class="small text-muted">' + fmtTime(r.t) + '</td>'
-      + '<td class="small">' + esc(r.wheel_name || '-') + '</td>'
-      + '<td class="small">' + esc(r.label || '-') + '</td>'
-      + '<td class="text-end small">' + (r.cost > 0 ? '¥' + r.cost.toFixed(4) : '免费') + '</td>';
-    tb2.appendChild(tr);
-  }
-}
