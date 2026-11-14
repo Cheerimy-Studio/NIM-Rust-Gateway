@@ -185,6 +185,17 @@ def run_browser(base, admin, password):
         page.locator('#queue-retry').click()
         expect(page.locator('#queue-status')).to_contain_text('更新失败')
         check(True, '队列请求失败时显示过期数据提示')
+        page.goto(base + '/admin#catalog')
+        page.reload()
+        expect(page.locator('#pane-catalog')).to_be_visible()
+        row = page.locator('#price-rows tr').filter(has_text='test-paid').first
+        expect(row).to_be_visible(timeout=15000)
+        check(page.locator('#price-add').count() == 0, '定价区不再提供任意模型加价入口')
+        row.locator('.price-mode').select_option('token')
+        expect(row.locator('.price-cache')).to_be_visible()
+        check(True, '按 token 定价可直接填写缓存命中价')
+        expect(page.locator('.cat-toggle').first).to_have_text('取消接入', timeout=15000)
+        check(True, '模型接入页提供取消接入操作')
         check(not external, '浏览器不依赖外部 CDN')
         check(not errors, '页面无未处理 JavaScript 异常: ' + repr(errors))
         if os.environ.get('NGW_SCREENSHOT_DIR'):
