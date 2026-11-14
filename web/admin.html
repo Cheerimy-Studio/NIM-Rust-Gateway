@@ -48,12 +48,22 @@ a{text-decoration:none}
 .dash-sec:first-of-type{margin-top:0}
 .dash-sec .bi{color:var(--acc);font-size:14px}
 .dash-sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,#dbe3ee,transparent);border-radius:1px}
-.sec-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px}
+.sec-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;position:sticky;top:0;z-index:20;
+  padding:8px 0 10px;margin-top:-8px;background:rgba(243,245,249,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
 .sec-nav a{display:inline-flex;align-items:center;padding:5px 13px;border-radius:var(--r-pill);font-size:12.5px;
   color:#5b6b84;background:#fff;border:1px solid var(--line);transition:all .13s ease}
 .sec-nav a:hover{color:var(--acc);border-color:#b9cdf3;background:#f6f9ff}
 .sec-nav a.danger{color:#dc2626}
 .sec-nav a.danger:hover{border-color:#f3b4b4;background:#fff5f5}
+#pane-settings .card[id]{scroll-margin-top:64px}
+#pane-catalog .table-responsive{max-height:68vh;overflow:auto}
+#pane-catalog thead th{position:sticky;top:0;z-index:2;box-shadow:inset 0 -1px 0 var(--line)}
+#pane-catalog #cat-rows td:nth-child(2){white-space:nowrap}
+#pane-catalog #cat-rows td:nth-child(3){min-width:190px}
+#pane-catalog #cat-rows td:nth-child(10){white-space:nowrap}
+#pane-catalog .cat-price{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+#cat-summary .stat .num{font-size:1.3rem}
+#cat-summary .stat .sub{font-size:11px}
 .card{border:1px solid var(--line);border-radius:var(--r);background:#fff;transition:box-shadow .16s ease,border-color .16s ease,transform .16s ease;
   box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.03)}
 .card:hover{border-color:#dbe2ec}
@@ -331,7 +341,7 @@ details.upgrp[open]{background:#fff}
     <div class="table-responsive">
     <table class="table table-hover align-middle">
       <thead>
-        <tr><th>名称</th><th>Base URL</th><th>上游接口</th><th>可行性</th><th class="text-end">权重</th><th class="text-end">RPM 上限</th>
+        <tr><th>名称</th><th>Base URL</th><th>上游接口</th><th>可行性</th><th title="最近 10 次请求，左旧右新">近期</th><th class="text-end">权重</th><th class="text-end">RPM 上限</th>
           <th class="text-end">日上限</th><th>模型</th><th>策略</th><th class="text-end">账号</th><th class="text-end">今日</th>
           <th class="text-end">本分钟</th><th>状态</th><th>操作</th></tr>
       </thead>
@@ -520,6 +530,20 @@ details.upgrp[open]{background:#fff}
 <section class="pane" id="pane-catalog">
   <h2 class="pane-title">模型接入</h2>
   <div class="hint mb-3">为模型设置别名并保存后，客户端即可通过别名调用。清空别名可撤下模型。上下文与输出上限填 0 表示不限；超出上限的请求将自动调整。</div>
+  <div class="row g-2 mb-3" id="cat-summary">
+    <div class="col-6 col-lg-3"><div class="card stat accent">
+      <div class="d-flex align-items-center gap-2 stat-lbl"><i class="bi bi-boxes"></i><span class="lbl">已接入</span></div>
+      <div class="num" id="cat-sum-exposed">0</div><div class="sub">可对外调用</div></div></div>
+    <div class="col-6 col-lg-3"><div class="card stat amber">
+      <div class="d-flex align-items-center gap-2 stat-lbl"><i class="bi bi-hourglass-split"></i><span class="lbl">待接入</span></div>
+      <div class="num" id="cat-sum-pending">0</div><div class="sub">已发现未上架</div></div></div>
+    <div class="col-6 col-lg-3"><div class="card stat green">
+      <div class="d-flex align-items-center gap-2 stat-lbl"><i class="bi bi-gift"></i><span class="lbl">免费模型</span></div>
+      <div class="num" id="cat-sum-free">0</div><div class="sub">未设价或零价</div></div></div>
+    <div class="col-6 col-lg-3"><div class="card stat red">
+      <div class="d-flex align-items-center gap-2 stat-lbl"><i class="bi bi-activity"></i><span class="lbl">近 10 次失败</span></div>
+      <div class="num" id="cat-sum-fail">0</div><div class="sub">红格数量</div></div></div>
+  </div>
   <div class="card mb-3">
     <div class="card-header d-flex justify-content-between align-items-center">
       <span><i class="bi bi-boxes me-2 text-muted"></i>上游模型</span>
@@ -545,7 +569,10 @@ details.upgrp[open]{background:#fff}
             <th style="width:104px" title="0=不限">上下文上限</th>
             <th style="width:104px" title="0=不限">输出上限</th>
             <th style="width:104px" title="仅展示，给用户挑模型参考">预估速度</th>
-            <th style="width:104px">状态</th><th style="width:70px"></th>
+            <th style="width:150px">定价</th>
+            <th style="width:104px">状态</th>
+            <th style="width:132px" title="最近 10 次请求，左旧右新；绿=成功，黄=重试后成功，红=失败">近期</th>
+            <th style="width:70px"></th>
           </tr></thead>
           <tbody id="cat-rows"></tbody>
         </table>

@@ -283,6 +283,15 @@ pub fn err_tag(status: i64, err: &str) -> String {
     }
 }
 
+/// 记下客户端请求的模型名（链请求时 release_log 的 model 可能是实际成员，
+/// 热力图/渠道统计需要稳定的对外名称）。
+fn with_requested_model(mut log: Value, requested: &str) -> Value {
+    if let Some(o) = log.as_object_mut() {
+        o.insert("rmodel".into(), Value::from(requested));
+    }
+    log
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn release_log(
     ep: &str,
@@ -2720,12 +2729,12 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
             rstatus,
             err.clone(),
             Some(usage.clone()),
-            Some(release_log(
+            Some(with_requested_model(release_log(
                 ep_tag, &model, rstatus, ms, &err, attempt, Some(&key), &ctx.ip, &up_model, stream, ms,
                 util::int_or(usage.get("prompt_tokens"), 0),
                 util::int_or(usage.get("completion_tokens"), 0),
                 &tok,
-            )),
+            ), &requested_model)),
             0,
             upstream_retry_after,
         )
@@ -3876,12 +3885,12 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
             rstatus,
             err.clone(),
             Some(usage.clone()),
-            Some(release_log(
+            Some(with_requested_model(release_log(
                 ep, &model, rstatus, ms, &err, attempt, Some(&key), &ctx.ip, &up_model, stream, ms,
                 util::int_or(usage.get("prompt_tokens"), 0),
                 util::int_or(usage.get("completion_tokens"), 0),
                 &tok,
-            )),
+            ), &requested_model)),
             0,
             upstream_retry_after,
         )

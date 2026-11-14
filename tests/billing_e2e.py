@@ -103,6 +103,13 @@ def main():
                     daily=user.get('/v1/usage?days=7',headers={'Authorization':'Bearer '+key,'X-Forwarded-Proto':'https'}).json()
                     check(sum(r['requests'] for r in daily)==6 and sum(r['input_tokens'] for r in daily)==600 and sum(r['output_tokens'] for r in daily)==120,'日聚合保留六次调用与完整 token')
                     square=user.get('/api/user/models').json()['rows']; check(any(m['model']=='route' and any(p['rule']==price for p in m['pricing']) for m in square),'模型广场披露路由成员 token 价格')
+                    route_sq=next(m for m in square if m['model']=='route')
+                    check(len(route_sq.get('recent',[]))>=6 and route_sq.get('health')==100,'模型广场返回最近请求热力图与成功率')
+                    check(all(v in (0,1,2) for v in route_sq['recent']),'热力图状态仅含成功/重试成功/失败')
+                    up_row=next(r for r in admin.get('/api/upstreams').json()['rows'] if r['id']=='billing-channel')
+                    check(len(up_row.get('recent_flags',[]))>=6,'渠道行返回最近请求状态')
+                    cat_row=next(r for r in admin.get('/api/upstream-models').json()['rows'] if r['channel_id']=='billing-channel' and r['upstream']=='token-model')
+                    check(isinstance(cat_row.get('recent'),list),'模型接入行返回近期状态字段')
                     # 缓存命中计费：1000 输入中 600 命中，命中价 0.5、普通输入 2、输出 8
                     cached_before=user.get('/api/user/me').json()['balance']
                     r=user.post('/v1/chat/completions',headers=headers,json={'model':'cache-model','messages':[{'role':'user','content':'hi'}]})
@@ -112,6 +119,8 @@ def main():
                     clog=user.get('/api/user/logs').json()['rows'][0]
                     check(clog.get('cached_tok')==600 and clog.get('in_tok')==1000 and clog.get('billing',{}).get('cache')==0.5,
                         '调用日志保留缓存命中 token 与缓存价: '+json.dumps(clog.get('billing'),ensure_ascii=False))
+                    cat_cache=next(r for r in admin.get('/api/upstream-models').json()['rows'] if r['channel_id']=='billing-channel' and r['upstream']=='cache-model')
+                    check(len(cat_cache.get('recent',[]))>=1,'模型接入行返回最近请求状态')
                     daily=user.get('/v1/usage?days=7',headers={'Authorization':'Bearer '+key,'X-Forwarded-Proto':'https'}).json()
                     check(sum(r['requests'] for r in daily)==7 and sum(r['input_tokens'] for r in daily)==1600,'日聚合计入缓存命中的完整输入 token')
                     # 原生 Anthropic usage：input_tokens 不含缓存读，需合计后计费

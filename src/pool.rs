@@ -1239,6 +1239,17 @@ pub async fn arelease(
     let _ = db_res.await;
 }
 
+/// 近期请求状态（热力图）：0=失败，1=成功，2=重试后成功（attempt > 1）。
+fn recent_flag(success: bool, log: Option<&Value>) -> i64 {
+    if !success {
+        0
+    } else if util::int_or(log.and_then(|l| l.get("att")), 1) > 1 {
+        2
+    } else {
+        1
+    }
+}
+
 fn release_fn(
     db: &mut Value,
     key_id: &str,
@@ -1506,10 +1517,10 @@ fn release_fn(
                 ra.insert(0, row);
                 ra.truncate(10);
             }
-            // 渠道近期可行性
+            // 渠道近期可行性：0=失败，1=成功，2=重试后成功（热力图黄态）
             let uid2 = util::str_or(k.get("upstream_id"), "");
             if !uid2.is_empty() {
-                let flag = if success { 1 } else { 0 };
+                let flag = recent_flag(success, log);
                 {
                     let obj = db.as_object_mut().unwrap();
                     let rec_all = obj.entry("up_recent").or_insert_with(|| Value::Object(Obj::new()));
@@ -1525,7 +1536,11 @@ fn release_fn(
                     r.insert(0, Value::from(flag));
                     r.truncate(20);
                 }
-                let m_name = util::str_or(log.and_then(|l| l.get("model")), "");
+                // 链请求的 log.model 可能是实际成员；热力图按对外请求名统计
+                let m_name = util::str_or(
+                    log.and_then(|l| l.get("rmodel").or_else(|| l.get("model"))),
+                    "",
+                );
                 if !m_name.is_empty() && m_name != "-" {
                     let mkey = model_key(&uid2, &m_name);
                     let obj = db.as_object_mut().unwrap();
@@ -1974,5 +1989,17 @@ mod capability_tests {
         for _ in 0..3 {release_fn(&mut db,&id,false,502,"upstream error",None,Some(&log),0,0);}
         assert!(db["model_breaker"].get("same-name").is_none());
         assert!(db["model_breaker"].get(capability_key("same-name","emb")).is_some());
+    }
+}
+
+#[cfg(test)]
+mod recent_flag_tests {
+    use super::*;
+    #[test]
+    fn heatmap_flag_marks_retry_success_yellow() {
+        assert_eq!(recent_flag(false, None), 0);
+        assert_eq!(recent_flag(true, None), 1);
+        assert_eq!(recent_flag(true, Some(&serde_json::json!({"att":1}))), 1);
+        assert_eq!(recent_flag(true, Some(&serde_json::json!({"att":2}))), 2);
     }
 }

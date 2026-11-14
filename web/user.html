@@ -75,8 +75,10 @@ a{text-decoration:none}
 .badge-free{background:#d1fae5;color:#047857}
 .badge-paid{background:#fef3c7;color:#92400e}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
-.model-card{border:1px solid var(--line);border-radius:var(--r);background:#fff;transition:all .15s ease}
-.model-card:hover{border-color:#d5deea;box-shadow:0 4px 14px rgba(16,24,40,.08)}
+.model-card{border:1px solid var(--line);border-radius:var(--r);background:#fff;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease}
+.model-card:hover{border-color:#d5deea;box-shadow:0 10px 26px rgba(16,24,40,.09);transform:translateY(-2px)}
+.model-heat .badge{font-size:10.5px}
+.model-heat .heat-sq{width:10px;height:10px;border-radius:3px}
 .hint{font-size:12px;color:var(--mut)}
 .tchat{min-height:240px;max-height:52vh;overflow:auto;padding:14px 16px}
 .tmsg{max-width:82%;white-space:pre-wrap;word-break:break-word;padding:.52rem .8rem;
@@ -305,6 +307,7 @@ a{text-decoration:none}
     <select id="model-kind" class="form-select" aria-label="按价格筛选"><option value="all">全部模型</option><option value="free">免费模型</option><option value="paid">付费模型</option></select>
     <button id="model-refresh" type="button" class="btn btn-outline-secondary">刷新</button>
     <span id="model-count" class="hint" role="status"></span>
+    <span class="heat-legend ms-auto" title="最近 10 次请求，左旧右新"><i class="heat-sq ok"></i>成功<i class="heat-sq warn"></i>重试成功<i class="heat-sq bad"></i>失败<i class="heat-sq none"></i>无数据</span>
   </div>
   <div class="row g-3" id="model-cards"></div>
 </div>

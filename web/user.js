@@ -334,13 +334,18 @@ function renderModels() {
     const col = document.createElement('div'); col.className = 'col-md-6 col-xl-4';
     const rules = [...new Set((m.pricing || [{rule:m.price}]).map(p => window.NGW_UI.pricingText(p.rule)))];
     const badge = rules.map(text => '<div class="small mt-1">' + esc(text) + '</div>').join('');
+    const heat = (m.recent && m.recent.length)
+      ? window.NGW_UI.heatSquares(m.recent)
+      : '<span class="heat">' + '<i class="heat-sq none"></i>'.repeat(10) + '</span>';
+    const health = m.health == null
+      ? '<span class="badge text-bg-light text-muted">暂无调用统计</span>'
+      : '<span class="badge ' + (m.health >= 80 ? 'text-bg-success' : m.health >= 50 ? 'text-bg-warning' : 'text-bg-danger') + '">近期成功率 ' + esc(m.health) + '%</span>';
     col.innerHTML = '<div class="card model-card h-100"><div class="card-body">'
       + '<div class="model-name">' + esc(m.model) + '</div><div class="mt-2">' + badge + '</div>'
       + '<div class="small mt-3 text-muted">'
       + (m.ctx ? '上下文 ' + esc(m.ctx) : '上下文未标注')
       + (m.tps ? ' · 约 ' + esc(m.tps) + ' tok/s' : '') + '</div>'
-      + '<div class="small mt-1 text-muted">'
-      + (m.health == null ? '暂无调用统计' : '近期成功率 ' + esc(m.health) + '%') + '</div>'
+      + '<div class="model-heat"><span class="small text-muted">近期请求</span>' + heat + health + '</div>'
       + '<div class="model-actions"></div></div></div>';
     const actions = col.querySelector('.model-actions');
     const test = document.createElement('a'); test.className = 'btn btn-sm btn-primary';

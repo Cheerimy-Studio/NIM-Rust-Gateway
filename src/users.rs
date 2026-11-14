@@ -1272,6 +1272,22 @@ pub fn user_logs_page(user_id: &str, kind: &str, page: i64, per: usize) -> (Vec<
     (rows, total)
 }
 
+/// 从 up_recent 的一条记录里挑最健康样本：成功率高优先，样本多优先。
+fn consider_recent(best: &mut Option<(f64, Vec<i64>)>, rec: &Value) {
+    let Some(a) = rec.as_array() else { return };
+    let nums: Vec<i64> = a.iter().take(20).map(|v| v.as_i64().unwrap_or(0)).collect();
+    if nums.is_empty() {
+        return;
+    }
+    let ratio = nums.iter().filter(|v| **v != 0).count() as f64 / nums.len() as f64;
+    let better = best
+        .as_ref()
+        .map_or(true, |(r, old)| ratio > *r || (ratio == *r && nums.len() > old.len()));
+    if better {
+        *best = Some((ratio, nums));
+    }
+}
+
 /// 模型广场：对外可用模型 + 价格（取各渠道最低价；无价 = 免费）。
 pub fn model_square() -> Vec<Value> {
     let db = store().load();
@@ -1353,29 +1369,42 @@ pub fn model_square() -> Vec<Value> {
             order.push(c.name.clone());
         }
     }
-    // 健康度：从 up_recent 取各渠道该模型的最近成功率，取最优值
+    // 近期状态：up_recent 存最近 20 次（0=失败，1=成功，2=重试后成功），
+    // 取最健康的一条线路展示最近 10 次。链请求按链名记录，早期数据按
+    // 成员名记录，两种都兼容。
     let up_recent = db.get("up_recent").and_then(|r| r.as_object()).cloned().unwrap_or_default();
     let ups_list = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
+    let chains = crate::upstreams::parse_model_chains(db.get("config").unwrap_or(&Value::Null));
     order
         .into_iter()
         .map(|m| {
             let price = best.get(&m).copied().unwrap_or(f64::INFINITY);
-            let mut health: Option<f64> = None;
+            let members = chains
+                .iter()
+                .find(|c| c.name == m)
+                .map(|c| c.members.clone())
+                .unwrap_or_else(|| vec![m.clone()]);
+            let mut best_recent: Option<(f64, Vec<i64>)> = None;
             for u in &ups_list {
                 let ch_id = util::str_or(u.get("id"), "");
-                if ch_id.is_empty() || !u.get("enabled").map(util::truthy).unwrap_or(false)
-                    || !crate::upstreams::channel_serves_model(u, &m, global_hide, transparent) { continue; }
-                let key = format!("{}{}{}", ch_id, '\u{0}', m);
-                if let Some(rec) = up_recent.get(&key).and_then(|r| r.as_array()) {
-                    if rec.is_empty() { continue; }
-                    let ok = rec.iter().filter(|v| v.as_i64().unwrap_or(0) != 0).count();
-                    let ratio = ok as f64 / rec.len() as f64;
-                    if health.map_or(true, |h| ratio > h) { health = Some(ratio); }
+                if ch_id.is_empty() || !u.get("enabled").map(util::truthy).unwrap_or(false) {
+                    continue;
+                }
+                if let Some(rec) = up_recent.get(&format!("{}{}{}", ch_id, '\u{0}', m)) {
+                    consider_recent(&mut best_recent, rec);
+                }
+                for member in &members {
+                    if member != &m {
+                        if let Some(rec) = up_recent.get(&format!("{}{}{}", ch_id, '\u{0}', member)) {
+                            consider_recent(&mut best_recent, rec);
+                        }
+                    }
                 }
             }
-            let health_pct = health.map(|h| (h * 100.0).round() as i64);
-            let members = crate::upstreams::parse_model_chains(db.get("config").unwrap_or(&Value::Null))
-                .into_iter().find(|c| c.name == m).map(|c| c.members).unwrap_or_else(|| vec![m.clone()]);
+            let health_pct = best_recent.as_ref().map(|(r, _)| (r * 100.0).round() as i64);
+            let recent: Vec<i64> = best_recent
+                .map(|(_, v)| v.into_iter().take(10).collect())
+                .unwrap_or_default();
             let mut pricing = Vec::new();
             for u in &ups_list {
                 if !u.get("enabled").map(util::truthy).unwrap_or(false) { continue; }
@@ -1392,6 +1421,7 @@ pub fn model_square() -> Vec<Value> {
                 "paid": pricing.iter().any(|p| crate::billing::paid(&p["rule"])),
                 "price": if price.is_finite() && price > 0.0 { json!(util::round6(price)) } else { json!(0) },
                 "health": health_pct,
+                "recent": recent,
                 "ctx": limits.get(&m.to_lowercase()).map(|x| x.ctx).unwrap_or(0),
                 "tps": limits.get(&m.to_lowercase()).map(|x| x.tps).unwrap_or(0),
             })
@@ -1471,6 +1501,41 @@ mod square_tests {
             d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
             if let Some(v) = saved_chains { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
             if let Some(v) = saved_prices { d["config"]["model_limits"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_limits"); }
+        });
+    }
+
+    #[test]
+    fn model_square_reports_recent_heatmap_for_models_and_chains() {
+        let _g = crate::store::test_lock();
+        let db = store().load();
+        let saved_ups = db.get("upstreams").cloned();
+        let saved_chains = db.get("config").and_then(|c| c.get("model_chains")).cloned();
+        let saved_recent = db.get("up_recent").cloned();
+        store().update(|d| {
+            d["upstreams"] = serde_json::json!([
+                {"id":"u1","name":"T","base":"https://x.test/v1","enabled":true,"models":["alpha","beta"]}
+            ]);
+            d["config"]["model_chains"] = serde_json::json!("combo = alpha, beta\ncombo2 = alpha, beta");
+            d["config"]["transparent_upstream"] = serde_json::json!(false);
+            let mut recent = serde_json::Map::new();
+            recent.insert(format!("u1{}alpha", '\u{0}'), serde_json::json!([1,0,2,1]));
+            recent.insert(format!("u1{}combo", '\u{0}'), serde_json::json!([2,1,1]));
+            d["up_recent"] = Value::Object(recent);
+        });
+        let rows = model_square();
+        let find = |n: &str| rows.iter().find(|x| x["model"] == n).cloned();
+        let alpha = find("alpha").expect("alpha listed");
+        assert_eq!(alpha["recent"], serde_json::json!([1,0,2,1]));
+        assert_eq!(alpha["health"], 75);
+        let combo = find("combo").expect("combo listed");
+        assert_eq!(combo["recent"], serde_json::json!([2,1,1]), "链名自己的记录优先");
+        assert_eq!(combo["health"], 100);
+        let combo2 = find("combo2").expect("combo2 listed");
+        assert_eq!(combo2["recent"], serde_json::json!([1,0,2,1]), "无链名记录时回退成员");
+        store().update(|d| {
+            d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
+            if let Some(v) = saved_chains { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
+            if let Some(v) = saved_recent { d["up_recent"] = v; } else { d.as_object_mut().unwrap().remove("up_recent"); }
         });
     }
 }

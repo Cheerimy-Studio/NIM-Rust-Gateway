@@ -74,4 +74,16 @@ vm.runInContext(fs.readFileSync('web/ui.js', 'utf8'), context);
   assert.equal(await dialog, false); assert.equal(document.activeElement, original);
   assert.equal(document.handlers.keydown, undefined);
   console.log('PASS 破坏性弹窗默认取消，焦点循环和关闭恢复正常');
+
+  const heat = context.window.NGW_UI.heatSquares([1, 2, 0]);
+  assert.equal((heat.match(/class="heat-sq/g) || []).length, 10);
+  assert.equal((heat.match(/heat-sq ok/g) || []).length, 1);
+  assert.equal((heat.match(/heat-sq warn/g) || []).length, 1);
+  assert.equal((heat.match(/heat-sq bad/g) || []).length, 1);
+  assert.equal((context.window.NGW_UI.heatSquares([]).match(/heat-sq none/g) || []).length, 10);
+  assert.equal(context.window.NGW_UI.heatSquares([1, 9, 2]).includes('heat-sq bad'), false, '非法值不渲染成红色');
+  assert.equal(context.window.NGW_UI.paid(0), false);
+  assert.equal(context.window.NGW_UI.paid({mode: 'token', input: 0, output: 0}), false);
+  assert.equal(context.window.NGW_UI.paid({mode: 'token', input: 1}), true);
+  console.log('PASS 热力图状态与付费判断');
 })().catch(error => { console.error(error); process.exitCode = 1; });

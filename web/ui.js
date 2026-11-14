@@ -2,6 +2,27 @@
 'use strict';
 let dialogCount = 0;
 window.NGW_UI = {
+  paid(p) {
+    if (typeof p === 'number') return p > 0;
+    if (!p || p.mode !== 'token') return false;
+    return Number(p.input) > 0 || Number(p.output) > 0 || Number(p.cache) > 0
+      || (p.tiers || []).some(t => Number(t.input) > 0 || Number(t.output) > 0 || Number(t.cache) > 0);
+  },
+  // 最近 10 次请求热力图：1=成功（绿），2=重试后成功（黄），0=失败（红），空=无数据。
+  // 入参按新→旧传入，展示时翻转成旧→新（左旧右新）。
+  heatSquares(flags) {
+    const vals = Array.isArray(flags) ? flags.map(Number).filter(v => v === 0 || v === 1 || v === 2).slice(0, 10) : [];
+    const slots = new Array(10).fill(null);
+    for (let i = 0; i < vals.length; i++) slots[10 - vals.length + i] = vals[i];
+    const cls = {1: 'ok', 2: 'warn', 0: 'bad'};
+    const name = {1: '成功', 2: '重试后成功', 0: '失败'};
+    return '<span class="heat" role="img" aria-label="最近 10 次请求，绿=成功，黄=重试后成功，红=失败">' +
+      slots.map((v, i) => '<i class="heat-sq ' + (v === null ? 'none' : cls[v]) + '" title="第 ' +
+        (i + 1) + ' 格：' + (v === null ? '暂无数据' : name[v]) + '"></i>').join('') + '</span>';
+  },
+  heatLegend() {
+    return '<span class="heat-legend"><i class="heat-sq ok"></i>成功<i class="heat-sq warn"></i>重试成功<i class="heat-sq bad"></i>失败<i class="heat-sq none"></i>无数据</span>';
+  },
   pricingText(p) {
     if (!p || typeof p === 'number') return p > 0 ? '¥' + p + ' / 次' : '免费';
     if (p.mode !== 'token') return '未配置';

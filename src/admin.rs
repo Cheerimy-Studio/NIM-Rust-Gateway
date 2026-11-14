@@ -687,6 +687,20 @@ pub async fn queue_clear(headers: &HeaderMap) -> Response {
     json_resp(json!({"ok": true}))
 }
 
+/// 最近请求状态（新→旧，最多 10 个）：0=失败，1=成功，2=重试后成功。
+fn recent_flags(db: &Value, key: &str) -> Vec<i64> {
+    db.get("up_recent")
+        .and_then(|r| r.get(key))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .take(10)
+                .map(|v| v.as_i64().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn upstream_row(db: &Value, u: &Value) -> Value {
     let now = util::now_i();
     let minute = util::utc_minute(now);
@@ -726,6 +740,7 @@ fn upstream_row(db: &Value, u: &Value) -> Value {
         o.insert("minute_used".into(), json!(mu));
         o.insert("feasibility".into(), json!(score));
         o.insert("recent".into(), json!(rec.len()));
+        o.insert("recent_flags".into(), json!(recent_flags(db, &uid)));
         o.insert("model_map_count".into(), json!(u.get("model_map").and_then(|m| m.as_object()).map(|m| m.len()).unwrap_or(0)));
         o.insert("hide_errors_global".into(), json!(db.pointer("/config/hide_upstream_errors").map(util::truthy).unwrap_or(true)));
         o.insert("hide_mapped_global".into(), json!(db.pointer("/config/hide_mapped_names").map(util::truthy).unwrap_or(true)));
@@ -1037,11 +1052,13 @@ fn upstream_alias_rows(db: &Value) -> Vec<Value> {
             let routable = crate::upstreams::channel_serves_model(u, &client, global_hide, transparent)
                 || models_list.iter().any(|m| m == upstream);
             let price = prices.get(&client).cloned().unwrap_or(json!(0));
+            let recent = recent_flags(db, &format!("{}{}{}", uid, '\u{0}', client));
             rows.push(json!({
                 "channel_id": uid, "channel_name": uname,
                 "upstream": upstream, "alias": alias,
                 "exposed": exposed, "routable": routable,
                 "ctx": ctx, "out": out, "tps": tps, "price": price,
+                "recent": recent,
             }));
         }
     }

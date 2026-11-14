@@ -503,7 +503,7 @@ async function loadUpstreams() {
   const tb = $('#up-rows'); tb.innerHTML = '';
   if (!d.rows.length) {
     const tr = el('tr'); const td = el('td', 'text-muted text-center py-4', '—');
-    td.colSpan = 14; tr.appendChild(td); tb.appendChild(tr);
+    td.colSpan = 15; tr.appendChild(td); tb.appendChild(tr);
   }
   for (const u of d.rows) {
     const tr = el('tr');
@@ -526,6 +526,12 @@ async function loadUpstreams() {
       el('td', 'small', ({auto: '自动', 'chat/completions': 'Chat Completions', responses: 'Responses', messages: 'Messages', completions: 'Completions'})[u.api_endpoint || 'auto'] || '未识别'),
       (() => { const td = el('td'); td.appendChild(el('span', scoreCls, u.feasibility + '%'));
         td.title = '近 20 次成功率' + (u.recent ? `，样本 ${u.recent}` : '，暂无样本'); return td; })(),
+      (() => { const td = el('td');
+        td.innerHTML = (u.recent_flags && u.recent_flags.length)
+          ? window.NGW_UI.heatSquares(u.recent_flags)
+          : '<span class="text-muted small">—</span>';
+        td.title = '最近 10 次请求（左旧右新）：绿=成功，黄=重试后成功，红=失败';
+        return td; })(),
       el('td', 'text-end', String(u.weight)),
       el('td', 'text-end', u.rpm_cap > 0 ? String(u.rpm_cap) : '不限'),
       el('td', 'text-end', u.daily_cap > 0 ? String(u.daily_cap) : '不限'),
@@ -1291,8 +1297,25 @@ function renderCatalog() {
   tb.innerHTML = '';
   const sel = $('#cat-channel').value;
   const rows = CAT_ROWS.filter(r => !sel || r.channel_id === sel);
+  // 概览条跟随当前渠道筛选：已接入/待接入/免费模型/近 10 次失败红格
+  const exposed = new Set(), pending = new Set(), free = new Set();
+  let fails = 0;
+  for (const r of rows) {
+    const name = r.alias || r.upstream;
+    if (r.exposed) {
+      exposed.add(name);
+      if (!window.NGW_UI.paid(r.price)) free.add(name);
+      for (const v of r.recent || []) if (Number(v) === 0) fails++;
+    } else {
+      pending.add(r.channel_id + '/' + r.upstream);
+    }
+  }
+  $('#cat-sum-exposed').textContent = exposed.size;
+  $('#cat-sum-pending').textContent = pending.size;
+  $('#cat-sum-free').textContent = free.size;
+  $('#cat-sum-fail').textContent = fails;
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="text-muted small text-center py-4">暂无模型。选择渠道后点击「拉取模型清单」，也可在「上游」中手动添加。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="11" class="text-muted small text-center py-4">暂无模型。选择渠道后点击「拉取模型清单」，也可在「上游」中手动添加。</td></tr>';
     return;
   }
   for (const r of rows) {
@@ -1308,8 +1331,9 @@ function renderCatalog() {
       '<td><input type="number" min="0" class="form-control form-control-sm cat-ctx" value="' + (r.ctx || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-out" value="' + (r.out || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-tps" value="' + (r.tps || 0) + '"></td>' +
-      '<td class="small"><button class="btn btn-sm btn-link p-0 text-start cat-price" title="跳到下方定价编辑">' + esc(window.NGW_UI.pricingText(r.price)) + '</button></td>' +
+      '<td class="small"><button class="btn btn-sm btn-link p-0 text-start cat-price" title="' + esc(window.NGW_UI.pricingText(r.price)) + '；点击跳到下方定价编辑">' + esc(window.NGW_UI.pricingText(r.price)) + '</button></td>' +
       '<td>' + st + '</td>' +
+      '<td title="最近 10 次请求（左旧右新）">' + ((r.recent && r.recent.length) ? window.NGW_UI.heatSquares(r.recent) : '<span class="text-muted small">—</span>') + '</td>' +
       '<td class="text-end text-nowrap"><button class="btn btn-sm btn-primary cat-save">保存</button> ' +
       (r.exposed
         ? '<button class="btn btn-sm btn-outline-danger cat-toggle">取消接入</button>'
