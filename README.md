@@ -228,6 +228,8 @@ GET  /queue                    公开排队页
 1.7.60 的计费单位、长度档位、浏览器文件工具和升级注意事项见
 [本次修复说明](docs/FIX-1.7.60-20261108.md)。
 
+按 token 计费支持输入价、输出价与可选的缓存命中价（元/百万 token），长度档位可分别覆盖三者；未配置缓存价时命中部分按输入价计。缓存命中取自上游 `usage` 的 `prompt_tokens_details.cached_tokens`、`cache_read_input_tokens`、`prompt_cache_hit_tokens` 等字段，命中 token 已包含在输入 token 内，不会重复计费，调用日志的 `cached_tok` 保留命中数量。定价只对已接入的模型生效：取消接入或改名会同步清理旧名定价，未接入的模型不能单独设置价格（透传渠道的空清单除外）。
+
 ## 01Code 客户端登录
 
 从 1.7.61 起提供 RFC 8628 设备授权。客户端只取得一个独立的 `sk-usr-` 用户 Key，不接触密码或网站会话。手动创建、粘贴 API Key 的方式继续可用，现有模型和对话接口保持原样。
@@ -241,7 +243,7 @@ NGW_TRUSTED_PROXIES=127.0.0.1,::1
 
 也可以在后台「设置 → 01Code 设备登录」直接填写公网入口与可信反代 IP（留空时读取上述环境变量；可信反代 IP 填 `*` 表示信任全部来源，此时必须确保网关只能经反代访问且反代覆盖转发头，否则可伪造协议与来源 IP）。
 
-`NGW_PUBLIC_ORIGIN` 只允许 HTTPS origin，不能含路径、用户名、查询或片段。网关本身位于 TLS 反向代理后；代理必须覆盖 `X-Forwarded-Proto: https` 和 `X-Real-IP`，并阻止用户绕过代理直连网关。仅对 `NGW_TRUSTED_PROXIES` 列出的精确 IP 信任这些头，其他来源不能使用新授权接口。未设置正确 origin/可信代理时返回 `invalid_request`。不要把公网客户端地址加入可信代理列表。
+`NGW_PUBLIC_ORIGIN` 只允许 HTTPS origin，不能含路径、用户名、查询或片段（本地联调可填 `http://127.0.0.1:<端口>` 或 `http://localhost:<端口>`，仅回环地址接受 HTTP）。网关本身位于 TLS 反向代理后；代理必须覆盖 `X-Forwarded-Proto: https` 和 `X-Real-IP`，并阻止用户绕过代理直连网关。仅对 `NGW_TRUSTED_PROXIES` 列出的精确 IP 信任这些头，其他来源不能使用新授权接口。未设置正确 origin/可信代理时返回 `invalid_request`。不要把公网客户端地址加入可信代理列表。
 
 ```mermaid
 sequenceDiagram

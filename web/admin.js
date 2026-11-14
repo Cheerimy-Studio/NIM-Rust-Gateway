@@ -1308,9 +1308,31 @@ function renderCatalog() {
       '<td><input type="number" min="0" class="form-control form-control-sm cat-ctx" value="' + (r.ctx || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-out" value="' + (r.out || 0) + '"></td>' +
       '<td><input type="number" min="0" class="form-control form-control-sm cat-tps" value="' + (r.tps || 0) + '"></td>' +
-      '<td class="small">' + esc(window.NGW_UI.pricingText(r.price)) + '</td>' +
+      '<td class="small"><button class="btn btn-sm btn-link p-0 text-start cat-price" title="跳到下方定价编辑">' + esc(window.NGW_UI.pricingText(r.price)) + '</button></td>' +
       '<td>' + st + '</td>' +
-      '<td class="text-end"><button class="btn btn-sm btn-primary cat-save">保存</button></td>';
+      '<td class="text-end text-nowrap"><button class="btn btn-sm btn-primary cat-save">保存</button> ' +
+      (r.exposed
+        ? '<button class="btn btn-sm btn-outline-danger cat-toggle">取消接入</button>'
+        : '<button class="btn btn-sm btn-outline-success cat-toggle">接入</button>') + '</td>';
+    tr.querySelector('.cat-price').onclick = () => {
+      const target = Array.from(document.querySelectorAll('#price-rows tr')).find(x => x.dataset.ch === r.channel_id && x.dataset.model === (r.alias || r.upstream));
+      if (!target) { toast('该模型还没出现在定价列表，先保存接入', 'warning'); return; }
+      target.scrollIntoView({block:'center'});
+      target.classList.add('price-flash');
+      setTimeout(() => target.classList.remove('price-flash'), 1400);
+    };
+    tr.querySelector('.cat-toggle').onclick = guard(async () => {
+      const willExpose = !r.exposed;
+      if (!willExpose && !await uiConfirm('取消接入「' + (r.alias || r.upstream) + '」？该模型的定价会一并移除。', {danger:true, okText:'取消接入'})) return;
+      const alias = willExpose ? (tr.querySelector('.cat-alias').value.trim() || r.upstream) : '';
+      const ctx = willExpose ? (parseInt(tr.querySelector('.cat-ctx').value, 10) || 0) : (r.ctx || 0);
+      const out = willExpose ? (parseInt(tr.querySelector('.cat-out').value, 10) || 0) : (r.out || 0);
+      const tps = willExpose ? (parseInt(tr.querySelector('.cat-tps').value, 10) || 0) : (r.tps || 0);
+      if (alias && /[=|#]/.test(alias)) throw new Error('别名不能包含 = | # 字符');
+      await api('upstream-models/op', {method:'POST', json:{channel_id:r.channel_id, upstream:r.upstream, alias, ctx, out, tps}});
+      toast(willExpose ? '已接入：' + alias : '已取消接入');
+      loadCatalog();
+    });
     tr.querySelector('.cat-save').onclick = guard(async () => {
       const alias = tr.querySelector('.cat-alias').value.trim();
       const ctx = parseInt(tr.querySelector('.cat-ctx').value, 10) || 0;
@@ -1808,25 +1830,21 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 
-// ---------------- 模型定价 ----------------
+// ---------------- 模型定价（只列已接入模型，行内编辑） ----------------
 let _priceRows = [];
-let _priceChannels = [];
 async function loadPrices() {
-  const [data, channels] = await Promise.all([api('prices'), api('upstreams')]);
+  const data = await api('prices');
   _priceRows = data.rows || [];
-  _priceChannels = channels.rows || [];
-  const sel = $('#price-channel'); const previous = sel.value;
-  sel.innerHTML = '<option value="">选择渠道</option>' + _priceChannels.map(c => '<option value="' + esc(c.id) + '">' + esc(c.name || c.id) + '</option>').join('');
-  if (_priceChannels.some(c => c.id === previous)) sel.value = previous;
   renderPrices();
 }
 function priceFields(price = 0) {
   const token = price && price.mode === 'token';
-  const tiers = token ? (price.tiers || []).map(t => t.min_input + ' ' + t.input + ' ' + t.output).join('\n') : '';
+  const tiers = token ? (price.tiers || []).map(t => [t.min_input, t.input, t.output, t.cache != null ? t.cache : ''].join(' ').trim()).join('\n') : '';
   return '<div class="price-fields"><select class="form-select form-select-sm price-mode" aria-label="计费方式"><option value="request">按次 · 元/次</option><option value="token"' + (token ? ' selected' : '') + '>按 token · 元/百万</option></select>'
     + '<div class="d-flex gap-2 mt-2"><label>输入 / 单次<input type="number" min="0" max="100000" step="0.000001" class="form-control form-control-sm price-input" value="' + esc(token ? price.input : price) + '"></label>'
-    + '<label class="price-token"' + (token ? '' : ' hidden') + '>输出<input type="number" min="0" max="100000" step="0.000001" class="form-control form-control-sm price-output" value="' + esc(token ? price.output : 0) + '"></label></div>'
-    + '<label class="price-token small mt-2 w-100"' + (token ? '' : ' hidden') + '>长度档位（可选，每行：输入起点 输入单价 输出单价）<textarea class="form-control form-control-sm price-tiers" rows="2" placeholder="128001 4 16">' + esc(tiers) + '</textarea></label></div>';
+    + '<label class="price-token"' + (token ? '' : ' hidden') + '>输出<input type="number" min="0" max="100000" step="0.000001" class="form-control form-control-sm price-output" value="' + esc(token ? price.output : 0) + '"></label>'
+    + '<label class="price-token"' + (token ? '' : ' hidden') + ' title="缓存命中价，留空=按输入价">缓存<input type="number" min="0" max="100000" step="0.000001" class="form-control form-control-sm price-cache" value="' + esc(token && price.cache != null ? price.cache : '') + '" placeholder="同输入价"></label></div>'
+    + '<label class="price-token small mt-2 w-100"' + (token ? '' : ' hidden') + '>长度档位（可选，每行：输入起点 输入单价 输出单价 [缓存单价]）<textarea class="form-control form-control-sm price-tiers" rows="2" placeholder="128001 4 16">' + esc(tiers) + '</textarea></label></div>';
 }
 function bindPriceFields(node) {
   node.querySelector('.price-mode').onchange = e => {
@@ -1842,11 +1860,20 @@ function readPrice(node) {
   const input = number(node.querySelector('.price-input'));
   if (node.querySelector('.price-mode').value !== 'token') return input;
   const price = {mode:'token', input, output:number(node.querySelector('.price-output')), tiers:[]};
+  const cacheNode = node.querySelector('.price-cache');
+  if (cacheNode && cacheNode.value.trim() !== '') {
+    const n = Number(cacheNode.value);
+    if (!Number.isFinite(n) || n < 0 || n > 100000) throw new Error('缓存价应为 0 到 100000 之间的数字');
+    price.cache = n;
+  }
   let previous = 0;
   for (const line of node.querySelector('.price-tiers').value.split('\n').filter(l => l.trim())) {
     const parts = line.trim().split(/\s+/).map(Number);
-    if (parts.length !== 3 || !parts.every(Number.isFinite) || !Number.isSafeInteger(parts[0]) || parts[0] <= previous || parts[0] > 100000000 || parts.slice(1).some(n => n < 0 || n > 100000)) throw new Error('档位应为递增起点及两个非负单价，例如 128001 4 16');
-    previous = parts[0]; price.tiers.push({min_input:parts[0], input:parts[1], output:parts[2]});
+    if ((parts.length !== 3 && parts.length !== 4) || !parts.every(Number.isFinite) || !Number.isSafeInteger(parts[0]) || parts[0] <= previous || parts[0] > 100000000 || parts.slice(1).some(n => n < 0 || n > 100000)) throw new Error('档位应为递增起点与非负单价，例如 128001 4 16 或 128001 4 16 1');
+    previous = parts[0];
+    const tier = {min_input:parts[0], input:parts[1], output:parts[2]};
+    if (parts.length === 4) tier.cache = parts[3];
+    price.tiers.push(tier);
   }
   if (price.tiers.length > 16) throw new Error('最多设置 16 个长度档位');
   return price;
@@ -1858,23 +1885,13 @@ function renderPrices() {
   const tb = $('#price-rows'); tb.innerHTML = '';
   _priceRows.forEach((r, index) => {
     const tr = document.createElement('tr'); tr.dataset.index = index;
-    tr.innerHTML = '<td>' + esc(r.channel_name || r.channel_id) + '</td><td class="font-monospace">' + esc(r.model) + '</td><td>' + priceFields(r.price) + '</td><td class="small text-muted">' + (r.enabled ? '已启用' : '渠道停用') + '</td><td><button class="btn btn-sm btn-outline-secondary price-reset">设为免费</button></td>';
+    tr.dataset.ch = r.channel_id; tr.dataset.model = r.model;
+    tr.innerHTML = '<td>' + esc(r.channel_name || r.channel_id) + '</td><td class="font-monospace">' + esc(r.model) + '</td><td>' + priceFields(r.price) + '</td><td>' + (r.free ? '<span class="badge badge-free">免费</span>' : '<span class="badge badge-paid">付费</span>') + '</td><td class="small text-muted">' + (r.enabled ? '已启用' : '渠道停用') + '</td><td><button class="btn btn-sm btn-outline-secondary price-reset">设为免费</button></td>';
     bindPriceFields(tr);
     tr.querySelector('.price-reset').onclick = guard(() => { collectPrices(); r.price = 0; renderPrices(); });
     tb.appendChild(tr);
   });
 }
-$('#price-add').onclick = guard(() => {
-  collectPrices();
-  const ch = _priceChannels.find(c => c.id === $('#price-channel').value);
-  const model = $('#price-model').value.trim();
-  if (!ch || !model) throw new Error('请选择渠道并填写模型名');
-  if (_priceRows.some(r => r.channel_id === ch.id && r.model === model)) throw new Error('该模型已在下方列表，请直接修改');
-  const raw = $('#price-val').value.trim(), price = Number(raw);
-  if (!raw || !Number.isFinite(price) || price < 0 || price > 100000) throw new Error('价格无效');
-  _priceRows.push({channel_id:ch.id, channel_name:ch.name, model, price, enabled:ch.enabled});
-  renderPrices();
-});
 $('#prices-save').onclick = guard(async () => {
   collectPrices();
   const byChannel = new Map();

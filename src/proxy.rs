@@ -400,6 +400,19 @@ pub fn full_usage(u: Option<&Value>) -> Value {
     out
 }
 
+/// 从上游 usage 提取缓存命中 token（兼容 OpenAI/Anthropic/DeepSeek 字段）。
+fn usage_cached_tokens(u: &Value) -> i64 {
+    let v = u
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_i64)
+        .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_i64))
+        .or_else(|| u.get("prompt_cache_hit_tokens").and_then(Value::as_i64))
+        .or_else(|| u.get("cached_tokens").and_then(Value::as_i64))
+        .or_else(|| u.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_i64))
+        .unwrap_or(0);
+    v.max(0)
+}
+
 fn usage_has_prompt(u: Option<&Value>) -> bool {
     u.and_then(|u| u.as_object())
         .map(|u| u.contains_key("prompt_tokens") && !u.get("prompt_tokens").map(|x| x.is_null()).unwrap_or(true))
@@ -1824,6 +1837,7 @@ async fn run_pump(
                 st, ms,
                 util::int_or(usage.get("prompt_tokens"), 0),
                 util::int_or(usage.get("completion_tokens"), 0),
+                usage_cached_tokens(&usage),
                 true,
                 uc.charge.as_ref().map(|c| &c.pricing),
             );
@@ -2665,6 +2679,7 @@ pub async fn proxy_chat(ctx: Ctx, endpoint: &str, ep_tag: &str, body_bytes: Byte
                     rstatus, ms,
                     util::int_or(usage.get("prompt_tokens"), 0),
                     util::int_or(usage.get("completion_tokens"), 0),
+                    usage_cached_tokens(&usage),
                     false,
                     uc.charge.as_ref().map(|c| &c.pricing),
                 );
@@ -3820,6 +3835,7 @@ pub async fn proxy_convert(ctx: Ctx, protocol: &str, anthropic: bool, body_bytes
                     rstatus, ms,
                     util::int_or(usage.get("prompt_tokens"), 0),
                     util::int_or(usage.get("completion_tokens"), 0),
+                    usage_cached_tokens(&usage),
                     false,
                     uc.charge.as_ref().map(|c| &c.pricing),
                 );

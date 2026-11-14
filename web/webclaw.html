@@ -56,7 +56,8 @@ a{text-decoration:none}
 .proj .ops button:hover{color:#fff;background:rgba(255,255,255,.12)}
 .proj .ops button.del:hover{color:#fca5a5;background:rgba(248,113,113,.16)}
 .proj-empty{font-size:12px;color:#57657d;text-align:center;padding:16px 0}
-.side-note{font-size:11px;color:#57657d;line-height:1.5;padding:10px 10px 4px}
+.scope-chip{display:inline-flex;align-items:center;margin-left:8px;padding:2px 10px;border-radius:999px;
+  background:#e8f0fe;border:1px solid #c7dbff;color:#1a5fd0;font-size:12px;font-weight:600;line-height:18px;vertical-align:middle}
 
 .sidebar .foot{padding:8px 10px;border-top:1px solid rgba(255,255,255,.06)}
 .sidebar .foot a{color:#8d9bb2;font-size:13px;border-radius:var(--r-sm);padding:7px 11px;display:inline-flex;align-items:center;gap:6px;transition:all .13s ease}
@@ -168,7 +169,6 @@ a{text-decoration:none}
         <button id="wc-export-all" class="side-btn" title="全部项目导出为一个文件">导出全部</button>
         <button id="wc-import" class="side-btn" title="导入之前导出的文件">导入</button>
       </div>
-      <div class="side-note">项目保存在本机浏览器，换设备前先导出。</div>
     </div>
     <div class="foot"><a href="/admin"><i class="bi bi-arrow-left"></i>返回后台</a></div>
   </aside>
@@ -206,7 +206,6 @@ a{text-decoration:none}
         <button id="wc-disconnect" class="btn btn-sm btn-outline-secondary" hidden>断开目录</button>
       </div>
       <div id="wc-files" class="workspace-files"></div>
-      <p class="small text-muted mb-0 mt-2">文件只在当前浏览器处理；读取内容会随对话发给模型，写入本机目录前会确认。刷新后需重新连接目录。</p>
     </details>
     <div class="card chat" id="wc-chat" aria-live="polite"></div>
 

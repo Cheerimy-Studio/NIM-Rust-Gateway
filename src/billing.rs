@@ -12,6 +12,10 @@ pub fn validate(v: &Value) -> Result<(), String> {
         return Err("计费方式必须为按次数字或 token 价格对象".into());
     }
     rate(v.get("input"))?; rate(v.get("output"))?;
+    // 缓存命中价可选：不填时按普通输入价计（与旧行为一致）
+    if v.get("cache").is_some() {
+        rate(v.get("cache"))?;
+    }
     if let Some(tiers) = v.get("tiers") {
         let tiers = tiers.as_array().ok_or("长度档位必须为数组")?;
         if tiers.len() > 16 { return Err("最多设置 16 个长度档位".into()); }
@@ -19,7 +23,11 @@ pub fn validate(v: &Value) -> Result<(), String> {
         for tier in tiers {
             let min = tier.get("min_input").and_then(Value::as_i64).filter(|n| *n > last && *n <= 100_000_000)
                 .ok_or("档位起点必须为递增正整数，且不超过 100000000")?;
-            rate(tier.get("input"))?; rate(tier.get("output"))?; last = min;
+            rate(tier.get("input"))?; rate(tier.get("output"))?;
+            if tier.get("cache").is_some() {
+                rate(tier.get("cache"))?;
+            }
+            last = min;
         }
     }
     Ok(())
@@ -38,15 +46,27 @@ pub fn snapshot(v: &Value, input: i64) -> Value {
     }
     let tier = v.get("tiers").and_then(Value::as_array).and_then(|ts| ts.iter().rev()
         .find(|t| t.get("min_input").and_then(Value::as_i64).is_some_and(|n| input >= n))).unwrap_or(v);
-    json!({"mode":"token", "input":tier.get("input").and_then(Value::as_f64).unwrap_or(0.0),
+    let input_rate = tier.get("input").and_then(Value::as_f64).unwrap_or(0.0);
+    // 缓存命中价：档位 > 规则 > 输入价
+    let cache_rate = tier.get("cache").and_then(Value::as_f64)
+        .or_else(|| v.get("cache").and_then(Value::as_f64))
+        .unwrap_or(input_rate);
+    json!({"mode":"token", "input":input_rate,
         "output":tier.get("output").and_then(Value::as_f64).unwrap_or(0.0),
+        "cache":cache_rate,
         "min_input":tier.get("min_input").and_then(Value::as_i64).unwrap_or(0), "unit":1_000_000})
 }
 
-pub fn cost(v: &Value, input: i64, output: i64) -> f64 {
+pub fn cost(v: &Value, input: i64, output: i64, cached: i64) -> f64 {
     let p = snapshot(v, input);
     let value = if p["mode"] == "token" {
-        (input.max(0) as f64 * p["input"].as_f64().unwrap_or(0.0)
+        let input = input.max(0);
+        // OpenAI 语义：cached 已计入 prompt_tokens。命中部分按 cache 价，
+        // 其余按普通输入价，避免缓存命中被重复或按错价计费
+        let cached = cached.clamp(0, input);
+        let fresh = input - cached;
+        (fresh as f64 * p["input"].as_f64().unwrap_or(0.0)
+            + cached as f64 * p["cache"].as_f64().unwrap_or(0.0)
             + output.max(0) as f64 * p["output"].as_f64().unwrap_or(0.0)) / 1_000_000.0
     } else { p["price"].as_f64().unwrap_or(0.0) };
     // A positive charge never silently rounds to free at the ledger's micro-yuan precision.
@@ -60,15 +80,28 @@ mod tests {
     fn length_pricing_and_validation() {
         let p=json!({"mode":"token","input":2,"output":8,"tiers":[{"min_input":128001,"input":4,"output":16}]});
         validate(&p).unwrap();
-        assert_eq!(cost(&p,100000,1000),0.208);
-        assert_eq!(cost(&p,128000,1000),0.264);
-        assert_eq!(cost(&p,128001,1000),0.528004);
-        assert_eq!(cost(&json!(0.1),999999,999999),0.1);
-        assert_eq!(cost(&json!(0),5,6),0.0);
-        assert_eq!(cost(&json!({"mode":"token","input":0.001,"output":0}),1,0),0.000001);
+        assert_eq!(cost(&p,100000,1000,0),0.208);
+        assert_eq!(cost(&p,128000,1000,0),0.264);
+        assert_eq!(cost(&p,128001,1000,0),0.528004);
+        assert_eq!(cost(&json!(0.1),999999,999999,0),0.1);
+        assert_eq!(cost(&json!(0),5,6,0),0.0);
+        assert_eq!(cost(&json!({"mode":"token","input":0.001,"output":0}),1,0,0),0.000001);
+        // 缓存命中：500k 命中按 cache 价、500k 普通输入、输出 1k
+        let c=json!({"mode":"token","input":2,"output":8,"cache":0.5});
+        validate(&c).unwrap();
+        assert_eq!(cost(&c,1_000_000,1000,500_000),1.258);
+        // 未配置 cache 时按输入价（旧行为）；cached 超过 input 时按 input 截断
+        let d=json!({"mode":"token","input":2,"output":8});
+        assert_eq!(cost(&d,1_000_000,1000,500_000),2.008);
+        assert_eq!(cost(&d,1000,0,999999),0.002);
+        // 档位可单独覆盖 cache 价
+        let t=json!({"mode":"token","input":2,"output":8,"cache":1,"tiers":[{"min_input":1000,"input":4,"output":16,"cache":2}]});
+        validate(&t).unwrap();
+        assert_eq!(cost(&t,1000,0,1000),0.002);
         assert!(paid(&json!({"mode":"token","input":0,"output":0,"tiers":[{"min_input":10,"input":1,"output":0}]})));
         for p in [json!(-1),json!("2"),json!({"mode":"token","input":1}),json!({"mode":"token","input":-1,"output":0}),
-            json!({"mode":"token","input":1,"output":1,"tiers":[{"min_input":2,"input":1,"output":1},{"min_input":2,"input":1,"output":1}]})] {
+            json!({"mode":"token","input":1,"output":1,"tiers":[{"min_input":2,"input":1,"output":1},{"min_input":2,"input":1,"output":1}]}),
+            json!({"mode":"token","input":1,"output":1,"cache":-1})] {
             assert!(validate(&p).is_err(),"{p}");
         }
     }
@@ -99,7 +132,7 @@ pub fn reserve(user: &str, channel: &str, model: &str, request: &Value, input: i
     let pricing = crate::users::pricing_for(channel,model);
     let output = if embeddings { 0 } else { ["max_completion_tokens","max_tokens","max_output_tokens"].iter()
         .find_map(|k| request.get(k).and_then(Value::as_i64)).unwrap_or(1024).max(0) };
-    let amount = cost(&pricing,input,output);
+    let amount = cost(&pricing,input,output,0);
     let mut pending = pending().lock().unwrap_or_else(|e|e.into_inner());
     let Some(row) = crate::users::auth_user(user) else { return Err("用户已被停用".into()); };
     let available = crate::users::balance_of(&row) - pending.get(user).copied().unwrap_or(0.0);
@@ -134,7 +167,7 @@ mod reservation_tests {
         let held = reserve("budget-test","budget-channel","budget-model",&json!({}),10,false).unwrap();
         assert!(reserve("budget-test","budget-channel","budget-model",&json!({}),10,false).is_err());
         store.update(|db|db["upstreams"][0]["prices"]["budget-model"]=json!(0.9));
-        let charged=crate::users::bill("budget-test","key","","budget-channel","budget-model","upstream-model",200,1,10,20,false,Some(&held.pricing));
+        let charged=crate::users::bill("budget-test","key","","budget-channel","budget-model","upstream-model",200,1,10,20,0,false,Some(&held.pricing));
         assert_eq!(charged,0.6);
         assert_eq!(crate::users::balance_of(&crate::users::auth_user("budget-test").unwrap()),0.4);
         drop(held);

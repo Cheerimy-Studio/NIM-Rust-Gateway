@@ -75,16 +75,12 @@ fn enabled() -> bool {
         .unwrap_or(true)
 }
 
-// 公网入口优先取后台配置，留空回退环境变量。必须是规范 HTTPS 源，
-// 绝不从 Host 拼授权链接。
-pub fn origin() -> Option<String> {
-    let mut s = cfg_str("public_origin");
-    if s.is_empty() {
-        s = std::env::var("NGW_PUBLIC_ORIGIN").ok()?;
-    }
-    let u = reqwest::Url::parse(&s).ok()?;
-    if u.scheme() != "https"
-        || u.host_str().is_none()
+/// 校验并规范化公网入口：生产必须是纯 HTTPS 源；本地联调允许
+/// http://127.0.0.1|localhost|::1（仅回环，供 01Code 桌面端直连测试）。
+pub fn origin_allowed(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let u = reqwest::Url::parse(raw).ok()?;
+    if u.host_str().is_none()
         || !u.username().is_empty()
         || u.password().is_some()
         || u.query().is_some()
@@ -93,7 +89,23 @@ pub fn origin() -> Option<String> {
     {
         return None;
     }
-    Some(s.trim_end_matches('/').into())
+    let host = u.host_str().unwrap_or("");
+    let loopback = host == "localhost" || host == "::1" || host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false);
+    match u.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        _ => return None,
+    }
+    Some(raw.trim_end_matches('/').to_string())
+}
+
+// 公网入口优先取后台配置，留空回退环境变量。绝不从 Host 拼授权链接。
+pub fn origin() -> Option<String> {
+    let mut s = cfg_str("public_origin");
+    if s.is_empty() {
+        s = std::env::var("NGW_PUBLIC_ORIGIN").ok()?;
+    }
+    origin_allowed(&s)
 }
 fn trusted(peer: std::net::IpAddr) -> bool {
     let mut configured = cfg_str("trusted_proxies");
@@ -124,9 +136,15 @@ pub fn client_ip(h: &HeaderMap, peer: std::net::IpAddr) -> String {
     peer.to_string()
 }
 pub fn secure(h: &HeaderMap, peer: std::net::IpAddr) -> bool {
-    trusted(peer)
-        && h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https")
-        && origin().is_some()
+    if origin().is_none() {
+        return false;
+    }
+    // 本机回环直连（01Code 桌面端本地联调、浏览器访问 127.0.0.1）：
+    // 不经过反代，也不存在伪造转发头的问题
+    if peer.is_loopback() {
+        return true;
+    }
+    trusted(peer) && h.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https")
 }
 
 fn limited(

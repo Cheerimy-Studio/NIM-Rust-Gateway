@@ -274,7 +274,7 @@ const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
     const p = saved.projects.find(x => x.id === saved.active);
     const last = p.messages[p.messages.length - 1];
     assert.equal(last.content, '');
-    assert.equal(last.err, '上游炸了');
+    assert.ok(last.err.startsWith('上游炸了'), last.err);
     assert.equal(last.pending, false);
   });
 
@@ -301,7 +301,7 @@ const ok = (label, fn) => { fn(); n++; console.log('PASS ' + label); };
     assert.equal(p.files['result.md'],'done'); assert.equal(agentStep,3);
     assert.equal(p.messages.at(-1).content,'任务已完成');
     const calls = chatCalls.filter(c => c.body.model === 'agent-model');
-    assert.equal(calls[0].body.tools.length,3);
+    assert.equal(calls[0].body.tools.length,6);
     assert.ok(calls[1].body.messages.some(m => m.role === 'tool' && m.content.includes('source')));
     assert.ok(calls[2].body.messages.some(m => m.tool_call_id === 'write1'));
     assert.equal(calls[2].headers['X-NGW-Skip-Training'],'1');

@@ -1226,18 +1226,32 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
             o.insert("models".into(), Value::Array(new_models.into_iter().map(Value::from).collect()));
             o.insert("model_map".into(), Value::Object(map));
         }
-        // 价格随行保存：>0 写入渠道 prices[客户端名]，0 = 免费（移除条目）；
-        // 请求没带 price 就保持原价不动
+        // 价格生命周期：改名/取消接入时旧名字的定价一并清理，避免
+        // 「模型都没了还在列表里留着价格」；请求带 price 时再写新价
         let client = if alias.is_empty() { upstream.clone() } else { alias.clone() };
-        if let Some(price) = price_req {
-            if let Some(o) = u.as_object_mut() {
-                let prices = o.entry("prices".to_string()).or_insert_with(|| json!({}));
-                if let Some(pm) = prices.as_object_mut() {
-                    if crate::billing::paid(&price) {
-                        pm.insert(client.clone(), price);
+        let mut stale_names: Vec<String> = old_aliases.clone();
+        if models_list.iter().any(|m| m == &upstream) {
+            stale_names.push(upstream.clone());
+        }
+        stale_names.retain(|k| k.as_str() != client);
+        if let Some(o) = u.as_object_mut() {
+            let prices = o.entry("prices".to_string()).or_insert_with(|| json!({}));
+            if let Some(pm) = prices.as_object_mut() {
+                for n in &stale_names {
+                    pm.remove(n);
+                }
+                if alias.is_empty() {
+                    pm.remove(&client);
+                }
+                if let Some(price) = &price_req {
+                    if crate::billing::paid(price) {
+                        pm.insert(client.clone(), price.clone());
                     } else {
                         pm.remove(&client);
                     }
+                }
+                if pm.is_empty() {
+                    o.remove("prices");
                 }
             }
         }
@@ -1245,13 +1259,7 @@ pub async fn upstream_model_op(headers: &HeaderMap, body: Bytes) -> Response {
         // 旧别名键的行一并清掉（留着永远没人读，只会越积越脏）
         if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
             let text = util::str_or(cfg.get("model_limits"), "");
-            // 此前以真名暴露（同名接入没有 map 键）也算旧键：改名后同样残留
-            let mut stale: Vec<String> = old_aliases.clone();
-            if models_list.iter().any(|m| m == &upstream) {
-                stale.push(upstream.clone());
-            }
-            stale.retain(|k| k.as_str() != client);
-            let text2 = model_limits_remove(&text, &stale);
+            let text2 = model_limits_remove(&text, &stale_names);
             let new_text = model_limits_set(&text2, &client, ctx, out, tps);
             cfg.insert("model_limits".into(), Value::from(new_text));
         }
@@ -1492,19 +1500,8 @@ pub async fn settings_save(headers: &HeaderMap, body: Bytes) -> Response {
     // 设备登录接入配置：公网入口只收纯 HTTPS 源，可信代理解析为 IP
     if let Some(v) = incoming.get("public_origin").and_then(|x| x.as_str()) {
         let t = v.trim();
-        if !t.is_empty() {
-            let ok = reqwest::Url::parse(t).ok().is_some_and(|u| {
-                u.scheme() == "https"
-                    && u.host_str().is_some()
-                    && u.username().is_empty()
-                    && u.password().is_none()
-                    && u.query().is_none()
-                    && u.fragment().is_none()
-                    && u.path() == "/"
-            });
-            if !ok {
-                return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "公网入口必须是纯 HTTPS 源，例如 https://gateway.example.com（不能带路径、参数或凭据）"}}))).into_response();
-            }
+        if !t.is_empty() && crate::device::origin_allowed(t).is_none() {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "公网入口必须是纯 HTTPS 源（本地联调可用 http://127.0.0.1:端口），不能带路径、参数或凭据"}}))).into_response();
         }
     }
     if let Some(v) = incoming.get("trusted_proxies").and_then(|x| x.as_str()) {
@@ -2398,14 +2395,27 @@ pub async fn prices_list(headers: &HeaderMap) -> Response {
     if let Err(e) = require(headers, false) { return e; }
     let db = store().load();
     let mut rows = Vec::new();
+    let cfg = db.get("config").unwrap_or(&Value::Null);
+    let transparent = crate::upstreams::transparent_upstream(cfg);
     for u in db.get("upstreams").and_then(Value::as_array).into_iter().flatten() {
         let prices = u.get("prices").and_then(Value::as_object).cloned().unwrap_or_default();
+        let listed: Vec<String> = u
+            .get("models")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(|s| s.to_string()).collect())
+            .unwrap_or_default();
         let mut models = std::collections::BTreeSet::new();
-        if let Some(ms) = u.get("models").and_then(Value::as_array) {
-            for m in ms.iter().filter_map(Value::as_str) { models.insert(m.to_string()); }
+        for m in &listed { models.insert(m.clone()); }
+        // 映射键只有在 models 清单里才对外可调；没进清单的别名不再挂牌
+        if let Some(mm) = u.get("model_map").and_then(Value::as_object) {
+            for k in mm.keys() {
+                if listed.iter().any(|m| m == k) { models.insert(k.clone()); }
+            }
         }
-        if let Some(mm) = u.get("model_map").and_then(Value::as_object) { models.extend(mm.keys().cloned()); }
-        models.extend(prices.keys().cloned());
+        // 透传渠道（空清单）允许为任意已配价模型挂牌
+        if transparent && listed.is_empty() {
+            models.extend(prices.keys().cloned());
+        }
         for model in models {
             let price = prices.get(&model).cloned().unwrap_or(json!(0));
             rows.push(json!({"channel_id":u["id"],"channel_name":u["name"],"model":model,
@@ -2438,13 +2448,35 @@ pub async fn prices_save(headers: &HeaderMap, body: Bytes) -> Response {
         }
     }
     let mut found = false;
+    let mut err: Option<String> = None;
     store().update(|db| {
+        let transparent = crate::upstreams::transparent_upstream(db.get("config").unwrap_or(&Value::Null));
         if let Some(ups) = db.get_mut("upstreams").and_then(Value::as_array_mut) {
             if let Some(u) = ups.iter_mut().find(|u| util::str_or(u.get("id"), "") == ch_id) {
-                u["prices"] = Value::Object(new_prices.clone()); found = true;
+                let listed: Vec<String> = u
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default();
+                // 只能给已接入的模型定价：没有模型却有价格，正是后台列表里
+                // 幽灵定价的来源。透传渠道（清单为空）保留任意名定价能力。
+                if !(transparent && listed.is_empty()) {
+                    if let Some(bad) = new_prices
+                        .keys()
+                        .find(|k| !listed.iter().any(|m| m == *k))
+                    {
+                        err = Some(format!("模型 {} 未接入该渠道，请先在模型接入中添加", bad));
+                        return;
+                    }
+                }
+                u["prices"] = Value::Object(new_prices.clone());
+                found = true;
             }
         }
     });
+    if let Some(e) = err {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"message":e}}))).into_response();
+    }
     if !found { return (StatusCode::NOT_FOUND, axum::Json(json!({"error":{"message":"渠道不存在"}}))).into_response(); }
 
     store().flush();

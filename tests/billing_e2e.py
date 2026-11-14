@@ -24,6 +24,10 @@ class Upstream(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['content-length'])))
         self.calls.append(body)
         usage = {'prompt_tokens':100,'completion_tokens':20,'total_tokens':120}
+        if str(body.get('model','')).startswith('cache-'):
+            # OpenAI 语义：cached_tokens 已包含在 prompt_tokens 内
+            usage = {'prompt_tokens':1000,'completion_tokens':20,'total_tokens':1020,
+                     'prompt_tokens_details':{'cached_tokens':600}}
         self.send_response(200)
         if body.get('stream'):
             self.send_header('Content-Type','text/event-stream'); self.end_headers()
@@ -56,7 +60,8 @@ def main():
                     check(admin.post('/api/settings',json={'config':settings}).status_code==200,'保存计费测试设置')
                     price={'mode':'token','input':2,'output':8,'tiers':[{'min_input':100,'input':4,'output':16}]}
                     channel={'id':'billing-channel','name':'Billing','enabled':True,'base':f'http://127.0.0.1:{server.server_port}/v1',
-                        'models':['token-model','request-model'],'prices':{'token-model':price,'request-model':.1}}
+                        'models':['token-model','request-model','cache-model'],'prices':{'token-model':price,'request-model':.1,
+                            'cache-model':{'mode':'token','input':2,'output':8,'cache':0.5}}}
                     r=admin.post('/api/upstreams',json=channel);check(r.status_code==200,'创建按次与 token 混合定价渠道')
                     check(admin.post('/api/keys/import',json={'text':'billing@example.test,password,nvapi-billing-test-key','upstream_id':'billing-channel'}).status_code==200,'导入本地上游 Key')
                     r=admin.get('/api/prices'); check(any(row['price']==price for row in r.json()['rows']),'定价读取保留 token 对象')
@@ -86,6 +91,34 @@ def main():
                     daily=user.get('/v1/usage?days=7',headers={'Authorization':'Bearer '+key,'X-Forwarded-Proto':'https'}).json()
                     check(sum(r['requests'] for r in daily)==6 and sum(r['input_tokens'] for r in daily)==600 and sum(r['output_tokens'] for r in daily)==120,'日聚合保留六次调用与完整 token')
                     square=user.get('/api/user/models').json()['rows']; check(any(m['model']=='route' and any(p['rule']==price for p in m['pricing']) for m in square),'模型广场披露路由成员 token 价格')
+                    # 缓存命中计费：1000 输入中 600 命中，命中价 0.5、普通输入 2、输出 8
+                    cached_before=user.get('/api/user/me').json()['balance']
+                    r=user.post('/v1/chat/completions',headers=headers,json={'model':'cache-model','messages':[{'role':'user','content':'hi'}]})
+                    check(r.status_code==200,'缓存命中模型返回成功')
+                    cached_charge=round(cached_before-user.get('/api/user/me').json()['balance'],6)
+                    check(cached_charge==0.00126,f'缓存命中按 cache 价与未命中输入分开计费: charge={cached_charge}')
+                    clog=user.get('/api/user/logs').json()['rows'][0]
+                    check(clog.get('cached_tok')==600 and clog.get('in_tok')==1000 and clog.get('billing',{}).get('cache')==0.5,
+                        '调用日志保留缓存命中 token 与缓存价: '+json.dumps(clog.get('billing'),ensure_ascii=False))
+                    daily=user.get('/v1/usage?days=7',headers={'Authorization':'Bearer '+key,'X-Forwarded-Proto':'https'}).json()
+                    check(sum(r['requests'] for r in daily)==7 and sum(r['input_tokens'] for r in daily)==1600,'日聚合计入缓存命中的完整输入 token')
+                    # 定价生命周期：取消接入/改名清价，未接入模型不可定价
+                    life={'id':'lifecycle-channel','name':'Lifecycle','enabled':True,'base':f'http://127.0.0.1:{server.server_port}/v1',
+                        'models':['life-a','life-b'],'prices':{'life-a':.1,'life-b':.2}}
+                    check(admin.post('/api/upstreams',json=life).status_code==200,'创建定价生命周期渠道')
+                    rows=admin.get('/api/prices').json()['rows']
+                    check(any(r['channel_id']=='lifecycle-channel' and r['model']=='life-b' for r in rows),'接入模型出现在定价列表')
+                    check(admin.post('/api/prices',json={'channel_id':'lifecycle-channel','prices':{'life-a':.1,'ghost-model':.3}}).status_code==400,'拒绝给未接入模型定价')
+                    rows=admin.get('/api/prices').json()['rows']
+                    check(any(r['channel_id']=='lifecycle-channel' and r['model']=='life-a' and r['price']==.1 for r in rows),'拒绝幽灵定价时不覆盖已有价格')
+                    check(admin.post('/api/upstreams',json={'id':'lifecycle-channel','name':'Lifecycle','base':f'http://127.0.0.1:{server.server_port}/v1','models':['life-a']}).status_code==200,'取消接入 life-b')
+                    rows=admin.get('/api/prices').json()['rows']
+                    check(not any(r['channel_id']=='lifecycle-channel' and r['model']=='life-b' for r in rows),'取消接入后定价同步消失')
+                    check(any(r['channel_id']=='lifecycle-channel' and r['model']=='life-a' for r in rows),'仍接入的模型定价保留')
+                    check(admin.post('/api/upstream-models/op',json={'channel_id':'lifecycle-channel','upstream':'life-a','alias':'life-c'}).status_code==200,'别名改为 life-c')
+                    rows=admin.get('/api/prices').json()['rows']
+                    check(not any(r['channel_id']=='lifecycle-channel' and r['model']=='life-a' for r in rows),'改名后旧名定价清除')
+                    check(any(r['channel_id']=='lifecycle-channel' and r['model']=='life-c' and r['free'] for r in rows),'新名以未定价出现')
                     before=len(Upstream.calls)
                     # Separate zero-balance user verifies preflight without relying on adjustment semantics.
                     admin.post('/api/users',json={'username':'empty-user','password':password,'balance':0.000001})

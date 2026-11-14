@@ -976,11 +976,13 @@ pub fn bill(
     ms: i64,
     in_tok: i64,
     out_tok: i64,
+    cached_tok: i64,
     stream: bool,
     pricing_override: Option<&Value>,
 ) -> f64 {
     let pricing = pricing_override.cloned().unwrap_or_else(|| pricing_for(channel_id, model));
-    let cost = crate::billing::cost(&pricing, in_tok, out_tok);
+    let cached_tok = cached_tok.clamp(0, in_tok.max(0));
+    let cost = crate::billing::cost(&pricing, in_tok, out_tok, cached_tok);
     let now = util::now_i();
     let row = json!({
         "t": now,
@@ -996,6 +998,7 @@ pub fn bill(
         "billing": crate::billing::snapshot(&pricing, in_tok),
         "in_tok": in_tok,
         "out_tok": out_tok,
+        "cached_tok": cached_tok,
         "stream": stream,
     });
     let (arr_key, cap, legacy_caps) = {
@@ -1292,7 +1295,7 @@ pub fn model_square() -> Vec<Value> {
             if m.is_empty() || !crate::upstreams::channel_serves_model(u, &m, global_hide, transparent) {
                 continue;
             }
-            let price = crate::billing::cost(prices.get(&m).unwrap_or(&Value::Null), 1_000_000, 1_000_000);
+            let price = crate::billing::cost(prices.get(&m).unwrap_or(&Value::Null), 1_000_000, 1_000_000, 0);
             let e = best.entry(m.clone()).or_insert(f64::INFINITY);
             if price < *e {
                 *e = price;
@@ -1308,7 +1311,7 @@ pub fn model_square() -> Vec<Value> {
                 if !crate::upstreams::channel_serves_model(u, alias, global_hide, transparent) {
                     continue;
                 }
-                let price = crate::billing::cost(prices.get(alias).unwrap_or(&Value::Null), 1_000_000, 1_000_000);
+                let price = crate::billing::cost(prices.get(alias).unwrap_or(&Value::Null), 1_000_000, 1_000_000, 0);
                 let e = best.entry(alias.clone()).or_insert(f64::INFINITY);
                 if price < *e {
                     *e = price;

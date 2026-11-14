@@ -1064,6 +1064,8 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
     let mut final_id = String::new();
     let mut save_err: Option<String> = None;
     store().update(|db| {
+        // 先读透传开关，避免下面持有 upstreams 可变借用时再借 db
+        let transparent = transparent_upstream(db.get("config").unwrap_or(&Value::Null));
         let ups_val = db
             .as_object_mut()
             .map(|o| o.entry("upstreams").or_insert_with(|| Value::Array(vec![])))
@@ -1166,6 +1168,28 @@ pub fn save(data: &Value) -> (Option<Value>, String) {
             }
             arr.push(new_row);
             final_id = new_id;
+        }
+        // 价格生命周期：渠道不再接入的模型，其定价一并清理，避免模型已消失
+        // 定价却留在库里、重新接入时旧价诈尸。透传渠道（清单为空）保留任意键。
+        if let Some(u) = arr
+            .iter_mut()
+            .find(|u| util::str_or(u.get("id"), "") == final_id)
+        {
+            let listed: Vec<String> = u
+                .get("models")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            if let Some(p) = u.get_mut("prices").and_then(Value::as_object_mut) {
+                if !(transparent && listed.is_empty()) {
+                    p.retain(|k, _| listed.iter().any(|m| m == k));
+                }
+                if p.is_empty() {
+                    if let Some(o) = u.as_object_mut() {
+                        o.remove("prices");
+                    }
+                }
+            }
         }
         // 改名级联：账号归属 / 目录缓存 / 池与配额 / 负缓存 / 最近统计
         if !renamed_from.is_empty() {
@@ -1318,6 +1342,33 @@ mod endpoint_tests {
         for base in ["https://user:secret@example.test/v1","https://example.test/v1?secret=x","https://example.test/v1#x","file:///tmp/test","http://","https://example.test/v1\n"] {
             assert!(validate_save(&serde_json::json!({"name":"test","base":base})).0.is_none(),"{base}");
         }
+    }
+}
+
+#[cfg(test)]
+mod price_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn delisted_models_lose_their_prices_and_transparent_keeps_them() {
+        let _g = crate::store::test_lock();
+        let saved = store().load().get("upstreams").cloned();
+        let (row, err) = save(&serde_json::json!({
+            "id":"price-life","name":"Life","base":"https://api.example.test/v1","enabled":true,
+            "models":["a","b"],"prices":{"a":0.1,"b":0.2}}));
+        assert!(row.is_some(), "{err}");
+        // 渠道表单只提交 models（不带 prices）：b 移出接入清单 → 定价清理
+        let (row, err) = save(&serde_json::json!({"id":"price-life","name":"Life","base":"https://api.example.test/v1","models":["a"]}));
+        assert!(row.is_some(), "{err}");
+        assert_eq!(get_upstream("price-life").unwrap()["prices"], serde_json::json!({"a":0.1}));
+        // 透传渠道（空清单）允许任意模型定价，不能误删
+        store().update(|db| { db["config"]["transparent_upstream"] = serde_json::json!(true); });
+        let (row, err) = save(&serde_json::json!({"id":"price-life","name":"Life","base":"https://api.example.test/v1","models":[]}));
+        assert!(row.is_some(), "{err}");
+        assert_eq!(get_upstream("price-life").unwrap()["prices"], serde_json::json!({"a":0.1}));
+        store().update(|db| {
+            db["config"]["transparent_upstream"] = serde_json::json!(false);
+            db["upstreams"] = saved.unwrap_or(serde_json::json!([]));
+        });
     }
 }
 

@@ -5,8 +5,8 @@ window.NGW_UI = {
   pricingText(p) {
     if (!p || typeof p === 'number') return p > 0 ? '¥' + p + ' / 次' : '免费';
     if (p.mode !== 'token') return '未配置';
-    let text = '输入 ¥' + p.input + ' · 输出 ¥' + p.output + ' / 百万 token';
-    for (const t of p.tiers || []) text += '；输入 ≥ ' + t.min_input + '：¥' + t.input + ' / ¥' + t.output;
+    let text = '输入 ¥' + p.input + ' · 输出 ¥' + p.output + (p.cache != null ? ' · 缓存 ¥' + p.cache : '') + ' / 百万 token';
+    for (const t of p.tiers || []) text += '；输入 ≥ ' + t.min_input + '：¥' + t.input + ' / ¥' + t.output + (t.cache != null ? ' / 缓存 ¥' + t.cache : '');
     return text;
   },
   dialog({title = '确认操作', body = '', input = null, danger = false, okText = '确定', signal = null}) {

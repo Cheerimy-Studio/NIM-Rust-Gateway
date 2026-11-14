@@ -538,9 +538,20 @@ function tokenValue() {
 function tokenHint() {
   const hint = $('#wc-hint');
   if (!hint) return;
+  hint.className = 'scope-chip';
   const t = tokenValue();
-  if (t) { hint.textContent = '令牌 ' + t.slice(0, 8) + '…'; return; }
-  hint.textContent = MODE === 'user' ? '未取到 Key' : '开放模式';
+  if (!t) { hint.textContent = MODE === 'user' ? '未取到 Key' : '全部'; return; }
+  hint.textContent = '全部';
+  if (MODE === 'user') {
+    // 用户 Key 有免费/付费/全部三种范围：按当前使用的 Key 显示
+    fetch('api/user/keys', {credentials:'same-origin'})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        const row = ((d && d.rows) || []).find(k => k.key === t);
+        if (row) hint.textContent = row.kind === 'free' ? '免费' : row.kind === 'paid' ? '付费' : '全部';
+      })
+      .catch(() => {});
+  }
 }
 
 async function ensureToken(force) {
@@ -762,6 +773,9 @@ async function send() {
         if (j && j.error) msg = j.error.message || msg;
       } catch (e) { /* 非 JSON 就原样显示 */ }
       reply.err = msg || ('HTTP ' + status);
+      if (status >= 500) reply.err += '（请到后台「模型接入」确认模型已接入、渠道有可用账号）';
+      const rid = r.headers.get('x-request-id') || '';
+      if (/^[A-Za-z0-9_-]{1,64}$/.test(rid)) reply.err += ' [请求 ' + rid + ']';
     } else if (!stream) {
       const txt = await r.text();
       note(txt);
@@ -833,7 +847,9 @@ async function send() {
       let result;
       try {
         result = await AGENT.execute(p,call,{signal:aborter.signal,
-          confirmWrite: (path,content) => uiConfirm('将写入本机目录中的 ' + path + '，已有文件会被替换。\n\n内容预览：\n' + content.slice(0,1200), {title:'写入文件',okText:'写入',danger:true,signal:aborter.signal})});
+          confirmWrite: (path,content) => uiConfirm('将写入本机目录中的 ' + path + '，已有文件会被替换。\n\n内容预览：\n' + content.slice(0,1200), {title:'写入文件',okText:'写入',danger:true,signal:aborter.signal}),
+          confirmDelete: (path) => uiConfirm('删除 ' + path + '？删除后无法从工作区恢复。', {title:'删除文件',okText:'删除',danger:true,signal:aborter.signal}),
+          confirmMove: (from,to) => uiConfirm('将 ' + from + ' 移动到 ' + to + '？', {title:'移动文件',okText:'移动',danger:true,signal:aborter.signal})});
       } catch (e) { if (e.name === 'AbortError') throw e; result = {error:e.message || String(e)}; }
       p.messages.push({role:'tool', tool_call_id:call.id, content:JSON.stringify(result), at:Date.now()});
       save(); renderWorkspace(); renderChat();

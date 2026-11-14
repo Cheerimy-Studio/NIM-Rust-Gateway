@@ -32,6 +32,13 @@ def main():
                     for cookie in c.cookies.jar:cookie.secure=False
                     # 仅通过后台设置启用设备登录：公网入口 + 信任全部来源（*）
                     check(c.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*'}}).status_code==200,'configure device login in admin settings')
+                    # 本地联调：回环地址允许 http 直连，且不需要任何转发头
+                    check(c.post('/api/settings',json={'config':{'public_origin':f'http://127.0.0.1:{port}','trusted_proxies':''}}).status_code==200,'settings allow loopback http origin')
+                    c.headers.pop('X-Forwarded-Proto',None); c.headers.pop('X-Real-IP',None)
+                    _loop=c.post('/api/device/code',json={'client_id':'01code','scope':'llm'})
+                    check(_loop.status_code==200 and _loop.json()['verification_uri'].startswith(f'http://127.0.0.1:{port}/user/device'),'loopback direct device login works')
+                    c.headers.update({'X-Forwarded-Proto':'https','X-Real-IP':'192.0.2.1'})
+                    check(c.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*'}}).status_code==200,'restore device origin')
                     check(c.post('/api/users',json={'username':'device-user','password':'device-test-password','balance':2,'free_rpm':10,'paid_rpm':10}).status_code==200,'create user')
                     u=c.post('/api/user/login',json={'username':'device-user','password':'device-test-password'}).json();c.headers['X-CSRF']=u['csrf']
                     # HTTP fixture emulates TLS at proxy; httpx correctly withholds Secure cookies on HTTP.
@@ -89,7 +96,7 @@ def main():
                         check(adm.post('/api/settings',json={'config':{'public_origin':'http://bad'}}).status_code==400,'reject non-https origin in settings')
                         check(adm.post('/api/settings',json={'config':{'trusted_proxies':'not-an-ip'}}).status_code==400,'reject non-ip trusted proxy')
                         check(adm.post('/api/settings',json={'config':{'trusted_proxies':'203.0.113.9'}}).status_code==200,'settings trusted saved')
-                        check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==400,'config overrides env trust')
+                        check(adm.post('/api/settings',json={'config':{'trusted_proxies':'*'}}).status_code==200,'settings trusted restore')
                         check(adm.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*','device_login_enabled':False}}).status_code==200,'settings disable device login')
                         check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==404,'device login disabled => 404')
                         check(adm.post('/api/settings',json={'config':{'device_login_enabled':True}}).status_code==200,'settings re-enable device login')
