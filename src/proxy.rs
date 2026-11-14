@@ -390,6 +390,37 @@ pub fn full_usage(u: Option<&Value>) -> Value {
         Some(v) if v.is_object() => v.clone(),
         _ => json!({}),
     };
+    // 原生 Responses / Anthropic 只给 input_tokens/output_tokens：归一成
+    // prompt/completion。Anthropic 的 input_tokens 不含缓存读写，需加回；
+    // Responses 的 input_tokens 已包含 cached_tokens，不能重复加。
+    if out.get("prompt_tokens").map(|x| x.is_null()).unwrap_or(true) {
+        if let Some(base) = out.get("input_tokens").and_then(Value::as_i64) {
+            let base = base.max(0);
+            let anthropic = out.get("cache_read_input_tokens").is_some()
+                || out.get("cache_creation_input_tokens").is_some();
+            let read = util::int_or(out.get("cache_read_input_tokens"), 0).max(0);
+            let written = util::int_or(out.get("cache_creation_input_tokens"), 0).max(0);
+            let cached = if anthropic {
+                read
+            } else {
+                util::int_or(out.pointer("/input_tokens_details/cached_tokens"), 0).max(0)
+            };
+            let prompt = if anthropic {
+                base.saturating_add(read).saturating_add(written)
+            } else {
+                base
+            };
+            out["prompt_tokens"] = Value::from(prompt);
+            if out.get("prompt_tokens_details").is_none() && cached > 0 {
+                out["prompt_tokens_details"] = json!({"cached_tokens":cached});
+            }
+        }
+    }
+    if out.get("completion_tokens").map(|x| x.is_null()).unwrap_or(true) {
+        if let Some(v) = out.get("output_tokens").and_then(Value::as_i64) {
+            out["completion_tokens"] = Value::from(v.max(0));
+        }
+    }
     let p = util::int_or(out.get("prompt_tokens"), 0).max(0);
     let c = util::int_or(out.get("completion_tokens"), 0).max(0);
     out["prompt_tokens"] = Value::from(p);
@@ -415,7 +446,11 @@ fn usage_cached_tokens(u: &Value) -> i64 {
 
 fn usage_has_prompt(u: Option<&Value>) -> bool {
     u.and_then(|u| u.as_object())
-        .map(|u| u.contains_key("prompt_tokens") && !u.get("prompt_tokens").map(|x| x.is_null()).unwrap_or(true))
+        .map(|u| {
+            ["prompt_tokens", "input_tokens"].iter().any(|k| {
+                u.get(*k).map(|x| !x.is_null()).unwrap_or(false)
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -1410,8 +1445,29 @@ impl StreamProgress {
             return Err(error.get("message").and_then(Value::as_str)
                 .unwrap_or("上游返回错误事件").to_string());
         }
-        if usage_has_prompt(value.get("usage")) {
-            self.usage = Some(full_usage(value.get("usage")));
+        // usage 可能分帧到达（Anthropic 的 input 在 message_start.message.usage、
+        // output 在 message_delta.usage）：按字段合并，最后统一归一化，
+        // 避免后一帧覆盖前一帧
+        for usage in [
+            value.pointer("/message/usage"),
+            value.pointer("/response/usage"),
+            value.get("usage"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let Some(u) = usage.as_object() else { continue };
+            let mut merged = self
+                .usage
+                .take()
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            for (k, v) in u {
+                if !v.is_null() {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            self.usage = Some(Value::Object(merged));
         }
         if let Some(choices) = value.get("choices").and_then(Value::as_array) {
             for choice in choices {
@@ -1794,10 +1850,14 @@ async fn run_pump(
     // 统计与释放（恰好一次）
     let ms = ctx.t0.elapsed().as_millis() as i64;
     let ttfb = first_chunk_at.unwrap_or(ms);
-    let usage = progress.usage.clone().unwrap_or_else(|| full_usage(Some(&json!({
-        "prompt_tokens": est_prompt,
-        "completion_tokens": progress.estimated_output(),
-    }))));
+    // 分帧合并的 usage 在结算前统一归一化（原生 Anthropic/Responses 字段）
+    let usage = match progress.usage.as_ref() {
+        Some(u) => full_usage(Some(u)),
+        None => full_usage(Some(&json!({
+            "prompt_tokens": est_prompt,
+            "completion_tokens": progress.estimated_output(),
+        }))),
+    };
     let st = if client_gone { 499 } else if !truncated.is_empty() { 502 } else { ctx.status };
     // 账号成败口径：上游故障（首字节/空闲超时、流中断）必须记失败——否则假死上游
     // 永远"成功"被立即重排，冷却/封禁/熔断全部失灵；客户端断开不算上游的错
@@ -4089,7 +4149,47 @@ mod tests {
         progress.observe(&frame(json!({"choices":[{"index":1,"delta":{},"finish_reason":"stop"}]}))).unwrap();
         progress.observe(&frame(json!({"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7}}))).unwrap();
         assert!(progress.finished());
-        assert_eq!(progress.usage.unwrap()["total_tokens"], 49);
+        assert_eq!(full_usage(progress.usage.as_ref())["total_tokens"], 49);
+    }
+
+    #[test]
+    fn full_usage_normalizes_native_anthropic_and_responses() {
+        // Anthropic：input_tokens 不含缓存读写，prompt_tokens = 输入 + 读 + 写
+        let a = full_usage(Some(&json!({
+            "input_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,
+            "output_tokens":7})));
+        assert_eq!(a["prompt_tokens"], 10);
+        assert_eq!(a["completion_tokens"], 7);
+        assert_eq!(a["total_tokens"], 17);
+        assert_eq!(usage_cached_tokens(&a), 3);
+        // Responses：input_tokens 已包含 cached_tokens，不能重复相加
+        let r = full_usage(Some(&json!({
+            "input_tokens":9,"input_tokens_details":{"cached_tokens":4},"output_tokens":2})));
+        assert_eq!(r["prompt_tokens"], 9);
+        assert_eq!(r["completion_tokens"], 2);
+        assert_eq!(usage_cached_tokens(&r), 4);
+    }
+
+    #[test]
+    fn progress_merges_split_usage_frames_with_cache_hits() {
+        let mut progress = StreamProgress::default();
+        progress.observe(&frame(json!({"type":"message_start","message":{"usage":{
+            "input_tokens":1000,"cache_read_input_tokens":600,"output_tokens":1}}}))).unwrap();
+        progress.observe(&frame(json!({"type":"message_delta","usage":{"output_tokens":20}}))).unwrap();
+        let usage = full_usage(progress.usage.as_ref());
+        assert_eq!(usage["prompt_tokens"], 1600, "输入与缓存读合并为 prompt");
+        assert_eq!(usage["completion_tokens"], 20, "后一帧的累计输出生效");
+        assert_eq!(usage_cached_tokens(&usage), 600);
+    }
+
+    #[test]
+    fn build_usage_prefers_native_counts_over_estimation() {
+        let u = build_usage(
+            &json!({"status":200,"streamed":false,
+                "body":"{\"usage\":{\"input_tokens\":321,\"output_tokens\":45}}"}),
+            "一段不应被用来估算的请求体");
+        assert_eq!(u["prompt_tokens"], 321);
+        assert_eq!(u["completion_tokens"], 45);
     }
 
     #[test]

@@ -23,6 +23,13 @@ class Upstream(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['content-length'])))
         self.calls.append(body)
+        if body.get('model') == 'native-model' and self.path.endswith('/messages'):
+            payload = {'id':'msg_native','type':'message','role':'assistant','model':'native-model',
+                'content':[{'type':'text','text':'ok'}],'stop_reason':'end_turn','stop_sequence':None,
+                'usage':{'input_tokens':1000,'output_tokens':20,'cache_read_input_tokens':600,'cache_creation_input_tokens':0}}
+            self.send_response(200)
+            self.send_header('Content-Type','application/json'); self.end_headers()
+            self.wfile.write(json.dumps(payload).encode()); return
         usage = {'prompt_tokens':100,'completion_tokens':20,'total_tokens':120}
         if str(body.get('model','')).startswith('cache-'):
             # OpenAI 语义：cached_tokens 已包含在 prompt_tokens 内
@@ -62,8 +69,13 @@ def main():
                     channel={'id':'billing-channel','name':'Billing','enabled':True,'base':f'http://127.0.0.1:{server.server_port}/v1',
                         'models':['token-model','request-model','cache-model'],'prices':{'token-model':price,'request-model':.1,
                             'cache-model':{'mode':'token','input':2,'output':8,'cache':0.5}}}
+                    native_channel={'id':'native-channel','name':'Native','enabled':True,'base':f'http://127.0.0.1:{server.server_port}/v1',
+                        'api_endpoint':'messages','models':['native-model'],
+                        'prices':{'native-model':{'mode':'token','input':2,'output':8,'cache':0.5}}}
                     r=admin.post('/api/upstreams',json=channel);check(r.status_code==200,'创建按次与 token 混合定价渠道')
+                    check(admin.post('/api/upstreams',json=native_channel).status_code==200,'创建原生 Anthropic 渠道')
                     check(admin.post('/api/keys/import',json={'text':'billing@example.test,password,nvapi-billing-test-key','upstream_id':'billing-channel'}).status_code==200,'导入本地上游 Key')
+                    check(admin.post('/api/keys/import',json={'text':'native@example.test,password,nvapi-native-test-key','upstream_id':'native-channel'}).status_code==200,'导入原生渠道 Key')
                     r=admin.get('/api/prices'); check(any(row['price']==price for row in r.json()['rows']),'定价读取保留 token 对象')
                     check(admin.post('/api/prices',json={'channel_id':'billing-channel','prices':{'token-model':{'mode':'token','input':-1,'output':2}}}).status_code==400,'拒绝非法价格且不覆盖配置')
                     check(admin.post('/api/prices',json={'channel_id':'missing','prices':{}}).status_code==404,'不存在渠道返回 404')
@@ -102,6 +114,16 @@ def main():
                         '调用日志保留缓存命中 token 与缓存价: '+json.dumps(clog.get('billing'),ensure_ascii=False))
                     daily=user.get('/v1/usage?days=7',headers={'Authorization':'Bearer '+key,'X-Forwarded-Proto':'https'}).json()
                     check(sum(r['requests'] for r in daily)==7 and sum(r['input_tokens'] for r in daily)==1600,'日聚合计入缓存命中的完整输入 token')
+                    # 原生 Anthropic usage：input_tokens 不含缓存读，需合计后计费
+                    native_before=user.get('/api/user/me').json()['balance']
+                    r=user.post('/v1/messages',headers=headers,json={'model':'native-model','max_tokens':30,'messages':[{'role':'user','content':'hi'}]})
+                    check(r.status_code==200,'原生 Anthropic usage 响应成功')
+                    native_charge=round(native_before-user.get('/api/user/me').json()['balance'],6)
+                    check(native_charge==0.00246,f'原生 Anthropic usage 按实际 token 与缓存价计费: charge={native_charge}')
+                    nlog=user.get('/api/user/logs').json()['rows'][0]
+                    check(nlog.get('in_tok')==1600 and nlog.get('cached_tok')==600,'原生 Anthropic 缓存读计入输入且单独记录命中')
+                    daily=user.get('/v1/usage?days=7',headers={'Authorization':'Bearer '+key,'X-Forwarded-Proto':'https'}).json()
+                    check(sum(r['requests'] for r in daily)==8 and sum(r['input_tokens'] for r in daily)==3200,'日聚合累加原生 Anthropic 输入')
                     # 定价生命周期：取消接入/改名清价，未接入模型不可定价
                     life={'id':'lifecycle-channel','name':'Lifecycle','enabled':True,'base':f'http://127.0.0.1:{server.server_port}/v1',
                         'models':['life-a','life-b'],'prices':{'life-a':.1,'life-b':.2}}

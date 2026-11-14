@@ -228,7 +228,7 @@ GET  /queue                    公开排队页
 1.7.60 的计费单位、长度档位、浏览器文件工具和升级注意事项见
 [本次修复说明](docs/FIX-1.7.60-20261108.md)。
 
-按 token 计费支持输入价、输出价与可选的缓存命中价（元/百万 token），长度档位可分别覆盖三者；未配置缓存价时命中部分按输入价计。缓存命中取自上游 `usage` 的 `prompt_tokens_details.cached_tokens`、`cache_read_input_tokens`、`prompt_cache_hit_tokens` 等字段，命中 token 已包含在输入 token 内，不会重复计费，调用日志的 `cached_tok` 保留命中数量。定价只对已接入的模型生效：取消接入或改名会同步清理旧名定价，未接入的模型不能单独设置价格（透传渠道的空清单除外）。
+按 token 计费支持输入价、输出价与可选的缓存命中价（元/百万 token），长度档位可分别覆盖三者；未配置缓存价时命中部分按输入价计。缓存命中取自上游 `usage` 的 `prompt_tokens_details.cached_tokens`、`cache_read_input_tokens`、`prompt_cache_hit_tokens` 等字段，命中 token 已包含在输入 token 内，不会重复计费，调用日志的 `cached_tok` 保留命中数量。直连 Anthropic / Responses 时，原生 `input_tokens`/`output_tokens` 会先归一成实际 token 数；Anthropic 的缓存读写在 `input_tokens` 之外单独上报，会加回输入总量（缓存读按缓存价，缓存写按输入价），流式分帧到达的 usage 按字段合并后再结算。定价只对已接入的模型生效：取消接入或改名会同步清理旧名定价，未接入的模型不能单独设置价格（透传渠道的空清单除外）。
 
 ## 01Code 客户端登录
 
