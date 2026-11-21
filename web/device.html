@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 01Code · 言灵中转</title>
+<style>
+:root{--acc:#10b981;--acc-deep:#059669;--txt:#1c2536;--mut:#68758a;--line:#e7ecf3}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:var(--txt);
+  background:radial-gradient(1200px 600px at 20% -10%,#1d3561 0%,transparent 60%),
+             radial-gradient(1000px 500px at 110% 110%,#17306b 0%,transparent 55%),
+             linear-gradient(160deg,#0d1526 0%,#0a1120 100%);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+.card{width:100%;max-width:430px;background:#fff;border-radius:18px;padding:30px 30px 26px;
+  box-shadow:0 28px 80px rgba(2,8,20,.55);animation:in .18s ease}
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.mark{width:46px;height:46px;border-radius:13px;margin:0 auto 14px;display:grid;place-items:center;
+  background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-weight:800;font-size:20px;
+  box-shadow:0 6px 18px rgba(16,185,129,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.title{text-align:center;font-size:19px;font-weight:700;letter-spacing:.2px}
+.sub{text-align:center;font-size:11px;color:#98a3b8;letter-spacing:1.6px;text-transform:uppercase;margin:4px 0 14px}
+.steps{display:flex;align-items:center;justify-content:center;gap:8px;margin:0 0 20px;font-size:11px;color:#98a3b8}
+.steps span{display:inline-flex;align-items:center;gap:5px}
+.steps span::before{content:"";width:16px;height:16px;border-radius:50%;border:1px solid #dbe3ee;background:#fff;display:inline-block}
+.steps span.on{color:#047857;font-weight:600}
+.steps span.on::before{background:#10b981;border-color:#10b981;box-shadow:inset 0 0 0 3px #fff}
+.steps i{font-style:normal;color:#cbd5e1}
+.device{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--line);
+  border-radius:12px;background:#fafbfd;margin-bottom:16px}
+.device .dot{width:9px;height:9px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 4px rgba(16,185,129,.14);flex-shrink:0}
+.device .name{font-weight:600;font-size:13.5px}
+.device .meta{font-size:11.5px;color:var(--mut);margin-top:1px}
+.code-box{text-align:center;padding:16px 12px 14px;border:1px dashed #cfe8dd;border-radius:12px;
+  background:linear-gradient(180deg,#f4fdf9,#fff);margin-bottom:16px}
+.code-label{font-size:11.5px;color:var(--mut);margin-bottom:4px}
+.code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:30px;font-weight:700;
+  letter-spacing:6px;color:#0b3b2e;padding-left:6px}
+.rows{display:grid;gap:8px;margin-bottom:18px}
+.row{display:flex;justify-content:space-between;gap:16px;font-size:12.5px;color:var(--mut)}
+.row b{color:var(--txt);font-weight:600;text-align:right;overflow-wrap:anywhere}
+.actions{display:flex;gap:10px}
+button{flex:1;padding:11px 14px;border-radius:10px;border:1px solid var(--line);background:#fff;color:var(--txt);
+  font-size:14px;font-weight:600;cursor:pointer;transition:all .15s ease}
+button:hover{border-color:#c9d4e4;background:#f8fafc}
+button.primary{border:0;color:#fff;background:linear-gradient(135deg,#10b981,#059669);
+  box-shadow:0 4px 14px rgba(16,185,129,.35)}
+button.primary:hover{background:linear-gradient(135deg,#059669,#047857);transform:translateY(-1px)}
+button:disabled{opacity:.55;cursor:not-allowed;transform:none}
+.note{font-size:11.5px;color:var(--mut);line-height:1.55;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+#status{min-height:18px;margin:10px 0 0;font-size:12.5px;color:#dc2626}
+#status.ok{color:var(--acc-deep)}
+a{color:var(--acc-deep);text-decoration:none}
+@media(max-width:480px){body{padding:16px}.card{padding:24px 20px}.code{font-size:26px;letter-spacing:4px}}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="mark">言</div>
+  <div class="title">登录 01Code</div>
+  <div class="sub">Device Authorization</div>
+  <div class="steps"><span class="on">确认设备</span><i>→</i><span>客户端自动登录</span></div>
+  <div class="device">
+    <span class="dot" aria-hidden="true"></span>
+    <div><div class="name">01Code 桌面客户端</div>
+      <div class="meta">请求在浏览器中确认后，客户端自动完成登录</div></div>
+  </div>
+  <div class="code-box">
+    <div class="code-label">请在客户端确认此验证码</div>
+    <div class="code" id="code"></div>
+  </div>
+  <div class="rows">
+    <div class="row"><span>请求时间</span><b id="time"></b></div>
+    <div class="row"><span>来源 IP</span><b id="ip"></b></div>
+  </div>
+  <div class="actions">
+    <button id="deny" type="button">拒绝</button>
+    <button id="allow" class="primary" type="button">允许登录</button>
+  </div>
+  <p id="status" role="status" aria-live="polite"></p>
+  <div class="note">验证码 10 分钟内有效且仅可使用一次；登录不绑定 IP，切换网络无需重新授权。登录后可随时在<a href="/user">用户中心</a>撤销该设备。</div>
+</main>
+<script>
+const d = DEVICE_DATA;
+document.getElementById('code').textContent = d.code;
+document.getElementById('ip').textContent = d.ip || '未知';
+document.getElementById('time').textContent = new Date(d.created * 1000).toLocaleString();
+async function decide(decision) {
+  const buttons = [...document.querySelectorAll('button')];
+  buttons.forEach(b => b.disabled = true);
+  const status = document.getElementById('status');
+  status.className = '';
+  status.textContent = '';
+  try {
+    const session = await fetch('/api/user/session', {cache: 'no-store'});
+    if (session.status === 401) {
+      location.replace('/user?device=' + encodeURIComponent(d.code));
+      return;
+    }
+    if (!session.ok) throw new Error('请先登录用户中心');
+    const {csrf} = await session.json();
+    const r = await fetch('/api/device/authorize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF': csrf},
+      body: JSON.stringify({code: d.code, decision})
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error((body.error && body.error.message) || '授权未完成，请重新发起登录');
+    }
+    status.className = 'ok';
+    status.textContent = decision === 'allow' ? '已允许，正在返回用户中心…' : '已拒绝，正在返回用户中心…';
+    location.replace('/user');
+  } catch (e) {
+    status.className = '';
+    status.textContent = e.message || '授权失败，请重试';
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+document.getElementById('allow').onclick = () => decide('allow');
+document.getElementById('deny').onclick = () => decide('deny');
+</script>
+</body>
+</html>

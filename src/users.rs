@@ -1,0 +1,1828 @@
+//! 多用户系统：用户、用户 Key（调用令牌）、计费、用户级限速、用户调用日志。
+//!
+//! 计费口径：管理员按「渠道 + 模型」设置单次成功请求价格（元/次），
+//! 仅成功调用计费；渠道未设置价格的模型为免费模型。
+//! 余额以元为单位按 f64 存储，写入时统一保留 6 位小数。
+
+use crate::store::{store, Obj, Value};
+use crate::util;
+use serde_json::json;
+use std::collections::HashMap;
+
+fn money(v: Option<&Value>) -> f64 {
+    util::f64_or(v, 0.0)
+}
+
+// ---------------------------------------------------------------- 用户 CRUD
+
+pub fn list_users() -> Vec<Value> {
+    store()
+        .load()
+        .get("users")
+        .and_then(|u| u.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|u| {
+                    let mut row = u.clone();
+                    if let Some(o) = row.as_object_mut() {
+                        o.remove("password_hash"); // 口令哈希不出后台
+                        // 账本字段补齐（旧用户迁移为只读展示，不写盘）
+                        let balance = util::round6(util::f64_or(o.get("balance"), 0.0));
+                        o.entry("grant".to_string()).or_insert(json!(0.0));
+                        o.entry("grant_total".to_string()).or_insert(json!(0.0));
+                        o.entry("recharge_total".to_string()).or_insert(json!(balance.max(0.0)));
+                        o.entry("free_calls".to_string()).or_insert(json!(0));
+                        o.entry("paid_calls".to_string()).or_insert(json!(0));
+                        o.entry("total_cost".to_string()).or_insert(json!(0.0));
+                    }
+                    row
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn users_mut<R>(db: &mut Value, f: impl FnOnce(&mut Vec<Value>) -> R) -> R {
+    let obj = db.as_object_mut().unwrap();
+    let arr = obj.entry("users").or_insert_with(|| Value::Array(vec![]));
+    if !arr.is_array() {
+        *arr = Value::Array(vec![]);
+    }
+    f(arr.as_array_mut().unwrap())
+}
+
+pub fn get_user_by_id(user_id: &str) -> Option<Value> {
+    store()
+        .load()
+        .get("users")
+        .and_then(|u| u.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|u| util::str_or(u.get("id"), "") == user_id)
+                .cloned()
+        })
+}
+
+fn find_user_mut<'a>(arr: &'a mut Vec<Value>, user_id: &str) -> Option<&'a mut Value> {
+    arr.iter_mut().find(|u| util::str_or(u.get("id"), "") == user_id)
+}
+
+/// 管理员添加用户（不做自助注册）。返回 (用户行, 错误)。
+pub fn add_user(username: &str, password: &str, balance: f64, free_rpm: i64, paid_rpm: i64) -> (Option<Value>, String) {
+    let username = username.trim();
+    if username.is_empty() || username.chars().count() > 32 {
+        return (None, "用户名不能为空且不超过 32 字符".into());
+    }
+    if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '@' || c == '.') {
+        return (None, "用户名仅支持字母、数字、_ - @ .".into());
+    }
+    if password.chars().count() < 6 {
+        return (None, "密码至少 6 位".into());
+    }
+    let mut out: Option<Value> = None;
+    let mut err = String::new();
+    let bal = util::round6(balance.max(0.0));
+    let mut created_id = String::new();
+    store().update(|db| {
+        users_mut(db, |arr| {
+            if arr.iter().any(|u| {
+                util::str_or(u.get("username"), "").eq_ignore_ascii_case(username)
+            }) {
+                err = "用户名已存在".into();
+                return;
+            }
+            let now = util::now_i();
+            // 建户余额全部划入充值账本（注册赠送走 gift-balance 才是赠金）
+            let row = json!({
+                "id": format!("u8_{}", util::rand_hex(5)),
+                "username": username,
+                "password_hash": crate::store::hash_password(password),
+                "balance": bal,
+                "recharge_total": bal,
+                "grant": 0.0,
+                "grant_total": 0.0,
+                "free_rpm": free_rpm.max(0),
+                "paid_rpm": paid_rpm.max(0),
+                "enabled": true,
+                "created_at": now,
+                "updated_at": now,
+                "note": "",
+            });
+            let new_id = util::str_or(row.get("id"), "");
+            out = Some(row.clone());
+            arr.push(row);
+            created_id = new_id;
+        });
+        // users_mut 借用结束后再写流水（同一次 update 内，不嵌套加锁）
+        if !created_id.is_empty() && bal > 0.0 {
+            fund_log(db, &created_id, "recharge", 0.0, bal, "建户初始余额");
+        }
+    });
+    (out, err)
+}
+
+/// 用户操作：set-balance / add-balance / enable / disable / delete / reset-password / set-limits
+pub fn user_op(user_id: &str, op: &str, body: &Value) -> (bool, String) {
+    let mut ok = false;
+    let mut err = String::new();
+    let mut disable_keys = false;
+    let reset_hash = if op == "reset-password" {
+        let password = util::str_or(body.get("password"), "");
+        if password.chars().count() < 6 { return (false, "密码至少 6 位".into()); }
+        Some(crate::store::hash_password(&password))
+    } else { None };
+    let mut note: Option<(&'static str, f64, f64, String)> = None;
+    store().update(|db| {
+        users_mut(db, |arr| {
+            let Some(u) = find_user_mut(arr, user_id) else {
+                err = "用户不存在".into();
+                return;
+            };
+            match op {
+                "set-balance" => {
+                    // kind=recharge（默认，兼容旧调用）设充值当前；kind=grant 设赠金当前
+                    let v = money(body.get("balance"));
+                    if v < 0.0 {
+                        err = "余额不能为负数".into();
+                        return;
+                    }
+                    let kind = util::str_or(body.get("kind"), "recharge");
+                    let (before_g, before_r) = (grant_of(u), recharge_of(u));
+                    if let Some(o) = u.as_object_mut() {
+                        if kind == "grant" {
+                            o.insert("grant".into(), json!(util::round6(v)));
+                            if !o.contains_key("grant_total") {
+                                o.insert("grant_total".into(), json!(0.0));
+                            }
+                        } else {
+                            o.insert("balance".into(), json!(util::round6(v)));
+                            if !o.contains_key("recharge_total") {
+                                o.insert("recharge_total".into(), json!(0.0));
+                            }
+                        }
+                    }
+                    let (after_g, after_r) = (grant_of(u), recharge_of(u));
+                    note = Some((
+                        "adjust",
+                        util::round6(after_g - before_g),
+                        util::round6(after_r - before_r),
+                        format!("设置{}余额", if kind == "grant" { "赠金" } else { "充值" }),
+                    ));
+                    ok = true;
+                }
+                "add-balance" => {
+                    // kind=recharge（默认，兼容旧调用）加充值账本并计累计
+                    let v = money(body.get("amount"));
+                    if v < 0.0 {
+                        err = "金额不能为负数（扣减请用 set-balance）".into();
+                        return;
+                    }
+                    let kind = util::str_or(body.get("kind"), "recharge");
+                    if kind == "grant" {
+                        credit(u, "grant", v);
+                    } else {
+                        credit(u, "recharge", v);
+                    }
+                    note = Some((
+                        if kind == "grant" { "grant" } else { "recharge" },
+                        if kind == "grant" { util::round6(v) } else { 0.0 },
+                        if kind == "recharge" { util::round6(v) } else { 0.0 },
+                        "管理员发放".into(),
+                    ));
+                    ok = true;
+                }
+                "gift-balance" => {
+                    // 注册赠送：金额入充值账本且计累计（语义=运营送的充值额度）
+                    let v = money(body.get("amount"));
+                    if v < 0.0 {
+                        err = "金额不能为负数".into();
+                        return;
+                    }
+                    credit(u, "recharge", v);
+                    note = Some(("recharge", 0.0, util::round6(v), "注册赠送".into()));
+                    ok = true;
+                }
+                "gift-grant" => {
+                    // 赠金发放（含签到以外的运营补偿）
+                    let v = money(body.get("amount"));
+                    if v < 0.0 {
+                        err = "金额不能为负数".into();
+                        return;
+                    }
+                    credit(u, "grant", v);
+                    note = Some(("grant", util::round6(v), 0.0, "管理员发放".into()));
+                    ok = true;
+                }
+                "enable" | "disable" => {
+                    let enabled = op == "enable";
+                    if let Some(o) = u.as_object_mut() {
+                        o.insert("enabled".into(), Value::from(enabled));
+                    }
+                    ok = true;
+                }
+                "reset-password" => {
+                    let next_epoch = user_pw_epoch(u).saturating_add(1);
+                    if let Some(o) = u.as_object_mut() {
+                        o.insert("password_hash".into(), Value::from(reset_hash.as_ref().unwrap().clone()));
+                        o.insert("pw_epoch".into(), json!(next_epoch));
+                    }
+                    ok = true;
+                }
+                "set-limits" => {
+                    if let Some(o) = u.as_object_mut() {
+                        if let Some(v) = body.get("free_rpm") {
+                            o.insert("free_rpm".into(), json!(util::int_or(Some(v), 0).max(0)));
+                        }
+                        if let Some(v) = body.get("paid_rpm") {
+                            o.insert("paid_rpm".into(), json!(util::int_or(Some(v), 0).max(0)));
+                        }
+                    }
+                    ok = true;
+                }
+                "delete" => {
+                    disable_keys = true;
+                    let id = util::str_or(u.get("id"), "");
+                    arr.retain(|x| util::str_or(x.get("id"), "") != id);
+                    ok = true;
+                }
+                _ => err = "未知操作".into(),
+            }
+        });
+        if ok && matches!(op, "reset-password" | "delete") {
+            if let Some(resets) = db.get_mut("pw_resets").and_then(Value::as_array_mut) {
+                resets.retain(|r| util::str_or(r.get("uid"), "") != user_id);
+            }
+        }
+        // 资金变动流水（同一次 update 内写入，与账本变更原子）
+        if ok {
+            if let Some((kind, dg, dr, nt)) = note.take() {
+                fund_log(db, user_id, kind, dg, dr, &nt);
+            }
+        }
+    });
+    if disable_keys {
+        store().update(|db| {
+            if let Some(tokens) = db.get_mut("user_tokens").and_then(|t| t.as_array_mut()) {
+                for t in tokens.iter_mut() {
+                    if util::str_or(t.get("user_id"), "") == user_id {
+                        if let Some(o) = t.as_object_mut() {
+                            o.insert("enabled".into(), Value::from(false));
+                        }
+                    }
+                }
+            }
+        });
+    }
+    (ok, err)
+}
+
+// ---------------------------------------------------------------- 用户会话
+
+/// 用户会话 Cookie：base64(user_id|epoch|issued|sid).HMAC(secret, "user:"+payload)。
+/// sid 用于退出登录时只吊销当前会话；有效期 30 天，改密/重置会递增 epoch 使旧会话全部失效。
+const USER_SESSION_TTL: i64 = 30 * 24 * 3600;
+
+/// 该用户当前会话纪元：改密时 +1，所有携旧纪元的 Cookie 即刻失效（精确，无秒级边界）
+fn user_pw_epoch(user: &Value) -> i64 {
+    util::int_or(user.get("pw_epoch"), 0)
+}
+
+#[cfg(test)]
+pub fn user_session_value(secret: &str, user_id: &str) -> String {
+    let user = get_user_by_id(user_id).unwrap_or_else(|| json!({"id":user_id}));
+    user_session_from_row(secret, &user)
+}
+
+/// Sign the verified password snapshot; a concurrent reset must not grant a new epoch.
+pub fn user_session_from_row(secret: &str, user: &Value) -> String {
+    use base64::Engine;
+    let user_id = util::str_or(user.get("id"), "");
+    let epoch = user_pw_epoch(user);
+    let issued = util::now_i();
+    let sid = util::rand_hex(16);
+    let payload = format!("{}|{}|{}|{}", user_id, epoch, issued, sid);
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
+    let sig = crate::store::hmac_hex(secret.as_bytes(), format!("user:{}", payload).as_bytes());
+    format!("{}.{}", b64, sig)
+}
+
+/// 校验会话 Cookie 并还原 (user_id, 纪元, 签发时间, sid)。
+fn user_session_info(secret: &str, cookie_value: &str) -> Option<(String, i64, i64, String)> {
+    let (b64, sig) = cookie_value.split_once('.')?;
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b64).ok()?;
+    let payload = String::from_utf8(payload).ok()?;
+    let expect = crate::store::hmac_hex(secret.as_bytes(), format!("user:{}", payload).as_bytes());
+    use subtle::ConstantTimeEq;
+    let ok: bool = sig.as_bytes().ct_eq(expect.as_bytes()).into();
+    if !ok {
+        return None;
+    }
+    let mut it = payload.split('|');
+    let user_id = it.next()?;
+    let epoch = it.next()?.parse::<i64>().ok()?;
+    let issued = it.next()?.parse::<i64>().ok()?;
+    let sid = it.next()?;
+    if it.next().is_some() || sid.is_empty() || !sid.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let now = util::now_i();
+    if issued <= 0 || issued > now + 300 || now - issued > USER_SESSION_TTL {
+        return None;
+    }
+    Some((user_id.to_string(), epoch, issued, sid.to_string()))
+}
+
+/// 会话是否已被退出登录吊销（吊销表只保留未过期的 sid）。
+fn session_revoked(user: &Value, sid: &str, now: i64) -> bool {
+    user.get("revoked_sessions")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter().any(|r| {
+                util::str_or(r.get("sid"), "") == sid
+                    && util::int_or(r.get("exp"), 0) > now
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// 校验会话 Cookie 并还原 user_id：签名 + 有效期 + 改密失效 + 退出登录吊销。
+pub fn user_session_id(secret: &str, cookie_value: &str) -> Option<String> {
+    let (uid, epoch, _issued, sid) = user_session_info(secret, cookie_value)?;
+    let u = get_user_by_id(&uid)?;
+    if user_pw_epoch(&u) != epoch || session_revoked(&u, &sid, util::now_i()) {
+        return None;
+    }
+    if auth_user(&uid).is_some() {
+        Some(uid)
+    } else {
+        None
+    }
+}
+
+/// 从已验签的会话 Cookie 取 sid（用于退出登录时精确吊销当前会话）。
+pub fn user_session_sid(secret: &str, cookie_value: &str) -> Option<String> {
+    user_session_info(secret, cookie_value).map(|(_, _, _, sid)| sid)
+}
+
+/// 吊销指定用户会话；只影响当前浏览器，其它设备仍可继续使用。
+pub fn revoke_user_session(user_id: &str, sid: &str) {
+    if sid.is_empty() {
+        return;
+    }
+    let now = util::now_i();
+    store().update(|db| {
+        let Some(arr) = db.get_mut("users").and_then(|u| u.as_array_mut()) else {
+            return;
+        };
+        let Some(u) = arr
+            .iter_mut()
+            .find(|u| util::str_or(u.get("id"), "") == user_id)
+        else {
+            return;
+        };
+        let Some(o) = u.as_object_mut() else { return };
+        let list = o
+            .entry("revoked_sessions")
+            .or_insert_with(|| Value::Array(vec![]));
+        if !list.is_array() {
+            *list = Value::Array(vec![]);
+        }
+        let a = list.as_array_mut().unwrap();
+        a.retain(|r| {
+            util::int_or(r.get("exp"), 0) > now && util::str_or(r.get("sid"), "") != sid
+        });
+        a.push(json!({"sid": sid, "exp": now + USER_SESSION_TTL}));
+        if a.len() > 50 {
+            let drop = a.len() - 50;
+            a.drain(0..drop);
+        }
+    });
+}
+
+pub fn user_csrf_token(secret: &str, user_id: &str) -> String {
+    crate::store::hmac_hex(secret.as_bytes(), format!("ucsrfs:{}", user_id).as_bytes())
+}
+
+/// 读取（启用中的）用户行；口令哈希剔除。
+pub fn auth_user(user_id: &str) -> Option<Value> {
+    let u = get_user_by_id(user_id)?;
+    if !u.get("enabled").map(util::truthy).unwrap_or(false) {
+        return None;
+    }
+    Some(u)
+}
+
+// ---------------------------------------------------------------- 用户 Key
+
+pub fn user_key_prefix() -> &'static str {
+    "sk-usr-"
+}
+
+pub fn list_keys(user_id: &str) -> Vec<Value> {
+    store()
+        .load()
+        .get("user_tokens")
+        .and_then(|t| t.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|t| util::str_or(t.get("user_id"), "") == user_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn find_key(user_id: &str, key_id: &str) -> Option<Value> {
+    list_keys(user_id)
+        .into_iter()
+        .find(|t| t["id"] == json!(key_id))
+}
+
+pub fn add_key(user_id: &str, name: &str) -> Value {
+    add_key_kind(user_id, name, "all")
+}
+
+/// kind: "all" / "free" / "paid" —— Key 的模型类型限制；无字段的历史 Key 视为 "all"。
+pub fn add_key_kind(user_id: &str, name: &str, kind: &str) -> Value {
+    let kind = match kind {
+        "free" | "paid" => kind,
+        _ => "all",
+    };
+    // 数量上限：防止脚本化滥建 Key 撑大 users 组（含停用的合计）。
+    // 计数必须和插入在同一 update 闭包里：先 load 计数再 update 插入的话，
+    // 两个并发请求都能基于旧快照通过校验，上限被击穿
+    const MAX_KEYS_PER_USER: usize = 20;
+    let key = format!("{}{}", user_key_prefix(), util::rand_hex(20));
+    let row = json!({
+        "id": format!("ut_{}", util::rand_hex(5)),
+        "user_id": user_id,
+        "key": key,
+        "name": util::str_cut(name, 40),
+        "kind": kind,
+        "enabled": true,
+        "created_at": util::now_i(),
+        "last_used_at": 0,
+    });
+    let mut over_limit = false;
+    store().update(|db| {
+        let obj = db.as_object_mut().unwrap();
+        let arr = obj.entry("user_tokens").or_insert_with(|| Value::Array(vec![]));
+        if let Some(a) = arr.as_array_mut() {
+            if a.iter().filter(|t| util::str_or(t.get("user_id"), "") == user_id).count() >= MAX_KEYS_PER_USER {
+                over_limit = true;
+                return;
+            }
+            a.push(row.clone());
+        }
+    });
+    if over_limit {
+        return json!({"error": "每个用户最多 20 个 Key，请先删除不用的"});
+    }
+    row
+}
+
+pub fn key_op(user_id: &str, key_id: &str, op: &str) -> bool {
+    let mut ok = false;
+    store().update(|db| {
+        if let Some(arr) = db.get_mut("user_tokens").and_then(|t| t.as_array_mut()) {
+            for t in arr.iter_mut() {
+                if util::str_or(t.get("id"), "") != key_id
+                    || util::str_or(t.get("user_id"), "") != user_id
+                {
+                    continue;
+                }
+                match op {
+                    "enable" | "disable" => {
+                        if let Some(o) = t.as_object_mut() {
+                            o.insert("enabled".into(), Value::from(op == "enable"));
+                        }
+                        ok = true;
+                    }
+                    "delete" => {
+                        ok = true; // retain 在下方统一处理
+                    }
+                    _ => {}
+                }
+            }
+            if op == "delete" {
+                arr.retain(|t| {
+                    !((util::str_or(t.get("id"), "") == key_id)
+                        && (util::str_or(t.get("user_id"), "") == user_id))
+                });
+            }
+        }
+    });
+    ok
+}
+
+/// Bearer Key → 启用中的 (用户行, 令牌行)。管理员网关令牌不在此列（调用方先查）。
+pub fn lookup_user_key(key: &str) -> Option<(Value, Value)> {
+    if !key.starts_with(user_key_prefix()) {
+        return None;
+    }
+    let db = store().load();
+    let tokens = db.get("user_tokens").and_then(|t| t.as_array())?;
+    use subtle::ConstantTimeEq;
+    // API Key 本身就是秘密：比较走常量时间，与其余令牌口径一致
+    let t = tokens
+        .iter()
+        .find(|t| {
+            let matches: bool = util::str_or(t.get("key"), "").as_bytes().ct_eq(key.as_bytes()).into();
+            matches && t.get("enabled").map(util::truthy).unwrap_or(false)
+        })?;
+    let user_id = util::str_or(t.get("user_id"), "");
+    let u = auth_user(&user_id)?;
+    Some((u, t.clone()))
+}
+
+/// Key 的模型类型限制："all" / "free" / "paid"；无字段的历史 Key = 全部。
+pub fn key_kind(t: &Value) -> &'static str {
+    match util::str_or(t.get("kind"), "all").as_str() {
+        "free" => "free",
+        "paid" => "paid",
+        _ => "all",
+    }
+}
+
+/// WebClaw 复用启用中的全模型 Key，避免拿到免费专用 Key 后无法调用付费模型。
+pub fn ensure_test_key(user_id: &str) -> Option<String> {
+    for t in list_keys(user_id) {
+        if !t.get("enabled").map(util::truthy).unwrap_or(false) || key_kind(&t) != "all" {
+            continue;
+        }
+        let k = util::str_or(t.get("key"), "");
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    let row = add_key(user_id, "WebClaw");
+    let k = util::str_or(row.get("key"), "");
+    if k.is_empty() { None } else { Some(k) }
+}
+
+// ---------------------------------------------------------------- 金额与账本
+
+/// 余额统一口径（内部字段 balance=充值当前）+grant（赠金当前）：
+/// 计费先扣赠金再扣充值；grant_total/recharge_total 为累计获得，只增不减。
+pub fn grant_of(u: &Value) -> f64 {
+    util::f64_or(u.get("grant"), 0.0)
+}
+
+pub fn recharge_of(u: &Value) -> f64 {
+    util::f64_or(u.get("balance"), 0.0)
+}
+
+/// 账面可用余额 = 赠金当前 + 充值当前（兼容旧字段 grant_total/recharge_total 缺失=0）。
+pub fn balance_of(u: &Value) -> f64 {
+    util::round6(grant_of(u) + recharge_of(u))
+}
+
+/// 用户「当前/总」信息（面板展示）。
+pub fn wallet_row(u: &Value) -> Value {
+    json!({
+        "grant": util::round6(grant_of(u)),
+        "grant_total": util::round6(util::f64_or(u.get("grant_total"), 0.0)),
+        "recharge": util::round6(recharge_of(u)),
+        "recharge_total": util::round6(util::f64_or(u.get("recharge_total"), 0.0)),
+        "balance": balance_of(u),
+    })
+}
+
+/// 记一笔获得（来源 grant=赠金 / recharge=充值）：加当前 + 加累计。
+/// 赠金累计只记赠金来源；充值累计只记充值来源，互不污染。
+pub fn credit(user: &mut Value, kind: &str, amount: f64) {
+    let amt = util::round6(amount.max(0.0));
+    let cur_key = if kind == "grant" { "grant" } else { "balance" };
+    let total_key = if kind == "grant" { "grant_total" } else { "recharge_total" };
+    if let Some(o) = user.as_object_mut() {
+        let cur = util::f64_or(o.get(cur_key), 0.0);
+        o.insert(cur_key.into(), json!(util::round6(cur + amt)));
+        let tot = util::f64_or(o.get(total_key), 0.0);
+        o.insert(total_key.into(), json!(util::round6(tot + amt)));
+    }
+}
+
+/// 扣一笔计费：先扣赠金当前，不够再扣充值当前（round6 量化，避免浮点尾数）。
+/// 余额不足时允许扣成负数（记录欠款）：预检在请求入口拦截 balance_of<=0，
+/// 并发突发最多产生一段有账可查的欠款，充值后自动冲抵；若在此钳到 0，
+/// 欠款消失、记账与实扣脱节（等于每次充值后可无限白嫖到下一次预检）。
+/// 返回 (扣的赠金, 扣的充值)。
+pub fn debit_bill(user: &mut Value, cost: f64) -> (f64, f64) {
+    let mut left = util::round6(cost);
+    let mut from_grant = 0.0f64;
+    let mut from_recharge = 0.0f64;
+    if let Some(o) = user.as_object_mut() {
+        let g = util::round6(util::f64_or(o.get("grant"), 0.0));
+        if g > 0.0 {
+            from_grant = g.min(left);
+            o.insert("grant".into(), json!(util::round6(g - from_grant)));
+            left = util::round6(left - from_grant);
+        }
+        if left > 0.0 {
+            let r = util::round6(util::f64_or(o.get("balance"), 0.0));
+            // 充值腿允许扣成负数（记录欠款；充值后自动冲抵）
+            from_recharge = left;
+            o.insert("balance".into(), json!(util::round6(r - from_recharge)));
+        }
+    }
+    (from_grant, from_recharge)
+}
+
+/// 记一笔资金变动（必须在 store().update() 闭包内调用）。
+/// kind: signup/adjust/grant/recharge/sign/call。dg/dr = 赠金/充值增减量。
+/// 每用户保留最近 500 条。
+pub fn fund_log(db: &mut Value, user_id: &str, kind: &str, dg: f64, dr: f64, note: &str) {
+    if dg == 0.0 && dr == 0.0 {
+        return;
+    }
+    let obj = match db.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+    let arr = obj.entry("fund_logs").or_insert_with(|| Value::Array(vec![]));
+    // +0.0 归一化负零：round6(0.0) 在扣减路径可能产生 -0.0，序列化后前端显示 "-0.0000"
+    let dg = util::round6(dg) + 0.0;
+    let dr = util::round6(dr) + 0.0;
+    if let Some(a) = arr.as_array_mut() {
+        a.insert(
+            0,
+            json!({
+                "t": util::now_i(),
+                "user_id": user_id,
+                "kind": kind,
+                "dg": dg,
+                "dr": dr,
+                "note": util::str_cut(note, 60),
+            }),
+        );
+        let mut seen = 0usize;
+        a.retain(|r| {
+            if util::str_or(r.get("user_id"), "") != user_id {
+                return true;
+            }
+            seen += 1;
+            seen <= 500
+        });
+    }
+}
+
+/// 用户资金变动流水（时间倒序，分页）。
+pub fn user_funds_page(user_id: &str, page: i64, per: usize) -> (Vec<Value>, i64) {
+    let db = store().load();
+    let mut rows: Vec<Value> = db
+        .get("fund_logs")
+        .and_then(|l| l.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|r| util::str_or(r.get("user_id"), "") == user_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let total = rows.len() as i64;
+    let per = per.max(1) as i64;
+    let pages = ((total + per - 1) / per).max(1);
+    let page = page.clamp(1, pages);
+    let start = ((page - 1) * per) as usize;
+    rows = rows.into_iter().skip(start).take(per as usize).collect();
+    (rows, total)
+}
+
+// ---------------------------------------------------------------- 签到
+
+/// 兼容旧版每日文件。读取失败不能当作未签到，否则损坏文件会允许重复领奖。
+fn legacy_sign_get(day: &str, user_id: &str) -> Result<Option<f64>, String> {
+    let f = crate::store::signs_dir().join(format!("sign_{}.json", day));
+    let raw = match std::fs::read(f) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("签到记录读取失败，请联系管理员".into()),
+    };
+    let doc: Value = serde_json::from_slice(&raw).map_err(|_| "签到记录损坏，请联系管理员")?;
+    let obj = doc.as_object().ok_or("签到记录格式错误，请联系管理员")?;
+    match obj.get(user_id) {
+        None => Ok(None),
+        Some(v) => v.as_f64().filter(|a| a.is_finite() && *a >= 0.0).map(Some).ok_or_else(|| "签到金额记录无效，请联系管理员".into()),
+    }
+}
+
+/// 新签到标记和奖励保存在同一用户行；旧每日文件保持只读兼容。
+pub fn sign_record(db: &Value, uid: &str, day: &str) -> Result<Option<f64>, String> {
+    let user = db.get("users").and_then(Value::as_array).and_then(|a| a.iter().find(|u| u["id"] == uid)).ok_or("用户不存在")?;
+    let last_day = util::str_or(user.get("last_sign_day"), "");
+    if last_day.as_str() >= day {
+        return Ok(Some(util::f64_or(user.get("last_sign_amount"), 0.0)));
+    }
+    legacy_sign_get(day,uid)
+}
+
+/// 签到设置（config）：sign_enabled 默认关；sign_min/sign_max 默认 0.001/0.01。
+pub fn sign_config(cfg: &Value) -> (bool, f64, f64) {
+    let enabled = cfg.get("sign_enabled").map(util::as_bool2).unwrap_or(false);
+    let min = util::f64_or(cfg.get("sign_min"), 0.001).clamp(0.000001, 1000.0);
+    let max = util::f64_or(cfg.get("sign_max"), 0.01).clamp(min, 1000.0);
+    (enabled, min, max)
+}
+
+/// 用户签到：一天一次（按网关本地日），金额 = min..max 随机（6 位小数量化）入赠金账本。
+/// 返回 (ok, 消息, 金额)。
+pub fn sign_today(uid: &str) -> (bool, String, f64) {
+    let result = store().reward_transaction(|db| {
+        let (enabled,min,max) = sign_config(db.get("config").unwrap_or(&Value::Null));
+        if !enabled { return Err("签到未开启".into()); }
+        let day = crate::util::local_day(crate::util::now_i());
+        let index = db.get("users").and_then(Value::as_array).and_then(|a| a.iter().position(|u|
+            u["id"] == uid && u.get("enabled").map(util::truthy).unwrap_or(false))).ok_or("用户不存在或已停用")?;
+        if sign_record(db,uid,&day)?.is_some() { return Err("今天已经签到过了".into()); }
+        // 以整数微元抽样，使配置两端都可取得，不受浮点量化边界影响。
+        let lo = (min * 1_000_000.0).round() as i64;
+        let hi = (max * 1_000_000.0).round() as i64;
+        let amount = rand::Rng::gen_range(&mut rand::thread_rng(), lo..=hi) as f64 / 1_000_000.0;
+        let user = &mut db["users"][index];
+        credit(user,"grant",amount);
+        user["last_sign_day"] = json!(day);
+        user["last_sign_amount"] = json!(amount);
+        fund_log(db,uid,"sign",amount,0.0,"每日签到");
+        Ok(amount)
+    });
+    match result { Ok(amount) => (true,"签到成功".into(),amount), Err(e) => (false,e,0.0) }
+}
+
+// ---------------------------------------------------------------- 邮箱注册与找回
+
+/// 返回 (用户行, 错误)。
+/// 生成并落库邮箱验证码（10 分钟有效；同邮箱 60 秒内只发一次）。返回 6 位数字码。
+pub fn email_code_create(email: &str) -> Result<String, String> {
+    let email = email.trim().to_lowercase();
+    let now = util::now_i();
+    let code = format!("{:06}", rand::Rng::gen_range::<i64, _>(&mut rand::thread_rng(), 0..1000000));
+    store().update(|db| {
+        let obj = db.as_object_mut().unwrap();
+        let m = obj.entry("email_codes").or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(o) = m.as_object_mut() {
+            // 60 秒重发间隔
+            if let Some(prev) = o.get(&email).and_then(|v| v.as_object()) {
+                let issued = util::int_or(prev.get("issued"), 0);
+                if now - issued < 60 {
+                    return;
+                }
+            }
+            o.insert(email.clone(), json!({"code": code, "exp": now + 600, "issued": now}));
+            // 顺带清掉过期/作废的码：只在验证成功时删除的话，
+            // 发了但没完成注册的邮箱会在 mail.json 里永久堆积
+            o.retain(|_, v| util::int_or(v.get("exp"), 0) > now);
+        }
+    });
+    // 回读（60s 间隔时返回已存在的码，保证与实际落库一致）
+    let got = store()
+        .load()
+        .pointer("/email_codes")
+        .and_then(|m| m.get(&email))
+        .map(|v| util::str_or(v.get("code"), ""))
+        .unwrap_or_default();
+    if got.is_empty() {
+        return Err("发送过于频繁，请 1 分钟后再试".into());
+    }
+    Ok(got)
+}
+
+fn registration_code_matches(db: &Value, email: &str, code: &str, now: i64) -> bool {
+    db.get("email_codes").and_then(|v| v.get(email)).is_some_and(|rec| {
+        util::int_or(rec.get("exp"), 0) > now
+            && util::int_or(rec.get("attempts"), 0) < 5
+            && code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
+            && crate::webhttp::constant_time_token(&util::str_or(rec.get("code"), ""), code)
+    })
+}
+
+pub fn email_register(email: &str, password: &str, code: &str) -> (Option<Value>, String) {
+    let email = email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return (None, "请输入正确的邮箱地址".into());
+    }
+    if password.chars().count() < 6 {
+        return (None, "密码至少 6 位".into());
+    }
+    // 邮箱正则限制（后台可配；未配置则基础格式校验）
+    let cfg = store().load();
+    let cfgc = cfg.get("config").cloned().unwrap_or(json!({}));
+    let re_pat = util::str_or(cfgc.get("reg_email_regex"), "");
+    if !re_pat.is_empty() {
+        match regex::Regex::new(&re_pat) {
+            Ok(re) => {
+                if !re.is_match(&email) {
+                    return (None, "该邮箱不在允许注册的范围内".into());
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    if !cfgc.get("reg_email_enabled").map(util::truthy).unwrap_or(false) {
+        return (None, "邮箱注册未开放".into());
+    }
+    // 用户名占用检查（邮箱即用户名）
+    if store().load().get("users").and_then(|u| u.as_array()).map(|a| {
+        a.iter().any(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email))
+    }).unwrap_or(false) {
+        return (None, "该邮箱已注册，请直接登录或找回密码".into());
+    }
+    let code = code.trim();
+    let now = util::now_i();
+    let mut code_ok = false;
+    store().update(|db| {
+        code_ok = registration_code_matches(db, &email, code, now);
+        if !code_ok {
+            if let Some(rec) = db.get_mut("email_codes").and_then(|v| v.get_mut(&email)).and_then(Value::as_object_mut) {
+                let attempts = util::int_or(rec.get("attempts"), 0).saturating_add(1);
+                rec.insert("attempts".into(), json!(attempts));
+            }
+        }
+    });
+    if !code_ok {
+        return (None, "验证码错误或已过期，请重新获取验证码".into());
+    }
+    let row = json!({
+        "id": format!("u8_{}", util::rand_hex(6)),
+        "username": email,
+        "email": email,
+        "password_hash": crate::store::hash_password(password),
+        "balance": 0.0, "grant": 0.0,
+        "free_rpm": util::int_or(cfgc.get("reg_free_rpm"), 10),
+        "paid_rpm": 0,
+        "enabled": true,
+        "created_at": util::now_i(), "updated_at": util::now_i(),
+    });
+    let mut out = None;
+    store().update(|db| {
+        if !registration_code_matches(db, &email, code, util::now_i()) {
+            return;
+        }
+        users_mut(db, |arr| {
+            if arr.iter().any(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email)) {
+                return;
+            }
+            arr.push(row.clone());
+            out = Some(row.clone());
+        });
+        if out.is_some() {
+            if let Some(codes) = db.get_mut("email_codes").and_then(Value::as_object_mut) {
+                codes.remove(&email);
+            }
+        }
+    });
+    match out {
+        Some(u) => {
+            (Some(u), String::new())
+        }
+        None => (None, "注册未完成，邮箱已注册或验证码已使用".into()),
+    }
+}
+
+/// 生成找回密码令牌（15 分钟有效），返回 (token, uid)。
+pub fn reset_token_create(email: &str) -> Option<(String, String)> {
+    let email = email.trim().to_lowercase();
+    let u = store().load().get("users").and_then(|a| a.as_array()).and_then(|a| {
+        a.iter().find(|u| util::str_or(u.get("username"), "").eq_ignore_ascii_case(&email)).cloned()
+    })?;
+    let uid = util::str_or(u.get("id"), "");
+    let token = util::rand_hex(24);
+    let epoch = user_pw_epoch(&u);
+    let now = util::now_i();
+    store().update(|db| {
+        let obj = db.as_object_mut().unwrap();
+        let arr = obj.entry("pw_resets").or_insert_with(|| Value::Array(vec![]));
+        if let Some(a) = arr.as_array_mut() {
+            a.retain(|r| util::int_or(r.get("exp"), 0) > now);
+            a.insert(0, json!({"token": token, "uid": uid, "exp": now + 900, "pw_epoch":epoch}));
+            a.truncate(200);
+        }
+    });
+    Some((token, uid))
+}
+
+fn reset_user_id(db: &Value, token: &str, now: i64) -> Option<String> {
+    if token.is_empty() { return None; }
+    let record = db.get("pw_resets")?.as_array()?.iter().find(|r| {
+        util::int_or(r.get("exp"), 0) > now
+            && crate::webhttp::constant_time_token(&util::str_or(r.get("token"), ""), token)
+    })?;
+    let uid = util::str_or(record.get("uid"), "");
+    let user = db.get("users")?.as_array()?.iter().find(|u| util::str_or(u.get("id"), "") == uid)?;
+    // Legacy records use epoch zero. A persisted password change invalidates every old link
+    // even if the mail table has not yet been flushed after a crash.
+    (user_pw_epoch(user) == util::int_or(record.get("pw_epoch"), 0)).then_some(uid)
+}
+
+/// 用令牌重置密码（一次性）。成功后旧会话全部失效（纪元 +1）。
+pub fn reset_with_token(token: &str, password: &str) -> Result<(), String> {
+    if password.chars().count() < 6 {
+        return Err("密码至少 6 位".into());
+    }
+    if reset_user_id(&store().load(), token, util::now_i()).is_none() {
+        return Err("重置链接无效或已过期".into());
+    }
+    let hash = crate::store::hash_password(password);
+    let mut done = false;
+    store().update(|db| {
+        let Some(uid) = reset_user_id(db, token, util::now_i()) else { return; };
+        users_mut(db, |arr| {
+            if let Some(u) = find_user_mut(arr, &uid) {
+                let next_epoch = util::int_or(u.get("pw_epoch"), 0).saturating_add(1);
+                if let Some(o) = u.as_object_mut() {
+                    o.insert("password_hash".into(), Value::from(hash));
+                    o.insert("pw_epoch".into(), json!(next_epoch));
+                    o.insert("updated_at".into(), json!(util::now_i()));
+                    done = true;
+                }
+            }
+        });
+        if done {
+            if let Some(resets) = db.get_mut("pw_resets").and_then(Value::as_array_mut) {
+                resets.retain(|r| util::str_or(r.get("uid"), "") != uid);
+            }
+        }
+    });
+    if done { Ok(()) } else { Err("重置链接无效或已过期".into()) }
+}
+
+// ---------------------------------------------------------------- 计费与限速
+
+/// 原始价格规则；数值兼容旧版元/次，token 对象为元/百万 token。
+pub fn pricing_for(upstream_id: &str, model: &str) -> Value {
+    crate::upstreams::all_upstreams().iter().find(|u| util::str_or(u.get("id"), "") == upstream_id)
+        .and_then(|u| u.get("prices").and_then(|p| p.get(model))).cloned().unwrap_or(json!(0))
+}
+
+/// 该模型在任一启用渠道上是否收费（用于请求前置的余额检查）。
+pub fn model_is_paid(model: &str) -> bool {
+    let db = store().load();
+    let cfg = db.get("config").unwrap_or(&Value::Null);
+    let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+    let transparent = crate::upstreams::transparent_upstream(cfg);
+    db.get("upstreams").and_then(Value::as_array).is_some_and(|ups| ups.iter().any(|u| {
+        u.get("enabled").map(util::truthy).unwrap_or(false)
+            && crate::upstreams::channel_serves_model(u, model, global_hide, transparent)
+            && crate::billing::paid(u.get("prices").and_then(|p| p.get(model)).unwrap_or(&Value::Null))
+    }))
+}
+
+/// 路由名只要有一条符合 Key 类型的可达成员，就应出现在该 Key 的模型列表。
+pub fn key_allows_model(kind: &str, model: &str) -> bool {
+    let db = store().load();
+    let cfg = db.get("config").unwrap_or(&Value::Null);
+    let chains = crate::upstreams::parse_model_chains(cfg);
+    let members = chains.iter().find(|c| c.name == model).map(|c|c.members.clone()).unwrap_or_else(||vec![model.into()]);
+    members.iter().filter(|m| !chains.iter().any(|c| &c.name == *m))
+        .filter(|m| crate::upstreams::model_routable(m, cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true)))
+        .any(|m| match kind { "free" => !model_is_paid(m), "paid" => model_is_paid(m), _ => true })
+}
+
+/// 用户级每分钟滑动窗口限速。kind: "free" / "paid"。
+/// 返回 Ok(()) = 放行；Err(还需等待的秒数) = 超限。
+pub fn check_user_rpm(user_id: &str, kind: &str, rpm: i64) -> Result<(), f64> {
+    if rpm <= 0 {
+        return Ok(()); // 0 = 不限
+    }
+    let now = util::now_f();
+    let mut wait = 0.0f64;
+    let mut denied = false;
+    store().update(|db| {
+        let obj = db.as_object_mut().unwrap();
+        let all = obj
+            .entry("user_rpm")
+            .or_insert_with(|| Value::Object(Obj::new()));
+        if !all.is_object() {
+            *all = Value::Object(Obj::new());
+        }
+        let m = all.as_object_mut().unwrap();
+        let ent = m
+            .entry(user_id.to_string())
+            .or_insert_with(|| json!({}));
+        if !ent.is_object() {
+            *ent = json!({});
+        }
+        let e = ent.as_object_mut().unwrap();
+        let k = format!("{}_window", kind);
+        let win = e
+            .entry(k.clone())
+            .or_insert_with(|| Value::Array(vec![]))
+            .clone();
+        let mut ts: Vec<f64> = win
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+            .unwrap_or_default();
+        ts.retain(|t| now - t < 60.0);
+        if ts.len() as i64 >= rpm {
+            denied = true;
+            // 最早一条滑出窗口所需的时间
+            wait = (60.0 - (now - ts[0])).max(0.5);
+        } else {
+            ts.push(now);
+            e.insert(k, json!(ts));
+        }
+    });
+    if denied {
+        Err(wait)
+    } else {
+        Ok(())
+    }
+}
+
+/// 成功调用计费 + 用户调用日志。channel 上未设置价格的模型 = 免费（cost=0 也记日志）。
+/// 日志按付费/免费分表：付费保留 user_log_paid_max（默认 250）条，免费保留
+/// user_log_free_max（默认 50）条，均为「每个用户」各自的保留条数。
+pub fn bill(
+    user_id: &str,
+    key_id: &str,
+    client: &str,
+    channel_id: &str,
+    model: &str,
+    upstream_model: &str,
+    st: i64,
+    ms: i64,
+    in_tok: i64,
+    out_tok: i64,
+    cached_tok: i64,
+    stream: bool,
+    pricing_override: Option<&Value>,
+) -> f64 {
+    let pricing = pricing_override.cloned().unwrap_or_else(|| pricing_for(channel_id, model));
+    let cached_tok = cached_tok.clamp(0, in_tok.max(0));
+    let cost = crate::billing::cost(&pricing, in_tok, out_tok, cached_tok);
+    let now = util::now_i();
+    let row = json!({
+        "t": now,
+        "user_id": user_id,
+        "key_id": key_id,
+        "client": util::str_cut(client,80),
+        "model": util::str_cut(model, 80),
+        "up_model": util::str_cut(upstream_model, 80),
+        "channel": channel_id,
+        "st": st,
+        "ms": ms,
+        "cost": cost,
+        "billing": crate::billing::snapshot(&pricing, in_tok),
+        "in_tok": in_tok,
+        "out_tok": out_tok,
+        "cached_tok": cached_tok,
+        "stream": stream,
+    });
+    let (arr_key, cap, legacy_caps) = {
+        let cfg = store().load();
+        let empty = json!({});
+        let c = cfg.get("config").unwrap_or(&empty);
+        let paid_cap = util::cfg_int(c, "user_log_paid_max", 250).clamp(0, 5000) as usize;
+        let free_cap = util::cfg_int(c, "user_log_free_max", 50).clamp(0, 5000) as usize;
+        if cost > 0.0 {
+            ("user_logs_paid", paid_cap, (paid_cap, free_cap))
+        } else {
+            ("user_logs_free", free_cap, (paid_cap, free_cap))
+        }
+    };
+    store().update(|db| {
+        // 旧版混存表（单数组、全局上限）拆分为付费/免费两张表（caps 已在锁外读取）
+        split_legacy_user_logs(db, legacy_caps);
+        let day=chrono::Utc::now().date_naive().to_string();
+        if !db["device_usage"].is_object() {db["device_usage"]=json!({});}
+        if !db["device_usage"][user_id].is_object() {db["device_usage"][user_id]=json!({});}
+        let days=db["device_usage"][user_id].as_object_mut().unwrap();
+        let cutoff=(chrono::Utc::now().date_naive()-chrono::Duration::days(90)).to_string();
+        days.retain(|d,_|d>=&cutoff);
+        let r=days.entry(day).or_insert_with(||json!({"requests":0,"input_tokens":0,"output_tokens":0,"cost":0.0}));
+        r["requests"]=json!(r["requests"].as_i64().unwrap_or(0)+1);
+        r["input_tokens"]=json!(r["input_tokens"].as_i64().unwrap_or(0)+in_tok.max(0));
+        r["output_tokens"]=json!(r["output_tokens"].as_i64().unwrap_or(0)+out_tok.max(0));
+        r["cost"]=json!(util::round6(r["cost"].as_f64().unwrap_or(0.0)+cost));
+        // 调用看板：按本地日聚合计费口径（金额/Token/付费与免费/渠道）
+        {
+            let day = util::local_day(now);
+            if !db["stats"].is_object() { db["stats"] = json!({}); }
+            let stats = db["stats"].as_object_mut().unwrap();
+            let d = stats.entry(day).or_insert_with(|| json!({"total":0,"success":0,"fail":0,"models":{}}));
+            if !d.is_object() { *d = json!({"total":0,"success":0,"fail":0,"models":{}}); }
+            let o = d.as_object_mut().unwrap();
+            o.insert("billed".into(), Value::from(util::int_or(o.get("billed"), 0) + 1));
+            o.insert("cost".into(), json!(util::round6(util::f64_or(o.get("cost"), 0.0) + cost)));
+            for (k, v) in [("in_tok", in_tok), ("out_tok", out_tok), ("cached_tok", cached_tok)] {
+                o.insert(k.into(), Value::from(util::int_or(o.get(k), 0) + v.max(0)));
+            }
+            let kind = if cost > 0.0 { "paid" } else { "free" };
+            o.insert(kind.into(), Value::from(util::int_or(o.get(kind), 0) + 1));
+            let ch = if channel_id.is_empty() { "-" } else { channel_id };
+            let channels = o.entry("channels").or_insert_with(|| json!({}));
+            if !channels.is_object() { *channels = json!({}); }
+            let cm = channels.as_object_mut().unwrap();
+            cm.insert(ch.into(), Value::from(util::int_or(cm.get(ch), 0) + 1));
+            if !model.is_empty() {
+                let model_cost = o.entry("model_cost").or_insert_with(|| json!({}));
+                if !model_cost.is_object() { *model_cost = json!({}); }
+                let mm = model_cost.as_object_mut().unwrap();
+                mm.insert(model.into(), json!(util::round6(util::f64_or(mm.get(model), 0.0) + cost)));
+            }
+        }
+        // 日志：插入该用户的分表，并只把「该用户」的条数截到保留上限
+        {
+            let obj = db.as_object_mut().unwrap();
+            let logs = obj.entry(arr_key).or_insert_with(|| Value::Array(vec![]));
+            if let Some(a) = logs.as_array_mut() {
+                a.insert(0, row);
+                let mut seen = 0usize;
+                a.retain(|r| {
+                    if util::str_or(r.get("user_id"), "") != user_id {
+                        return true;
+                    }
+                    seen += 1;
+                    seen <= cap
+                });
+            }
+        }
+        // 扣费（仅付费模型）：先扣赠金，不足部分扣充值
+        // 累计计数器直接加在用户行上（free_calls/paid_calls/total_cost）：
+        // 日志表有保留上限会被裁剪，对日志求和不是真累计
+        {
+            let mut paid_split = (0.0f64, 0.0f64);
+            if let Some(arr) = db.get_mut("users").and_then(|u| u.as_array_mut()) {
+                for u in arr.iter_mut() {
+                    if util::str_or(u.get("id"), "") != user_id {
+                        continue;
+                    }
+                    if cost > 0.0 {
+                        paid_split = debit_bill(u, cost);
+                    }
+                    if let Some(o) = u.as_object_mut() {
+                        let kind_key = if cost > 0.0 { "paid_calls" } else { "free_calls" };
+                        let n = util::int_or(o.get(kind_key), 0);
+                        o.insert(kind_key.into(), json!(n + 1));
+                        let tc = util::f64_or(o.get("total_cost"), 0.0);
+                        o.insert("total_cost".into(), json!(util::round6(tc + cost)));
+                    }
+                    break;
+                }
+            }
+            if cost > 0.0 {
+                fund_log(
+                    db,
+                    user_id,
+                    "call",
+                    -util::round6(paid_split.0),
+                    -util::round6(paid_split.1),
+                    model,
+                );
+            }
+        }
+    });
+    cost
+}
+
+/// 旧版混存日志表（user_logs 单数组）按 cost>0 拆到付费/免费两张表；拆完移除旧键。
+/// 截断口径与 bill() 一致读配置上限（写死数值会在管理员调高上限时不可逆丢行）。
+/// caps 由调用方传入：本函数只在 store().update() 闭包内运行，内部再调 store().load()
+/// 会自锁（Mutex 不可重入，实测整实例挂死）。
+fn split_legacy_user_logs(db: &mut Value, caps: (usize, usize)) {
+    let Some(obj) = db.as_object_mut() else { return };
+    let Some(legacy) = obj.remove("user_logs") else { return };
+    let arr = legacy.as_array().cloned().unwrap_or_default();
+    let (paid_cap, free_cap) = caps;
+    let mut paid: Vec<Value> = Vec::new();
+    let mut free: Vec<Value> = Vec::new();
+    for r in arr {
+        if util::f64_or(r.get("cost"), 0.0) > 0.0 {
+            paid.push(r);
+        } else {
+            free.push(r);
+        }
+    }
+    // 先合并再按用户保留最新日志：全表 truncate 会把其他用户的历史丢掉。
+    obj.entry("user_logs_paid")
+        .or_insert_with(|| Value::Array(vec![]))
+        .as_array_mut()
+        .map(|a| {
+            let mut merged = paid;
+            merged.extend(a.iter().cloned());
+            merged.sort_by_key(|r| std::cmp::Reverse(util::int_or(r.get("t"), 0)));
+            retain_user_logs(&mut merged, paid_cap);
+            *a = merged;
+        });
+    obj.entry("user_logs_free")
+        .or_insert_with(|| Value::Array(vec![]))
+        .as_array_mut()
+        .map(|a| {
+            let mut merged = free;
+            merged.extend(a.iter().cloned());
+            merged.sort_by_key(|r| std::cmp::Reverse(util::int_or(r.get("t"), 0)));
+            retain_user_logs(&mut merged, free_cap);
+            *a = merged;
+        });
+}
+
+fn retain_user_logs(rows: &mut Vec<Value>, cap: usize) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    rows.retain(|row| {
+        let count = counts.entry(util::str_or(row.get("user_id"), "")).or_default();
+        *count += 1;
+        *count <= cap
+    });
+}
+
+/// 启动期数据迁移（幂等，写盘一次）：
+/// 1) 老用户行补账本字段：老 balance 全额划入充值账本（当前=累计），赠金从 0 起；
+/// 2) 补累计计数器 free_calls/paid_calls/total_cost，并从现存日志表回填（日志有保留上限，
+///    回填是能拿到的历史下限，之后由 bill() 精确累加），保证「累计消费/累计调用」不因
+///    日志裁剪而回退；3) 归一化 count 字段类型。
+pub fn migrate_user_fields_once() {
+    let needs = {
+        let db = store().load();
+        db.get("users")
+            .and_then(|u| u.as_array())
+            .map(|a| {
+                a.iter().any(|u| {
+                    !u.as_object().map(|o| o.contains_key("grant")).unwrap_or(false)
+                        || !u.as_object().map(|o| o.contains_key("total_cost")).unwrap_or(false)
+                        || !u.as_object().map(|o| o.contains_key("free_calls")).unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    };
+    if !needs {
+        return;
+    }
+    // 回填来源：两张日志表（锁外先取快照，避免闭包内 load 自锁）
+    let db = store().load();
+    let mut paid_rows: Vec<(String, f64, i64)> = Vec::new();
+    for key in ["user_logs_paid", "user_logs_free"] {
+        if let Some(a) = db.get(key).and_then(|l| l.as_array()) {
+            for r in a {
+                paid_rows.push((
+                    util::str_or(r.get("user_id"), ""),
+                    util::f64_or(r.get("cost"), 0.0),
+                    if key == "user_logs_paid" { 1 } else { 0 },
+                ));
+            }
+        }
+    }
+    store().update(|db| {
+        let Some(arr) = db.get_mut("users").and_then(|u| u.as_array_mut()) else { return };
+        for u in arr.iter_mut() {
+            let Some(o) = u.as_object_mut() else { continue };
+            let balance = util::round6(util::f64_or(o.get("balance"), 0.0)).max(0.0);
+            if !o.contains_key("grant") {
+                o.insert("grant".into(), json!(0.0));
+            }
+            if !o.contains_key("grant_total") {
+                let g = util::round6(util::f64_or(o.get("grant"), 0.0));
+                o.insert("grant_total".into(), json!(g));
+            }
+            if !o.contains_key("recharge_total") {
+                o.insert("recharge_total".into(), json!(balance));
+            }
+            let uid = util::str_or(o.get("id"), "");
+            let need_calls = !o.contains_key("free_calls") || !o.contains_key("paid_calls");
+            let need_cost = !o.contains_key("total_cost");
+            if need_calls || need_cost {
+                let back_paid = paid_rows.iter().filter(|(u, _, k)| *u == uid && *k == 1).count() as i64;
+                let back_free = paid_rows.iter().filter(|(u, _, k)| *u == uid && *k == 0).count() as i64;
+                let back_cost: f64 = paid_rows.iter().filter(|(u, _, _)| *u == uid).map(|(_, c, _)| *c).sum();
+                if !o.contains_key("paid_calls") {
+                    o.insert("paid_calls".into(), json!(back_paid));
+                }
+                if !o.contains_key("free_calls") {
+                    o.insert("free_calls".into(), json!(back_free));
+                }
+                if need_cost {
+                    o.insert("total_cost".into(), json!(util::round6(back_cost)));
+                }
+            }
+        }
+    });
+    store().flush();
+}
+
+/// 旧混存表若还在磁盘上，启动时立即拆一次：否则概览统计/日志计数
+/// （只读分表）在用户第一次点开日志页前会一直显示 0。函数本身幂等。
+pub fn migrate_legacy_logs_once() {
+    let has_legacy = store()
+        .load()
+        .get("user_logs")
+        .and_then(|l| l.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if has_legacy {
+        let caps = legacy_log_caps();
+        store().update(|db| split_legacy_user_logs(db, caps));
+    }
+}
+
+/// 两个日志保留上限（锁外读取配置用）：update 闭包内禁止再 load()。
+fn legacy_log_caps() -> (usize, usize) {
+    let cfg = store().load();
+    let empty = json!({});
+    let c = cfg.get("config").unwrap_or(&empty);
+    (
+        util::cfg_int(c, "user_log_paid_max", 250).clamp(0, 5000) as usize,
+        util::cfg_int(c, "user_log_free_max", 50).clamp(0, 5000) as usize,
+    )
+}
+
+/// 用户调用日志（分页）。kind: "paid" / "free" / "all"（合并按时间倒序）。
+/// 返回 (当前页行, 总条数)。每页 per 条，page 越界自动收敛到最后一页。
+pub fn user_logs_page(user_id: &str, kind: &str, page: i64, per: usize) -> (Vec<Value>, i64) {
+    {
+        // 旧版混存表迁移（存在才写一次）
+        let has_legacy = store().load().get("user_logs").and_then(|l| l.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+        if has_legacy {
+            let caps = legacy_log_caps();
+            store().update(|db| split_legacy_user_logs(db, caps));
+        }
+    }
+    let db = store().load();
+    let collect = |key: &str| -> Vec<Value> {
+        db.get(key)
+            .and_then(|l| l.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|r| util::str_or(r.get("user_id"), "") == user_id)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut rows = match kind {
+        "paid" => collect("user_logs_paid"),
+        "free" => collect("user_logs_free"),
+        _ => {
+            let mut all = collect("user_logs_paid");
+            all.extend(collect("user_logs_free"));
+            all.sort_by_key(|r| std::cmp::Reverse(util::int_or(r.get("t"), 0)));
+            all
+        }
+    };
+    let total = rows.len() as i64;
+    let per = per.max(1) as i64;
+    let pages = ((total + per - 1) / per).max(1);
+    let page = page.clamp(1, pages);
+    let start = ((page - 1) * per) as usize;
+    rows = rows.into_iter().skip(start).take(per as usize).collect();
+    (rows, total)
+}
+
+/// 从 up_recent 的一条记录里挑最健康样本：成功率高优先，样本多优先。
+fn consider_recent(best: &mut Option<(f64, Vec<i64>)>, rec: &Value) {
+    let Some(a) = rec.as_array() else { return };
+    let nums: Vec<i64> = a.iter().take(20).map(|v| v.as_i64().unwrap_or(0)).collect();
+    if nums.is_empty() {
+        return;
+    }
+    let ratio = nums.iter().filter(|v| **v != 0).count() as f64 / nums.len() as f64;
+    let better = best
+        .as_ref()
+        .map_or(true, |(r, old)| ratio > *r || (ratio == *r && nums.len() > old.len()));
+    if better {
+        *best = Some((ratio, nums));
+    }
+}
+
+/// 模型广场：对外可用模型 + 价格（取各渠道最低价；无价 = 免费）。
+pub fn model_square() -> Vec<Value> {
+    let db = store().load();
+    let limits = crate::upstreams::parse_model_limits(db.get("config").unwrap_or(&Value::Null));
+    let transparent = crate::upstreams::transparent_upstream(db.get("config").unwrap_or(&Value::Null));
+    let ups = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
+    let global_hide = db.pointer("/config/hide_mapped_names").map(util::truthy).unwrap_or(true);
+    let cfg = db.get("config").unwrap_or(&Value::Null);
+    let auto_routes = crate::routing::auto_routes(cfg);
+    let auto_prices: HashMap<String, Value> = auto_routes
+        .iter()
+        .filter(|r| r.enabled)
+        .map(|r| (r.name.to_lowercase(), r.price.clone()))
+        .collect();
+    let mut best: HashMap<String, f64> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for u in &ups {
+        if !u.get("enabled").map(util::truthy).unwrap_or(false) {
+            continue;
+        }
+        let prices = u.get("prices").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+        let models: Vec<String> = u
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|a| a.iter().map(|m| util::str_or(Some(m), "")).collect())
+            .unwrap_or_default();
+        for m in models {
+            if m.is_empty() || !crate::upstreams::channel_serves_model(u, &m, global_hide, transparent) {
+                continue;
+            }
+            let price = crate::billing::cost(prices.get(&m).unwrap_or(&Value::Null), 1_000_000, 1_000_000, 0);
+            let e = best.entry(m.clone()).or_insert(f64::INFINITY);
+            if price < *e {
+                *e = price;
+            }
+            if !order.contains(&m) {
+                order.push(m);
+            }
+        }
+        // model_map 别名同样进广场（按别名自身计价，与计费口径一致）；
+        // 默认隐藏下只挂「真进了 models 清单」的别名，与可路由口径一致
+        if let Some(mm) = u.get("model_map").and_then(|m| m.as_object()) {
+            for (alias, _target) in mm {
+                if !crate::upstreams::channel_serves_model(u, alias, global_hide, transparent) {
+                    continue;
+                }
+                let price = crate::billing::cost(prices.get(alias).unwrap_or(&Value::Null), 1_000_000, 1_000_000, 0);
+                let e = best.entry(alias.clone()).or_insert(f64::INFINITY);
+                if price < *e {
+                    *e = price;
+                }
+                if !order.contains(alias) {
+                    order.push(alias.clone());
+                }
+            }
+        }
+    }
+    // 模型路由（链名）同样是对外可调的名字：任一成员可路由才进广场，
+    // 价格取成员最低价（有免费成员即为免费）；上下文/速度按路由名自己的标注
+    {
+        let cfg = db.get("config").cloned().unwrap_or(Value::Null);
+        let global_hide = cfg.get("hide_mapped_names").map(util::truthy).unwrap_or(true);
+        for c in crate::upstreams::parse_model_chains(&cfg) {
+            if order.contains(&c.name) {
+                continue;
+            }
+            let routable = transparent
+                || c.members.iter().any(|mem| {
+                    ups.iter().any(|u| {
+                        u.get("enabled").map(util::truthy).unwrap_or(false)
+                            && crate::upstreams::channel_serves_model(u, mem, global_hide, transparent)
+                    })
+                });
+            if !routable {
+                continue;
+            }
+            let mut price = f64::INFINITY;
+            for mem in &c.members {
+                if let Some(v) = best.get(mem) {
+                    if *v < price {
+                        price = *v;
+                    }
+                }
+            }
+            best.insert(c.name.clone(), price);
+            order.push(c.name.clone());
+        }
+    }
+    // Auto 虚拟模型不出现在渠道清单里，但各自按自己的价格进广场。
+    for route in auto_routes.iter().filter(|r| r.enabled) {
+        if order.iter().any(|m| m.eq_ignore_ascii_case(&route.name)) {
+            continue;
+        }
+        best.insert(
+            route.name.clone(),
+            crate::billing::cost(&route.price, 1_000_000, 1_000_000, 0),
+        );
+        order.push(route.name.clone());
+    }
+    // 近期状态：up_recent 存最近 20 次（0=失败，1=成功，2=重试后成功），
+    // 取最健康的一条线路展示最近 10 次。链请求按链名记录，早期数据按
+    // 成员名记录，两种都兼容。
+    let up_recent = db.get("up_recent").and_then(|r| r.as_object()).cloned().unwrap_or_default();
+    let ups_list = db.get("upstreams").and_then(|u| u.as_array()).cloned().unwrap_or_default();
+    let chains = crate::upstreams::parse_model_chains(db.get("config").unwrap_or(&Value::Null));
+    // 最近调用日志里按对外模型名汇总延迟/实测吞吐；日志关闭或裁剪时留空
+    let mut lat: HashMap<String, (i64, i64)> = HashMap::new();
+    let mut measured: HashMap<String, (i64, i64)> = HashMap::new();
+    if let Some(logs) = db.get("logs").and_then(Value::as_array) {
+        for log in logs.iter().take(600) {
+            // 请求日志是定长数组：2=模型 4=状态 5=耗时 13=输出 token；
+            // 兼容早期对象格式（含 rmodel 时优先用对外名称）。
+            let (name, status, ms, out) = if let Some(a) = log.as_array() {
+                (
+                    a.get(2).and_then(Value::as_str).unwrap_or(""),
+                    a.get(4).and_then(Value::as_i64).unwrap_or(0),
+                    a.get(5).and_then(Value::as_i64).unwrap_or(0),
+                    a.get(13).and_then(Value::as_i64).unwrap_or(0),
+                )
+            } else {
+                (
+                    log.get("rmodel")
+                        .or_else(|| log.get("model"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    log.get("st").and_then(Value::as_i64).unwrap_or(0),
+                    log.get("ms").and_then(Value::as_i64).unwrap_or(0),
+                    log.get("out_tok").and_then(Value::as_i64).unwrap_or(0),
+                )
+            };
+            if name.is_empty() || name == "-" {
+                continue;
+            }
+            if !(200..400).contains(&status) || ms <= 0 {
+                continue;
+            }
+            let entry = lat.entry(name.to_string()).or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(ms);
+            entry.1 += 1;
+            if out > 0 {
+                let entry = measured.entry(name.to_string()).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(out);
+                entry.1 = entry.1.saturating_add(ms);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|m| {
+            let price = best.get(&m).copied().unwrap_or(f64::INFINITY);
+            let members = chains
+                .iter()
+                .find(|c| c.name == m)
+                .map(|c| c.members.clone())
+                .unwrap_or_else(|| vec![m.clone()]);
+            let mut best_recent: Option<(f64, Vec<i64>)> = None;
+            for u in &ups_list {
+                let ch_id = util::str_or(u.get("id"), "");
+                if ch_id.is_empty() || !u.get("enabled").map(util::truthy).unwrap_or(false) {
+                    continue;
+                }
+                if let Some(rec) = up_recent.get(&format!("{}{}{}", ch_id, '\u{0}', m)) {
+                    consider_recent(&mut best_recent, rec);
+                }
+                for member in &members {
+                    if member != &m {
+                        if let Some(rec) = up_recent.get(&format!("{}{}{}", ch_id, '\u{0}', member)) {
+                            consider_recent(&mut best_recent, rec);
+                        }
+                    }
+                }
+            }
+            let health_pct = best_recent.as_ref().map(|(r, _)| (r * 100.0).round() as i64);
+            let recent: Vec<i64> = best_recent
+                .map(|(_, v)| v.into_iter().take(20).collect())
+                .unwrap_or_default();
+            let mut pricing = Vec::new();
+            if let Some(price) = auto_prices.get(&m.to_lowercase()) {
+                pricing.push(json!({"model":m,"rule":price}));
+            } else {
+                for u in &ups_list {
+                    if !u.get("enabled").map(util::truthy).unwrap_or(false) { continue; }
+                    for member in &members {
+                        if crate::upstreams::channel_serves_model(u, member, global_hide, transparent) {
+                            pricing.push(json!({"model":member,"rule":u.get("prices").and_then(|p|p.get(member)).cloned().unwrap_or(json!(0))}));
+                        }
+                    }
+                }
+            }
+            json!({
+                "model": m,
+                "pricing": pricing,
+                "free": pricing.iter().any(|p| !crate::billing::paid(&p["rule"])),
+                "paid": pricing.iter().any(|p| crate::billing::paid(&p["rule"])),
+                "price": if price.is_finite() && price > 0.0 { json!(util::round6(price)) } else { json!(0) },
+                "health": health_pct,
+                "recent": recent,
+                "latency_ms": lat.get(&m).filter(|(_, n)| *n > 0).map(|(sum, n)| sum / n).unwrap_or(0),
+                "measured_tps": measured
+                    .get(&m)
+                    .filter(|(_, ms)| *ms > 0)
+                    .map(|(out, ms)| ((*out as f64) * 1000.0 / (*ms as f64)).round() as i64)
+                    .unwrap_or(0),
+                "chain": chains.iter().any(|c| c.name == m),
+                "routes": pricing.len(),
+                "ctx": limits.get(&m.to_lowercase()).map(|x| x.ctx).unwrap_or(0),
+                "out": limits.get(&m.to_lowercase()).map(|x| x.out).unwrap_or(0),
+                "tps": limits.get(&m.to_lowercase()).map(|x| x.tps).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_log_migration_keeps_each_users_latest_rows() {
+        let mut db = json!({
+            "user_logs": [
+                {"user_id":"a","t":4,"cost":1},
+                {"user_id":"a","t":3,"cost":1},
+                {"user_id":"b","t":2,"cost":1},
+                {"user_id":"a","t":4,"cost":0},
+                {"user_id":"b","t":3,"cost":0}
+            ],
+            "user_logs_paid": [{"user_id":"b","t":5,"cost":1}],
+            "user_logs_free": [{"user_id":"a","t":5,"cost":0}]
+        });
+        split_legacy_user_logs(&mut db, (1, 1));
+        assert!(db.get("user_logs").is_none());
+        assert_eq!(db["user_logs_paid"], json!([
+            {"user_id":"b","t":5,"cost":1},
+            {"user_id":"a","t":4,"cost":1}
+        ]));
+        assert_eq!(db["user_logs_free"], json!([
+            {"user_id":"a","t":5,"cost":0},
+            {"user_id":"b","t":3,"cost":0}
+        ]));
+        let before = db.clone();
+        split_legacy_user_logs(&mut db, (1, 1));
+        assert_eq!(db, before);
+    }
+
+    #[test]
+    fn legacy_log_migration_honors_zero_retention_and_extreme_timestamps() {
+        let mut db = json!({"user_logs":[{"user_id":"a","t":i64::MIN,"cost":0}]});
+        split_legacy_user_logs(&mut db, (0, 0));
+        assert_eq!(db["user_logs_free"], json!([]));
+    }
+}
+
+#[cfg(test)]
+mod square_tests {
+    use super::*;
+
+    #[test]
+    fn model_square_lists_routable_chains_with_member_min_price() {
+        let _g = crate::store::test_lock();
+        let db = store().load();
+        let saved_ups = db.get("upstreams").cloned();
+        let saved_chains = db.get("config").and_then(|c| c.get("model_chains")).cloned();
+        let saved_prices = db.get("config").and_then(|c| c.get("model_limits")).cloned();
+        store().update(|d| {
+            d["upstreams"] = serde_json::json!([
+                {"id":"u1","name":"T","base":"https://x.test/v1","enabled":true,
+                 "models":["alpha"],"prices":{"alpha":0.5}}
+            ]);
+            d["config"]["model_chains"] = serde_json::json!("combo = alpha, beta\nbroken = ghost1, ghost2");
+            d["config"]["transparent_upstream"] = serde_json::json!(false);
+        });
+        let rows = model_square();
+        let find = |n: &str| rows.iter().find(|x| x["model"] == n).cloned();
+        let a = find("alpha").expect("alpha listed");
+        assert_eq!(a["price"], 0.5);
+        let combo = find("combo").expect("可路由链进广场");
+        assert_eq!(combo["price"], 0.5, "链价=成员最低价");
+        assert_eq!(combo["free"], false);
+        assert!(find("broken").is_none(), "成员全不可路由的链不进广场");
+        assert!(find("ghost1").is_none());
+        store().update(|d| {
+            d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
+            if let Some(v) = saved_chains { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
+            if let Some(v) = saved_prices { d["config"]["model_limits"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_limits"); }
+        });
+    }
+
+    #[test]
+    fn model_square_reports_recent_heatmap_for_models_and_chains() {
+        let _g = crate::store::test_lock();
+        let db = store().load();
+        let saved_ups = db.get("upstreams").cloned();
+        let saved_chains = db.get("config").and_then(|c| c.get("model_chains")).cloned();
+        let saved_recent = db.get("up_recent").cloned();
+        store().update(|d| {
+            d["upstreams"] = serde_json::json!([
+                {"id":"u1","name":"T","base":"https://x.test/v1","enabled":true,"models":["alpha","beta"]}
+            ]);
+            d["config"]["model_chains"] = serde_json::json!("combo = alpha, beta\ncombo2 = alpha, beta");
+            d["config"]["transparent_upstream"] = serde_json::json!(false);
+            let mut recent = serde_json::Map::new();
+            recent.insert(format!("u1{}alpha", '\u{0}'), serde_json::json!([1,0,2,1]));
+            recent.insert(format!("u1{}combo", '\u{0}'), serde_json::json!([2,1,1]));
+            d["up_recent"] = Value::Object(recent);
+        });
+        let rows = model_square();
+        let find = |n: &str| rows.iter().find(|x| x["model"] == n).cloned();
+        let alpha = find("alpha").expect("alpha listed");
+        assert_eq!(alpha["recent"], serde_json::json!([1,0,2,1]));
+        assert_eq!(alpha["health"], 75);
+        let combo = find("combo").expect("combo listed");
+        assert_eq!(combo["recent"], serde_json::json!([2,1,1]), "链名自己的记录优先");
+        assert_eq!(combo["health"], 100);
+        let combo2 = find("combo2").expect("combo2 listed");
+        assert_eq!(combo2["recent"], serde_json::json!([1,0,2,1]), "无链名记录时回退成员");
+        store().update(|d| {
+            d["upstreams"] = saved_ups.unwrap_or(serde_json::json!([]));
+            if let Some(v) = saved_chains { d["config"]["model_chains"] = v; } else { d["config"].as_object_mut().unwrap().remove("model_chains"); }
+            if let Some(v) = saved_recent { d["up_recent"] = v; } else { d.as_object_mut().unwrap().remove("up_recent"); }
+        });
+    }
+}
+
+#[cfg(test)]
+mod account_regression_tests {
+    use super::*;
+
+    #[test]
+    fn registration_preserves_code_until_success_and_limits_guesses() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["config"]["reg_email_enabled"] = json!(true);
+            db["config"]["reg_email_regex"] = json!("");
+            db["users"] = json!([]);
+            db["email_codes"] = json!({});
+        });
+        let email = "regression+code@example.test";
+        let code = email_code_create(email).unwrap();
+        assert!(email_register(email, "short", &code).0.is_none());
+        assert!(registration_code_matches(&store().load(), email, &code, util::now_i()));
+        let row = email_register(email, "valid-password", &code).0.unwrap();
+        assert_eq!(row["username"], email);
+        assert!(store().load()["email_codes"].get(email).is_none());
+        assert!(email_register(email, "valid-password", &code).0.is_none());
+
+        let other = "guesses@example.test";
+        let code = email_code_create(other).unwrap();
+        for _ in 0..5 { assert!(email_register(other, "valid-password", "not-a-code").0.is_none()); }
+        assert!(email_register(other, "valid-password", &code).0.is_none());
+        store().update(|db| *db = saved);
+    }
+
+    #[test]
+    fn password_reset_is_single_use_and_revokes_all_older_links() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["users"] = json!([{"id":"reset-user","username":"reset@example.test","enabled":true,"pw_epoch":0}]);
+            db["pw_resets"] = json!([]);
+        });
+        let (old, _) = reset_token_create("reset@example.test").unwrap();
+        let (token, _) = reset_token_create("reset@example.test").unwrap();
+        let old_resets = store().load()["pw_resets"].clone();
+        let session = user_session_value("test-secret", "reset-user");
+        let verified_snapshot = get_user_by_id("reset-user").unwrap();
+        let workers: Vec<_> = (0..2).map(|_| {
+            let token = token.clone();
+            std::thread::spawn(move || reset_with_token(&token, "new-password"))
+        }).collect();
+        assert_eq!(workers.into_iter().map(|w| w.join().unwrap()).filter(Result::is_ok).count(), 1);
+        assert!(reset_with_token(&old, "another-password").is_err());
+        assert!(user_session_id("test-secret", &session).is_none());
+        assert!(user_session_id("test-secret", &user_session_from_row("test-secret", &verified_snapshot)).is_none());
+        let db = store().load();
+        assert_eq!(db["users"][0]["pw_epoch"], 1);
+        assert!(crate::store::verify_password("new-password", db["users"][0]["password_hash"].as_str().unwrap()));
+        assert_eq!(db["pw_resets"], json!([]));
+        store().update(|db| db["pw_resets"] = old_resets);
+        assert!(reset_with_token(&old, "another-password").is_err());
+        store().update(|db| *db = saved);
+    }
+
+    #[test]
+    fn key_operations_are_scoped_to_owner_and_sessions_expire() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["users"] = json!([
+                {"id":"owner-a","username":"a@example.test","enabled":true,"pw_epoch":0},
+                {"id":"owner-b","username":"b@example.test","enabled":true,"pw_epoch":0}
+            ]);
+            db["user_tokens"] = json!([]);
+        });
+        let a = add_key_kind("owner-a", "a-key", "all");
+        let b = add_key_kind("owner-b", "b-key", "all");
+        let a_id = a["id"].as_str().unwrap();
+        let b_id = b["id"].as_str().unwrap();
+        assert!(!key_op("owner-a", b_id, "disable"), "不能停用别人的 Key");
+        assert!(key_op("owner-a", a_id, "disable"));
+        assert!(key_op("owner-b", b_id, "disable"));
+
+        use base64::Engine;
+        let secret = "session-test-secret";
+        let old = util::now_i() - 31 * 86400;
+        let payload = format!("owner-a|0|{}", old);
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        let sig = crate::store::hmac_hex(secret.as_bytes(), format!("user:{}", payload).as_bytes());
+        assert!(user_session_id(secret, &format!("{}.{}", b64, sig)).is_none(), "过期用户会话应被拒绝");
+
+        let ua = get_user_by_id("owner-a").unwrap();
+        let s1 = user_session_from_row(secret, &ua);
+        let s2 = user_session_from_row(secret, &ua);
+        let sid1 = user_session_sid(secret, &s1).unwrap();
+        assert!(user_session_id(secret, &s1).is_some());
+        revoke_user_session("owner-a", &sid1);
+        assert!(user_session_id(secret, &s1).is_none(), "退出登录后旧用户会话必须失效");
+        assert!(user_session_id(secret, &s2).is_some(), "只吊销当前会话，其它设备不受影响");
+        store().update(|db| *db = saved);
+    }
+
+    #[test]
+    fn model_square_ignores_hidden_and_unlisted_aliases() {
+        let _guard = crate::store::test_lock();
+        let saved = store().load();
+        store().update(|db| {
+            db["config"]["transparent_upstream"] = json!(true);
+            db["config"]["model_chains"] = json!("");
+            db["upstreams"] = json!([
+                {"id":"public","enabled":true,"models":["public"],"prices":{}},
+                {"id":"private","enabled":true,"hide_mapped":1,"models":["raw","alias"],
+                 "model_map":{"alias":"raw","unlisted":"elsewhere"},"prices":{"public":1,"raw":1}}
+            ]);
+        });
+        let names: Vec<_> = model_square().into_iter().map(|r| r["model"].as_str().unwrap().to_owned()).collect();
+        assert!(names.contains(&"public".to_owned()));
+        assert!(names.contains(&"alias".to_owned()));
+        assert!(!names.contains(&"raw".to_owned()));
+        assert!(!names.contains(&"unlisted".to_owned()));
+        assert!(!model_is_paid("public"));
+        store().update(|db| *db = saved);
+    }
+}

@@ -1,0 +1,52 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test locked dependencies
+        run: cargo test --locked --all-targets
+      - name: Check frontend syntax and reward interactions
+        run: |
+          node --check web/admin.js
+          node --check web/user.js
+          node --check web/webclaw.js
+          node --check web/webclaw-agent.js
+          node --check web/ui.js
+          node tests/frontend-console.cjs
+          node tests/frontend-user-init.cjs
+      - name: Check WebClaw project file format and send path
+        run: |
+          node tests/frontend-webclaw.cjs
+          node tests/frontend-webclaw-send.cjs
+
+  console-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --locked
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Console HTTP and browser regressions
+        run: |
+          python tests/console_e2e.py
+          python tests/billing_e2e.py
+          python tests/device_e2e.py
+          python tests/console_e2e.py --ui

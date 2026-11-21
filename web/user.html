@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>言灵中转 · 用户中心</title>
+<link href="/assets/vendor/bootstrap.min.css" rel="stylesheet">
+<link href="/assets/vendor/bootstrap-icons.min.css" rel="stylesheet">
+<style>
+:root{--acc:#10b981;--bg:#f3f5f9;--line:#e7ecf3;--txt:#1c2536;--mut:#68758a;
+  --r-xs:6px;--r-sm:8px;--r-md:10px;--r:12px;--r-lg:14px;--r-pill:999px}
+*{scrollbar-width:thin}
+body{background:var(--bg);color:var(--txt);font-size:14px;-webkit-font-smoothing:antialiased;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+a{text-decoration:none}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:202px;background:linear-gradient(180deg,#0e1729 0%,#0b1120 100%);color:#8d9bb2;flex-shrink:0;
+  display:flex;flex-direction:column;position:sticky;top:0;height:100vh;border-right:1px solid rgba(255,255,255,.045)}
+.brand{display:flex;align-items:center;gap:11px;padding:15px 15px;border-bottom:1px solid rgba(255,255,255,.06)}
+.brand .mark{width:31px;height:31px;border-radius:var(--r-md);flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-weight:800;font-size:15px;
+  box-shadow:0 3px 10px rgba(16,185,129,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.brand .bt{color:#fff;font-weight:700;font-size:14px;letter-spacing:.2px;line-height:1.2}
+.brand .bt small{display:block;font-weight:500;font-size:10px;color:#5d6b83;letter-spacing:1.2px;text-transform:uppercase;margin-top:2px}
+.sidebar nav{flex:1;overflow-y:auto;padding:10px}
+.sidebar nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;color:#8d9bb2;font-size:13.5px;
+  border-radius:var(--r-sm);margin-bottom:2px;position:relative;transition:background .14s ease,color .14s ease}
+.sidebar nav a i{font-size:15px;width:18px;text-align:center}
+.sidebar nav a:hover{color:#e3eaf5;background:rgba(255,255,255,.05)}
+.sidebar nav a.active{color:#fff;background:linear-gradient(90deg,rgba(16,185,129,.3),rgba(16,185,129,.05))}
+.sidebar nav a.active::before{content:"";position:absolute;left:-10px;top:8px;bottom:8px;width:3px;border-radius:3px;background:#10b981}
+.sidebar .nav-label{font-size:10px;font-weight:600;letter-spacing:1.4px;text-transform:uppercase;color:#57657d;padding:13px 12px 5px}
+.sidebar .foot{padding:8px 10px;border-top:1px solid rgba(255,255,255,.06)}
+.sidebar .foot button{color:#8d9bb2;font-size:13px;border-radius:var(--r-sm);padding:7px 11px;display:inline-flex;align-items:center;gap:6px;
+  transition:all .13s ease;border:0;background:transparent;cursor:pointer;width:100%}
+.sidebar .foot button:hover{color:#f87171;background:rgba(248,113,113,.09)}
+.content{flex:1;padding:22px 26px;min-width:0}
+.pane{display:none}
+.pane.active{display:block;animation:fadein .18s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+.pane-title{font-size:17px;font-weight:700;margin:0 0 15px;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+.pane-title::before{content:"";width:3px;height:15px;border-radius:2px;background:linear-gradient(180deg,#10b981,#059669);flex-shrink:0}
+.card{border:1px solid var(--line);border-radius:var(--r);background:#fff;
+  box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.03)}
+.card:hover{border-color:#dbe2ec}
+.card-header{background:#fff;border-bottom:1px solid var(--line);font-weight:600;font-size:13px;color:#2c3a52;
+  border-radius:var(--r) var(--r) 0 0!important;padding:.6rem .95rem}
+.table{font-size:13px;margin-bottom:0;--bs-table-border-color:#eef2f7}
+.table thead th{color:#8492a6;font-weight:600;font-size:11.5px;letter-spacing:.5px;background:#fafbfd;border-bottom:1px solid var(--line);white-space:nowrap}
+.table td,.table th{padding:.5rem .65rem}
+.table>:not(caption)>*>*:first-child{padding-left:.95rem}
+.table>:not(caption)>*>*:last-child{padding-right:.95rem}
+.table-hover tbody tr:hover{background:#f7f9fc}
+.stat{padding:.95rem 1.05rem;position:relative;overflow:hidden}
+.stat .lbl{font-size:12px;color:var(--mut);letter-spacing:.3px}
+.stat .num{font-size:1.45rem;font-weight:700;line-height:1.3;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:11.5px;color:#98a3b8}
+.stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;border-radius:0 2px 2px 0;background:transparent}
+.stat.green::before{background:#10b981}
+.stat.accent::before{background:var(--acc)}
+.card.stat:hover{box-shadow:0 8px 22px rgba(16,24,40,.09);transform:translateY(-1px);border-color:#d5deea}
+.key-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
+.btn{border-radius:var(--r-sm);font-size:13px;white-space:nowrap;transition:all .15s ease;--bs-btn-font-size:13px}
+.btn-sm{border-radius:var(--r-sm);padding:.3rem .68rem;--bs-btn-padding-y:.3rem}
+.btn-primary{background:linear-gradient(135deg,#10b981,#059669);border-color:transparent;box-shadow:0 1px 3px rgba(16,185,129,.28)}
+.btn-primary:hover{background:linear-gradient(135deg,#059669,#047857);border-color:transparent}
+.btn-outline-secondary{--bs-btn-color:#5b6b84;--bs-btn-border-color:#d3dbe7;--bs-btn-hover-bg:#f2f5fa;
+  --bs-btn-hover-border-color:#c4cfdf;--bs-btn-hover-color:#3a4a63}
+.form-control{border-radius:var(--r-sm);border-color:#dde4ee}
+.form-control-sm{font-size:13px}
+.form-control:hover{border-color:#c9d4e4}
+.form-control:focus{border-color:#10b981;box-shadow:0 0 0 .18rem rgba(16,185,129,.13)}
+.form-label{font-size:12px;color:var(--mut);margin-bottom:3px}
+.badge{font-weight:600;letter-spacing:.2px;border-radius:var(--r-pill);font-size:11px;padding:.34em .72em}
+.badge-free{background:#d1fae5;color:#047857}
+.badge-paid{background:#fef3c7;color:#92400e}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}
+.square-head{margin-bottom:14px}
+.square-layout{display:grid;grid-template-columns:232px minmax(0,1fr);gap:18px;align-items:start}
+.square-side{position:sticky;top:18px;background:#fff;border:1px solid var(--line);border-radius:14px;
+  padding:16px 14px;max-height:calc(100vh - 40px);overflow:auto;box-shadow:0 1px 2px rgba(16,24,40,.03);
+  scrollbar-width:none;-ms-overflow-style:none}
+.square-side::-webkit-scrollbar{display:none}
+.side-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;font-size:15px;font-weight:700}
+.side-title button{border:0;background:none;color:var(--mut);font-size:12px;padding:2px 4px;border-radius:5px}
+.side-title button:hover{color:var(--txt);background:#f2f5fa}
+.side-block{padding:12px 0;border-top:1px solid #eef2f7}
+.side-block:first-of-type{border-top:0;padding-top:0}
+.side-label{font-size:11.5px;font-weight:600;color:#8492a6;letter-spacing:.4px;margin-bottom:8px}
+.chip-row{display:flex;flex-wrap:wrap;gap:6px}
+.filter-chip{border:1px solid #e2e8f0;background:#fff;color:#5b6b84;border-radius:999px;padding:4px 12px;
+  font-size:12px;line-height:18px;transition:all .13s ease}
+.filter-chip:hover{border-color:#c6d4e8;color:var(--txt)}
+.filter-chip.active{background:#0f172a;border-color:#0f172a;color:#fff}
+.side-check{display:flex;align-items:center;gap:7px;font-size:12.5px;color:#5b6b84;cursor:pointer}
+.side-check input{accent-color:#10b981}
+.group-list{display:flex;flex-direction:column;gap:2px}
+.group-btn{display:flex;align-items:center;justify-content:space-between;gap:8px;border:0;background:transparent;
+  color:#5b6b84;border-radius:8px;padding:6px 8px;font-size:12.5px;text-align:left;transition:all .12s ease}
+.group-btn:hover{background:#f4f7fb;color:var(--txt)}
+.group-btn.active{background:#edf2ff;color:#2d55d3;font-weight:600}
+.group-btn .cnt{font-size:11px;color:#98a3b8;font-variant-numeric:tabular-nums}
+.group-btn.active .cnt{color:#5b7bd5}
+.square-main{min-width:0}
+.square-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.square-count{font-size:13px;color:#5b6b84;white-space:nowrap}
+.square-count b{font-size:16px;color:var(--txt);margin-right:2px}
+.square-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.search-box{position:relative}
+.search-box .bi{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:12px;color:#98a3b8}
+.search-box input{width:210px;border:1px solid #dde4ee;border-radius:9px;padding:6px 10px 6px 28px;font-size:12.5px;background:#fff}
+.search-box input:focus{outline:0;border-color:#10b981;box-shadow:0 0 0 .16rem rgba(16,185,129,.12)}
+.seg{display:inline-flex;background:#fff;border:1px solid #dde4ee;border-radius:9px;padding:2px}
+.seg button{border:0;background:transparent;color:#68758a;font-size:12px;padding:4px 9px;border-radius:7px;line-height:18px}
+.seg button.active{background:#0f172a;color:#fff}
+.seg button i{font-size:12px}
+#model-sort{width:auto;min-width:88px;border-radius:9px}
+.model-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.model-card{border:1px solid var(--line);border-radius:14px;background:#fff;padding:16px;
+  transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease;display:flex;flex-direction:column}
+.model-card:hover{border-color:#d5deea;box-shadow:0 12px 30px rgba(16,24,40,.08);transform:translateY(-2px)}
+.tile-head{display:flex;align-items:flex-start;gap:10px}
+.provider-mark{width:34px;height:34px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;
+  color:#fff;font-weight:800;font-size:14px;flex-shrink:0;box-shadow:inset 0 1px 0 rgba(255,255,255,.25)}
+.tile-title{min-width:0;flex:1}
+.tile-title .name{font-size:15px;font-weight:700;line-height:1.35;overflow-wrap:anywhere}
+.tile-title .provider{font-size:12px;color:#98a3b8;margin-top:1px}
+.copy-btn{border:0;background:transparent;color:#98a3b8;padding:3px 5px;border-radius:6px;line-height:1;font-size:13px}
+.copy-btn:hover{background:#f2f5fa;color:#2f5bc7}
+.tile-desc{font-size:12px;color:#98a3b8;margin:10px 0 12px;line-height:1.55}
+.bill-tag{display:inline-flex;align-items:center;font-size:11.5px;font-weight:600;color:#2f6fed;margin-bottom:8px}
+.bill-tag.free{color:#047857}
+.bill-tag.request{color:#b45309}
+.price-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:10px 0 12px;border-bottom:1px dashed #edf0f4}
+.price-cell .k{display:block;font-size:11px;color:#98a3b8;margin-bottom:3px}
+.price-cell .v{font-size:13px;font-weight:700;color:var(--txt);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.price-cell .v small{font-weight:500;color:#98a3b8;font-size:10.5px}
+.price-free{font-size:18px;font-weight:800;color:#059669;padding:8px 0 12px;border-bottom:1px dashed #edf0f4}
+.tile-meta{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:11.5px;color:#68758a;padding:10px 0}
+.tile-meta em{font-style:normal;color:#2f5bc7;font-weight:600}
+.tile-stats{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:10px;border-top:1px solid #f0f3f8;margin-top:auto}
+.stat-cell{min-width:48px}
+.stat-cell .k{display:block;font-size:10.5px;color:#98a3b8}
+.stat-cell .v{font-size:12px;font-weight:700;color:var(--txt);font-variant-numeric:tabular-nums}
+.stat-cell .v.good{color:#059669}.stat-cell .v.warn{color:#b45309}.stat-cell .v.bad{color:#dc2626}
+.tile-heat{display:flex;align-items:center;gap:2px;flex:1;min-width:120px;flex-wrap:nowrap;overflow:hidden}
+.tile-heat .heat-sq{width:6px;height:15px;border-radius:2px;flex-shrink:1}
+.detail-btn{border:0;background:transparent;color:#2f5bc7;font-size:12px;font-weight:600;padding:2px 4px;white-space:nowrap}
+.detail-btn .bi{font-size:10px;transition:transform .15s ease}
+.model-card.open .detail-btn .bi{transform:rotate(90deg)}
+.tile-details{border-top:1px dashed #e8eef7;margin-top:10px;padding-top:10px;font-size:12px;color:#5b6b84}
+.detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px}
+.detail-grid .k{display:block;font-size:10.5px;color:#98a3b8}
+.detail-grid .v{font-size:12px;font-weight:600;color:var(--txt)}
+.detail-rules{display:flex;flex-direction:column;gap:4px;color:#68758a;line-height:1.5}
+.model-actions{display:flex;gap:8px;margin-top:10px}
+.model-actions .btn{padding:0 10px;height:30px;display:inline-flex;align-items:center;justify-content:center;line-height:1;font-size:12px;border-radius:7px}
+.model-grid.list{grid-template-columns:1fr}
+.model-grid.list .model-card{display:grid;grid-template-columns:minmax(220px,1.2fr) minmax(220px,1fr);column-gap:20px}
+.model-grid.list .tile-desc{display:none}
+.model-grid.list .tile-head,.model-grid.list .bill-tag,.model-grid.list .price-grid,.model-grid.list .tile-meta{grid-column:1}
+.model-grid.list .tile-stats,.model-grid.list .tile-details,.model-grid.list .model-actions{grid-column:1 / -1}
+@media(max-width:1180px){.model-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:980px){.square-layout{grid-template-columns:1fr}.square-side{position:static;max-height:none}
+  .square-side .group-list{flex-direction:row;flex-wrap:wrap}.square-side .group-btn{width:auto}}
+@media(max-width:680px){.model-grid,.model-grid.list{grid-template-columns:1fr}.model-grid.list .model-card{display:flex}
+  .search-box input{width:100%}.square-tools{width:100%}.square-tools .search-box{flex:1;min-width:150px}
+  .price-grid{grid-template-columns:repeat(3,1fr)}}
+.model-heat .badge{font-size:10.5px}
+.hint{font-size:12px;color:var(--mut)}
+.tchat{min-height:240px;max-height:52vh;overflow:auto;padding:14px 16px}
+.tmsg{max-width:82%;white-space:pre-wrap;word-break:break-word;padding:.52rem .8rem;
+  border-radius:var(--r-lg);font-size:13px;line-height:1.55;box-shadow:0 1px 2px rgba(15,23,42,.06)}
+.tmsg + .tmsg{margin-top:9px}
+.tmsg.me{background:linear-gradient(135deg,#10b981,#059669);color:#fff;border-bottom-right-radius:4px}
+.tmsg.ai{background:#f4f7fb;color:var(--txt);border:1px solid #e8eef7;border-bottom-left-radius:4px}
+.tmsg.pending{opacity:.6}
+.tmsg .reason{border:1px dashed #cdd8e6;border-radius:var(--r-sm);margin-bottom:.5em;padding:7px 10px;
+  background:rgba(16,185,129,.05);color:#64748b;font-size:12.5px}
+.tmsg .reason-hd{font-size:11px;font-weight:600;color:#98a3b8;margin-bottom:3px}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#c6d0de;border-radius:6px}
+#login-view{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px;
+  background:radial-gradient(900px 520px at 8% -10%,#e8f0ff 0%,transparent 62%),
+             radial-gradient(760px 460px at 105% 110%,#e9fbf4 0%,transparent 58%),
+             linear-gradient(160deg,#f8fafd 0%,#f3f6fb 100%)}
+.login-shell{width:100%;max-width:980px;display:grid;grid-template-columns:minmax(0,1.08fr) 420px;
+  gap:56px;align-items:center}
+.login-intro{max-width:470px}
+.login-brand{display:flex;align-items:center;gap:12px}
+.login-mark{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;flex-shrink:0;
+  background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-weight:800;font-size:20px;
+  box-shadow:0 8px 22px rgba(16,185,129,.28),inset 0 1px 0 rgba(255,255,255,.3)}
+.login-brand b{display:block;font-size:16px;letter-spacing:.2px}
+.login-brand small{display:block;font-size:10px;letter-spacing:1.6px;color:#98a3b8;text-transform:uppercase;margin-top:2px}
+.login-intro h1{font-size:38px;line-height:1.18;letter-spacing:-1.2px;margin:28px 0 14px;font-weight:750;color:var(--txt)}
+.login-intro p{font-size:15px;line-height:1.85;color:var(--mut);margin:0;max-width:430px}
+.login-features{list-style:none;padding:0;margin:26px 0 0;display:grid;gap:11px;font-size:13px;color:#5b6b84}
+.login-features i{color:#10b981;margin-right:9px;font-size:13px}
+.login-card{width:100%;max-width:420px;background:#fff;border:1px solid var(--line);border-radius:18px;
+  padding:34px 32px 30px;box-shadow:0 26px 70px rgba(16,24,40,.09)}
+.login-head{margin-bottom:20px}
+.login-head h2{font-size:21px;font-weight:750;margin:0 0 5px;letter-spacing:-.2px;color:var(--txt)}
+.login-head p{font-size:12.5px;color:var(--mut);margin:0}
+.login-err{display:none;color:#dc2626;font-size:13px;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:#fef2f2}
+.card-header{display:flex;align-items:center;gap:6px}
+.card-header .bi{color:#98a3b8}
+.table-responsive{border-radius:0 0 var(--r) var(--r)}
+.pagination{gap:2px}
+.pagination .page-link{border-radius:8px;border-color:#e2e8f0;color:#5b6b84;font-size:12px;padding:.32rem .55rem}
+.pagination .page-item.disabled .page-link{opacity:.45;background:#fff;color:#8492a6}
+.pagination .page-item.active .page-link{background:#0f172a;border-color:#0f172a;color:#fff;opacity:1}
+.empty-state{padding:40px 20px;text-align:center;color:var(--mut);border:1px dashed #d7dce5;border-radius:12px;background:#fff}
+.pane-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.device-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.device-card{border:1px solid var(--line);border-radius:14px;background:#fff;padding:14px;display:flex;flex-direction:column;gap:8px;
+  box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.device-card.revoked{opacity:.68}
+.device-head{display:flex;align-items:center;gap:10px}
+.device-icon{width:38px;height:38px;border-radius:11px;background:#e8fbf3;color:#059669;display:grid;place-items:center;font-size:16px;flex-shrink:0}
+.device-title{flex:1;min-width:0}
+.device-name{font-size:13.5px;font-weight:700;overflow-wrap:anywhere}
+.device-sub{font-size:11px;color:var(--mut);margin-top:1px}
+.device-badge{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;flex-shrink:0}
+.device-badge.ok{background:#d1fae5;color:#047857}
+.device-badge.off{background:#f1f5f9;color:#64748b}
+.device-meta{display:flex;justify-content:space-between;gap:12px;font-size:11.5px;color:var(--mut)}
+.device-meta b{font-weight:600;color:var(--txt);font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
+.device-actions{display:flex;justify-content:flex-end;margin-top:2px}
+@media(max-width:680px){.device-grid{grid-template-columns:1fr}}
+@media(max-width:880px){
+  #login-view{padding:20px}
+  .login-shell{grid-template-columns:1fr;max-width:420px;gap:0}
+  .login-intro{display:none}
+  .login-card{padding:30px 24px 26px}
+}
+@media(max-width:860px){
+  .layout{flex-direction:column}
+  .sidebar{width:100%;height:auto;position:static}
+  .sidebar nav{display:flex;flex-wrap:wrap;padding:6px}
+  .sidebar nav a{margin-bottom:0}
+  .sidebar nav a.active::before{display:none}
+  .content{padding:14px}
+}
+</style>
+<link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
+<script src="/assets/ui.js?v={{VERSION}}"></script>
+</head>
+<body data-page="user">
+
+<div id="login-view" style="display:none">
+  <div class="login-shell">
+    <section class="login-intro">
+      <div class="login-brand"><span class="login-mark">言</span><div><b>言灵中转</b><small>用户中心</small></div></div>
+      <h1>一个账户<br>管理所有模型</h1>
+      <p>查看余额与用量、管理 API Key、浏览模型广场，或直接打开 WebClaw 浏览器 Agent 完成任务。</p>
+      <ul class="login-features">
+        <li><i class="bi bi-check2-circle"></i>API Key 与设备授权集中管理</li>
+        <li><i class="bi bi-check2-circle"></i>按 token 计费与每日用量</li>
+        <li><i class="bi bi-check2-circle"></i>模型广场价格、上下文与健康度</li>
+      </ul>
+    </section>
+    <div class="login-card">
+      <div class="login-head"><h2>登录账户</h2><p>使用账号或邮箱登录用户中心</p></div>
+      <div class="login-err" id="login-err"></div>
+    <div id="login-tab-main">
+      <div class="mb-3"><label class="form-label small fw-semibold">账号 / 邮箱</label>
+        <input class="form-control" id="login-user" autocomplete="username"></div>
+      <div class="mb-3"><label class="form-label small fw-semibold">密码</label>
+        <input class="form-control" id="login-pass" type="password" autocomplete="current-password"></div>
+      <button class="btn btn-primary" id="login-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35)">登录</button>
+      <div class="d-flex justify-content-between mt-3">
+        <a href="javascript:void(0)" class="small" id="go-register" style="color:#10b981">注册账号</a>
+        <a href="javascript:void(0)" class="small text-muted" id="go-forgot">忘记密码</a>
+      </div>
+    </div>
+    <div id="login-tab-register" style="display:none">
+      <div class="mb-3"><label class="form-label small fw-semibold">邮箱</label>
+        <input class="form-control" id="reg-email" autocomplete="email"></div>
+      <div class="mb-3"><label class="form-label small fw-semibold">验证码</label>
+        <div class="d-flex gap-2">
+          <input class="form-control" id="reg-code" inputmode="numeric" maxlength="6" >
+          <button class="btn btn-outline-secondary text-nowrap" id="reg-send" style="min-width:110px">发送验证码</button>
+        </div>
+      </div>
+      <div class="mb-3"><label class="form-label small fw-semibold">密码</label>
+        <input class="form-control" id="reg-pass" type="password"></div>
+      <button class="btn btn-primary" id="reg-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 4px 14px rgba(16,185,129,.35)">注册并登录</button>
+      <div class="text-center mt-3"><a href="javascript:void(0)" class="small text-muted" id="back-login-1">返回登录</a></div>
+    </div>
+    <div id="login-tab-forgot" style="display:none">
+      <div class="mb-3"><label class="form-label small fw-semibold">注册邮箱</label>
+        <input class="form-control" id="forgot-email" autocomplete="email"></div>
+      <button class="btn btn-primary" id="forgot-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669)">发送重置邮件</button>
+      <div class="text-center mt-3"><a href="javascript:void(0)" class="small text-muted" id="back-login-2">返回登录</a></div>
+    </div>
+    <div id="login-tab-reset" style="display:none">
+      <div class="mb-3"><label class="form-label small fw-semibold">新密码，至少 6 位</label>
+        <input class="form-control" id="reset-pass" type="password"></div>
+      <button class="btn btn-primary" id="reset-go" style="width:100%;border-radius:10px;padding:.62rem;font-size:14px;font-weight:600;border:none;
+        background:linear-gradient(135deg,#10b981,#059669)">重置密码</button>
+    </div>
+  </div>
+  </div>
+</div>
+
+<div id="panel-view" style="display:none">
+<div class="layout">
+<aside class="sidebar">
+  <div class="brand"><span class="mark">言</span><span class="bt">言灵中转<small>用户中心</small></span></div>
+  <nav>
+    <div class="nav-label">账户</div>
+    <a href="javascript:void(0)" data-p="overview" class="active"><i class="bi bi-speedometer2"></i>概览</a>
+    <div class="nav-label">开发</div>
+    <a href="javascript:void(0)" data-p="devices"><i class="bi bi-laptop"></i>已授权设备</a>
+    <a href="javascript:void(0)" data-p="keys"><i class="bi bi-key"></i>API Key</a>
+    <a href="javascript:void(0)" data-p="logs"><i class="bi bi-list-ul"></i>调用日志</a>
+    <a href="javascript:void(0)" data-p="models"><i class="bi bi-grid-3x3-gap"></i>模型广场</a>
+    <a href="/webclaw" target="_blank" rel="noopener"><i class="bi bi-chat-dots"></i>WebClaw Agent</a>
+  </nav>
+  <div class="foot">
+    <button id="btn-logout"><i class="bi bi-box-arrow-left"></i>退出登录</button>
+  </div>
+</aside>
+<div class="content">
+
+<div class="pane active" id="pane-overview">
+  <h2 class="pane-title">概览</h2>
+  <div class="card mb-3">
+    <div class="card-header"><i class="bi bi-plug"></i>接入信息<span class="ms-auto small text-muted fw-normal">兼容 OpenAI / Anthropic 协议</span></div>
+    <div class="card-body d-flex align-items-end gap-2 flex-wrap">
+      <label class="flex-grow-1 small">API 地址<input id="api-base" class="form-control form-control-sm font-monospace mt-1" readonly aria-label="API 地址"></label>
+      <button id="api-base-copy" class="btn btn-sm btn-outline-secondary">复制地址</button>
+      <button id="overview-keys" class="btn btn-sm btn-primary">管理 API Key</button>
+      <button id="overview-models" class="btn btn-sm btn-outline-primary">选择模型</button>
+    </div>
+  </div>
+  <div class="row g-3 mb-3">
+    <div class="col-md-3 col-6">
+      <div class="card stat green"><div class="stat">
+        <div class="lbl">可用余额</div><div class="num" id="ov-balance">-</div><div class="sub">元</div>
+      </div></div>
+    </div>
+    <div class="col-md-3 col-6">
+      <div class="card stat accent"><div class="stat">
+        <div class="lbl">累计调用</div><div class="num" id="ov-calls">-</div><div class="sub" id="ov-calls-sub">次</div>
+      </div></div>
+    </div>
+    <div class="col-md-3 col-6">
+      <div class="card stat"><div class="stat">
+        <div class="lbl">累计消费</div><div class="num" id="ov-cost">-</div><div class="sub">元</div>
+      </div></div>
+    </div>
+    <div class="col-md-3 col-6">
+      <div class="card stat"><div class="stat">
+        <div class="lbl">可用 Key</div><div class="num" id="ov-keys">-</div><div class="sub">个</div>
+      </div></div>
+    </div>
+  </div>
+  <div class="row g-3 mb-3">
+    <div class="col-lg-5">
+      <div class="card h-100"><div class="card-header"><i class="bi bi-wallet2 me-2 text-muted"></i>我的钱包</div>
+        <div class="card-body">
+          <table class="table table-sm align-middle mb-0">
+            <thead><tr><th></th><th class="text-end">当前</th><th class="text-end">累计</th></tr></thead>
+            <tbody>
+              <tr><td class="small" style="color:var(--mut)">赠金</td>
+                <td class="text-end fw-semibold" id="ov-grant">-</td>
+                <td class="text-end small" id="ov-grant-total">-</td></tr>
+              <tr><td class="small" style="color:var(--mut)">充值</td>
+                <td class="text-end fw-semibold" id="ov-recharge">-</td>
+                <td class="text-end small" id="ov-recharge-total">-</td></tr>
+            </tbody>
+          </table>
+          <div class="hint mt-2 mb-0">计费优先使用赠金，赠金用尽后扣充值。</div>
+          <div class="d-flex align-items-center gap-2 mt-2" id="sign-box" style="display:none !important">
+            <button class="btn btn-sm btn-success" id="btn-sign">签到</button>
+            <span class="small text-muted" id="sign-hint"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-7">
+      <div class="card h-100"><div class="card-header"><i class="bi bi-clock-history me-2 text-muted"></i>最近调用</div>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle">
+            <thead><tr><th>时间</th><th>模型</th><th>状态</th><th class="text-end">费用</th></tr></thead>
+            <tbody id="ov-recent"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="pane" id="pane-devices">
+  <div class="pane-head"><h2 class="pane-title">已授权设备</h2><button id="device-refresh" class="btn btn-sm btn-outline-secondary" type="button">刷新</button></div>
+  <div class="hint mb-3">浏览器确认登录后，01Code 设备会出现在这里。撤销后该设备需要重新授权。</div>
+  <div id="device-list" class="device-grid"></div>
+</div>
+<div class="pane" id="pane-keys">
+  <h2 class="pane-title">API Key</h2>
+  <div class="card mb-3">
+    <div class="card-header"><i class="bi bi-key"></i>新建 Key</div>
+    <div class="card-body">
+    <div class="d-flex gap-2 align-items-end flex-wrap">
+      <div style="min-width:200px"><label class="form-label" for="key-name">名称</label>
+        <input class="form-control form-control-sm" id="key-name" placeholder="可选，便于识别"></div>
+      <div style="min-width:140px"><label class="form-label" for="key-kind">可用模型</label>
+        <select class="form-select form-select-sm" id="key-kind">
+          <option value="all" selected>全部模型</option>
+          <option value="free">仅免费模型</option>
+          <option value="paid">仅付费模型</option>
+        </select></div>
+      <button class="btn btn-sm btn-primary" id="key-add">生成新 Key</button>
+    </div>
+  </div></div>
+  <div class="card">
+    <div class="card-header"><i class="bi bi-collection"></i>已创建的 Key<span class="ms-auto small text-muted fw-normal" id="key-count"></span></div>
+    <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>名称</th><th>Key</th><th>类型</th><th>状态</th><th>最近调用</th><th class="text-end">操作</th></tr></thead>
+      <tbody id="key-rows"></tbody>
+    </table>
+  </div></div>
+</div>
+
+<div class="pane" id="pane-logs">
+  <h2 class="pane-title">调用日志</h2>
+  <div class="card">
+    <div class="card-header">
+      <i class="bi bi-list-ul"></i>调用记录
+      <div class="btn-group btn-group-sm ms-3" role="group">
+        <button type="button" class="btn btn-outline-secondary active" id="logs-kind-all">全部</button>
+        <button type="button" class="btn btn-outline-secondary" id="logs-kind-paid">付费</button>
+        <button type="button" class="btn btn-outline-secondary" id="logs-kind-free">免费</button>
+      </div>
+      <span class="small text-muted ms-auto fw-normal" id="logs-meta"></span>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>耗时</th><th>输入</th><th>输出</th><th>费用</th></tr></thead>
+        <tbody id="log-rows"></tbody>
+      </table>
+    </div>
+  </div>
+  <nav class="mt-2 d-flex justify-content-end"><ul class="pagination pagination-sm mb-0" id="logs-pages"></ul></nav>
+</div>
+
+<div class="pane" id="pane-models">
+  <div class="square-head">
+    <div>
+      <h2 class="pane-title">模型广场</h2>
+      <div class="hint">按供应商、计费方式和模型分组筛选。价格取各线路最低价，实际费用按命中线路与长度档位结算，仅成功调用计费。</div>
+    </div>
+  </div>
+  <div class="square-layout">
+    <aside class="square-side">
+      <div class="side-title"><span>筛选</span><button id="model-reset" type="button">重置</button></div>
+      <div class="side-block">
+        <div class="side-label">计费方式</div>
+        <div class="chip-row" id="model-kind">
+          <button type="button" class="filter-chip active" data-kind="all">全部</button>
+          <button type="button" class="filter-chip" data-kind="free">免费</button>
+          <button type="button" class="filter-chip" data-kind="paid">付费</button>
+        </div>
+      </div>
+      <div class="side-block">
+        <label class="side-check"><input type="checkbox" id="model-only-stats"> 只看有调用统计</label>
+      </div>
+      <div class="side-block">
+        <div class="side-label">分组</div>
+        <div class="group-list" id="model-groups"></div>
+      </div>
+      <div class="side-block">
+        <div class="side-label">供应商</div>
+        <div class="group-list" id="model-providers"></div>
+      </div>
+      <div class="side-block">
+        <div class="side-label">近期请求</div>
+        <span class="heat-legend"><i class="heat-sq ok"></i>成功<i class="heat-sq warn"></i>重试成功<i class="heat-sq bad"></i>失败<i class="heat-sq none"></i>无数据</span>
+      </div>
+    </aside>
+    <section class="square-main">
+      <div class="square-toolbar">
+        <div class="square-count"><b id="model-count">0</b> 个模型 <span id="model-total" class="text-muted">/ 0</span></div>
+        <div class="square-tools">
+          <div class="search-box"><i class="bi bi-search"></i>
+            <input id="model-search" type="search" placeholder="搜索模型名称" aria-label="搜索模型"></div>
+          <div class="seg" id="model-unit" role="group" aria-label="价格单位">
+            <button type="button" data-unit="1m" class="active">/1M</button>
+            <button type="button" data-unit="1k">/1K</button>
+          </div>
+          <select id="model-sort" class="form-select form-select-sm" aria-label="排序">
+            <option value="name">名称</option><option value="price">价格</option><option value="health">成功率</option>
+          </select>
+          <div class="seg" id="model-view" role="group" aria-label="视图">
+            <button type="button" data-view="grid" class="active" title="卡片视图"><i class="bi bi-grid-3x3-gap"></i></button>
+            <button type="button" data-view="list" title="列表视图"><i class="bi bi-list-ul"></i></button>
+          </div>
+          <button id="model-refresh" type="button" class="btn btn-sm btn-outline-secondary">刷新</button>
+        </div>
+      </div>
+      <div id="model-cards" class="model-grid"></div>
+    </section>
+  </div>
+</div>
+</div>
+
+</div>
+</div>
+</div>
+
+<script src="/assets/user.js?v={{VERSION}}"></script>
+</body>
+</html>
