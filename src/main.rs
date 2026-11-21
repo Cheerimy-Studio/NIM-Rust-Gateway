@@ -1,0 +1,1388 @@
+#![recursion_limit = "256"]
+//! 入口：路由、静态页、看门狗、定时落盘、自重启。
+
+mod admin;
+mod device;
+mod billing;
+mod convert;
+mod bridge;
+mod user_api;
+mod pool;
+mod mailer;
+mod proxy;
+mod routing;
+mod queue;
+mod store;
+mod streams;
+mod sse;
+mod upstreams;
+mod update;
+mod users;
+mod util;
+mod webhttp;
+
+use crate::store::{csrf_token, store};
+use crate::webhttp::*;
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, Request};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, options, post};
+use axum::Router;
+use serde_json::json;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+fn page(name: &str, csrf: &str) -> String {
+    let raw = match name {
+        "admin.html" => web_assets::ADMIN_HTML,
+        "login.html" => web_assets::LOGIN_HTML,
+        "landing.html" => web_assets::LANDING_HTML,
+        "queue.html" => web_assets::QUEUE_HTML,
+        "webclaw.html" => web_assets::WEBCLAW_HTML,
+        _ => "",
+    };
+    raw.replace("{{CSRF}}", csrf)
+        .replace("{{VERSION}}", VERSION)
+        .replace("CSRF_FROM_COOKIE", csrf)
+}
+
+/// 页面统一安全头：禁止被嵌入、禁止外部脚本/对象、限制表单与 base 地址。
+/// 页面本身有内联脚本与样式，script/style 仍需 'unsafe-inline'；关键是
+/// object-src/base-uri/frame-ancestors 与 connect-src 只允许同源。
+const PAGE_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; \
+connect-src 'self' https://api.github.com https://github.com https://*.githubusercontent.com; \
+object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+fn page_security_headers(resp: &mut Response) {
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(PAGE_CSP),
+    );
+    h.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        axum::http::header::HeaderName::from_static("permissions-policy"),
+        axum::http::HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+}
+
+fn html_resp(name: &str, csrf: &str, no_cache: bool) -> Response {
+    let mut resp = page(name, csrf).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    page_security_headers(&mut resp);
+    if no_cache {
+        resp.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+        );
+    }
+    resp
+}
+
+async fn h_bundled_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    let Some((mime, bytes)) = bundled_asset(&name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = bytes.into_response();
+    response.headers_mut().insert("content-type", axum::http::HeaderValue::from_static(mime));
+    response.headers_mut().insert("cache-control", axum::http::HeaderValue::from_static("no-cache, must-revalidate"));
+    response.headers_mut().insert("x-content-type-options", axum::http::HeaderValue::from_static("nosniff"));
+    response
+}
+
+// ---------------------------------------------------------------- /v1 处理器
+
+async fn h_options(headers: HeaderMap) -> Response {
+    let mut h = cors_headers();
+    // 预检对 Allow-Headers 做精确匹配：直接回显浏览器申请的头集合
+    if let Some(req_h) = headers.get("access-control-request-headers").and_then(|x| x.to_str().ok()) {
+        if !req_h.is_empty() {
+            h.retain(|(k, _)| k != "Access-Control-Allow-Headers");
+            h.push(("Access-Control-Allow-Headers".into(), req_h.to_string()));
+        }
+    }
+    let mut resp = StatusCode::NO_CONTENT.into_response();
+    for (k, v) in h {
+        if let (Ok(name), Ok(val)) = (
+            axum::http::HeaderName::try_from(k.as_str()),
+            axum::http::HeaderValue::from_str(&v),
+        ) {
+            resp.headers_mut().insert(name, val);
+        }
+    }
+    resp
+}
+
+async fn h_v1_models(headers: HeaderMap) -> Response {
+    proxy::v1_models(proxy::Ctx::new(headers, None)).await
+}
+
+async fn h_v1_model_retrieve(path: axum::extract::Path<String>, headers: HeaderMap) -> Response {
+    proxy::v1_model_retrieve(proxy::Ctx::new(headers, None), path.0).await
+}
+
+fn v1_404(method: &str, rest: &str) -> Response {
+    error_resp(404, &format!("Invalid URL ({} /v1/{})", method, rest), "invalid_request_error", None, false)
+}
+
+async fn h_v1_get(req: Request) -> Response {
+    let rest = req.uri().path().trim_start_matches("/v1/").trim_end_matches('/').to_string();
+    v1_404("GET", &rest)
+}
+
+async fn h_v1_post(req: Request) -> Response {
+    let rest = req.uri().path().trim_start_matches("/v1/").trim_end_matches('/').to_string();
+    v1_404("POST", &rest)
+}
+
+async fn h_chat(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    let ctx = proxy::Ctx::new(headers, Some(addr));
+    proxy::proxy_chat(ctx, "chat/completions", "chat", body).await
+}
+
+async fn h_completions(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    let ctx = proxy::Ctx::new(headers, Some(addr));
+    proxy::proxy_chat(ctx, "completions", "cmpl", body).await
+}
+
+async fn h_embeddings(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    let ctx = proxy::Ctx::new(headers, Some(addr));
+    proxy::proxy_chat(ctx, "embeddings", "emb", body).await
+}
+
+async fn h_responses(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    let ctx = proxy::Ctx::new(headers, Some(addr));
+    proxy::proxy_convert(ctx, "responses", false, body).await
+}
+
+async fn h_messages(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    let ctx = proxy::Ctx::new(headers, Some(addr));
+    proxy::proxy_convert(ctx, "messages", true, body).await
+}
+
+// ---------------------------------------------------------------- 页面与公开接口
+
+async fn h_admin(headers: HeaderMap) -> Response {
+    let cfg = store().load();
+    let cfg = cfg.get("config").cloned().unwrap_or(json!({}));
+    let session = admin::cookie_get(&headers, "ngw_session").unwrap_or_default();
+    if session.is_empty() || !crate::store::session_valid(&cfg, &session) {
+        return html_resp("login.html", "", true);
+    }
+    let csrf = csrf_token(&cfg);
+    html_resp("admin.html", &csrf, true)
+}
+
+/// WebClaw 外壳页：mode/who 由服务端注入，前端据此决定取谁的令牌、看哪些模型。
+/// who 会进 localStorage 键名，只保留安全字符，避免把用户输入拼进页面。
+fn webclaw_shell(csrf: &str, mode: &str, who: &str) -> Response {
+    let safe_who: String = who
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect();
+    let body = web_assets::WEBCLAW_HTML
+        .replace("{{CSRF}}", csrf)
+        .replace("{{VERSION}}", VERSION)
+        .replace("{{MODE}}", mode)
+        .replace("{{WHO}}", &safe_who);
+    let mut resp = body.into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    page_security_headers(&mut resp);
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    resp
+}
+
+async fn h_webclaw(headers: HeaderMap) -> Response {
+    let cfg = store().load();
+    let cfg = cfg.get("config").cloned().unwrap_or(json!({}));
+
+    // 后台会话优先：管理员看到全量模型，令牌取后台配置
+    let admin_session = admin::cookie_get(&headers, "ngw_session").unwrap_or_default();
+    if !admin_session.is_empty() && crate::store::session_valid(&cfg, &admin_session) {
+        return webclaw_shell(&csrf_token(&cfg), "admin", "admin");
+    }
+
+    // 用户会话：只用自己的 Key 和自己可见的模型，绝不读后台配置
+    let secret = crate::util::str_or(cfg.get("session_secret"), "");
+    let user_cookie = admin::cookie_get(&headers, "ngw_user").unwrap_or_default();
+    if !user_cookie.is_empty() {
+        if let Some(uid) = users::user_session_id(&secret, &user_cookie) {
+            if users::auth_user(&uid).is_some() {
+                let csrf = users::user_csrf_token(&secret, &uid);
+                return webclaw_shell(&csrf, "user", &uid);
+            }
+        }
+    }
+
+    // 都没登录：交回用户中心登录（那里才是普通用户的入口）
+    axum::response::Redirect::to("/user").into_response()
+}
+
+async fn h_webclaw_js() -> Response {
+    let mut resp = web_assets::WEBCLAW_JS.to_string().into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/javascript"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    // 与 admin.js 同口径：升级后浏览器不能拿旧缓存，否则新增的导入导出点了没反应
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    resp
+}
+
+async fn h_root() -> Response {
+    html_resp("landing.html", "", true)
+}
+
+async fn h_queue_page() -> Response {
+    let mut resp = web_assets::QUEUE_HTML.to_string().into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    page_security_headers(&mut resp);
+    resp
+}
+
+async fn h_presets() -> Response {
+    let presets = store().load().get("channel_presets").cloned().unwrap_or(json!({}));
+    json_resp(json!({"presets": presets}))
+}
+
+async fn h_queue_public() -> Response {
+    json_resp(queue::stats(true))
+}
+
+async fn h_admin_js() -> Response {
+    let mut resp = web_assets::ADMIN_JS.to_string().into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/javascript"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    resp
+}
+
+// ---------------------------------------------------------------- /api 处理器
+
+async fn h_login(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    // 限流按 socket 来源 IP：X-Forwarded-For 可被客户端伪造，用来做限流键等于没有限流
+    admin::login(&headers, addr.ip().to_string(), body).await
+}
+
+async fn h_logout(headers: HeaderMap) -> Response {
+    if let Err(response) = admin::require(&headers, true) { return response; }
+    admin::logout(&headers).await
+}
+
+async fn h_overview(headers: HeaderMap) -> Response {
+    admin::overview(&headers).await
+}
+
+async fn h_keys(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::keys(&headers, raw_query.0).await
+}
+
+async fn h_keydetail(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::keydetail(&headers, raw_query.0).await
+}
+
+async fn h_keys_import(headers: HeaderMap, req: Request) -> Response {
+    let ct = headers
+        .get("content-type")
+        .and_then(|x| x.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if ct.contains("multipart") {
+        let boundary = ct
+            .split(';')
+            .map(|s| s.trim())
+            .find_map(|s| s.strip_prefix("boundary="))
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string();
+        let body = match axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": {"message": "请求体读取失败"}})),
+                )
+                    .into_response();
+            }
+        };
+        let (text, uid, file) = parse_multipart(&body, &boundary);
+        admin::keys_import(&headers, true, Bytes::new(), Some((text, uid, file))).await
+    } else {
+        let body = match axum::body::to_bytes(req.into_body(), MAX_BODY).await {
+            Ok(b) => b,
+            Err(_) => Bytes::new(),
+        };
+        admin::keys_import(&headers, false, body, None).await
+    }
+}
+
+/// 最小 multipart/form-data 解析（字段 text/upstream_id + 文件 file）。
+fn parse_multipart(body: &[u8], boundary: &str) -> (String, String, Vec<u8>) {
+    let delim = format!("--{}", boundary);
+    let mut text = String::new();
+    let mut uid = String::new();
+    let mut file: Vec<u8> = Vec::new();
+    let mut positions: Vec<usize> = Vec::new();
+    let dl = delim.as_bytes();
+    if dl.len() <= body.len() {
+        for i in 0..=(body.len() - dl.len()) {
+            if &body[i..i + dl.len()] == dl {
+                positions.push(i);
+            }
+        }
+    }
+    for (pi, &start) in positions.iter().enumerate() {
+        let seg_start = start + dl.len();
+        let seg_end = positions.get(pi + 1).copied().unwrap_or(body.len());
+        if seg_start >= body.len() {
+            continue;
+        }
+        let seg = &body[seg_start..seg_end.min(body.len())];
+        let Some(hdr_end) = seg.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+        let headers = String::from_utf8_lossy(&seg[..hdr_end]);
+        let mut content = &seg[hdr_end + 4..];
+        if content.ends_with(b"\r\n") {
+            content = &content[..content.len() - 2];
+        }
+        let is_file = headers.to_lowercase().contains("filename=");
+        let name = headers
+            .to_lowercase()
+            .split("name=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("")
+            .to_string();
+        if is_file {
+            file = content.to_vec();
+        } else if name == "text" {
+            text = String::from_utf8_lossy(content).to_string();
+        } else if name == "upstream_id" {
+            uid = String::from_utf8_lossy(content).to_string();
+        }
+    }
+    (text, uid, file)
+}
+
+async fn h_keys_export(headers: HeaderMap) -> Response {
+    admin::keys_export(&headers).await
+}
+
+async fn h_keys_op(headers: HeaderMap, body: Bytes) -> Response {
+    admin::keys_op(&headers, body).await
+}
+
+async fn h_keys_batch(headers: HeaderMap, body: Bytes) -> Response {
+    admin::keys_batch(&headers, body).await
+}
+
+async fn h_keys_clear_all(headers: HeaderMap, body: Bytes) -> Response {
+    admin::keys_clear_all(&headers, body).await
+}
+
+async fn h_queue_list(headers: HeaderMap) -> Response {
+    admin::queue_list(&headers).await
+}
+
+async fn h_queue_clear(headers: HeaderMap) -> Response {
+    admin::queue_clear(&headers).await
+}
+
+async fn h_upstreams_list(headers: HeaderMap) -> Response {
+    admin::upstreams_list(&headers).await
+}
+
+async fn h_upstreams_save(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstreams_save(&headers, body).await
+}
+
+async fn h_upstreams_delete(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstreams_delete(&headers, body).await
+}
+
+async fn h_logs(headers: HeaderMap) -> Response {
+    admin::logs(&headers).await
+}
+
+async fn h_analytics(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::analytics(&headers, raw_query.0).await
+}
+
+async fn h_logs_clear(headers: HeaderMap) -> Response {
+    admin::logs_clear(&headers).await
+}
+
+async fn h_settings_get(headers: HeaderMap) -> Response {
+    admin::settings_get(&headers).await
+}
+
+async fn h_routable_models(headers: HeaderMap) -> Response {
+    admin::routable_models(&headers).await
+}
+
+async fn h_upstream_models(headers: HeaderMap) -> Response {
+    admin::upstream_models(&headers).await
+}
+
+async fn h_upstream_model_op(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstream_model_op(&headers, body).await
+}
+
+async fn h_upstream_probe(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstream_probe(&headers, body).await
+}
+
+async fn h_upstream_model_test(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstream_model_test(&headers, body).await
+}
+
+async fn h_upstream_models_fetch(headers: HeaderMap, body: Bytes) -> Response {
+    admin::upstream_models_fetch(&headers, body).await
+}
+
+async fn h_settings_save(headers: HeaderMap, body: Bytes) -> Response {
+    admin::settings_save(&headers, body).await
+}
+
+async fn h_password(headers: HeaderMap, body: Bytes) -> Response {
+    admin::password_change(&headers, body).await
+}
+
+async fn h_stats_reset(headers: HeaderMap) -> Response {
+    admin::stats_reset(&headers).await
+}
+
+async fn h_poolmap(headers: HeaderMap) -> Response {
+    admin::poolmap(&headers).await
+}
+
+async fn h_tokens_list(headers: HeaderMap) -> Response {
+    admin::tokens_list(&headers).await
+}
+
+async fn h_tokens_add(headers: HeaderMap, body: Bytes) -> Response {
+    admin::tokens_add(&headers, body).await
+}
+
+async fn h_tokens_update(headers: HeaderMap, body: Bytes) -> Response {
+    admin::tokens_update(&headers, body).await
+}
+
+async fn h_tokens_delete(headers: HeaderMap, body: Bytes) -> Response {
+    admin::tokens_delete(&headers, body).await
+}
+
+async fn h_update(headers: HeaderMap) -> Response {
+    admin::remote_update(&headers).await
+}
+
+async fn h_rollback(headers: HeaderMap) -> Response {
+    admin::remote_rollback(&headers).await
+}
+
+async fn h_intercept_get(headers: HeaderMap) -> Response {
+    admin::intercept_get(&headers).await
+}
+
+async fn h_intercept_rules(headers: HeaderMap, body: Bytes) -> Response {
+    admin::intercept_rule_add(&headers, body).await
+}
+
+async fn h_intercept_rules_delete(headers: HeaderMap, body: Bytes) -> Response {
+    admin::intercept_rule_delete(&headers, body).await
+}
+
+async fn h_intercept_test(headers: HeaderMap, body: Bytes) -> Response {
+    admin::intercept_test(&headers, body).await
+}
+
+async fn h_intercept_toggle(headers: HeaderMap, body: Bytes) -> Response {
+    admin::intercept_toggle(&headers, body).await
+}
+
+async fn h_intercept_clear(headers: HeaderMap) -> Response {
+    admin::intercept_clear(&headers).await
+}
+
+async fn h_training_list(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::training_list(&headers, raw_query.0).await
+}
+
+async fn h_training_clear(headers: HeaderMap) -> Response {
+    admin::training_clear(&headers).await
+}
+
+async fn h_training_export(headers: HeaderMap) -> Response {
+    admin::training_export(&headers).await
+}
+
+async fn h_sessions_list(headers: HeaderMap) -> Response {
+    admin::sessions_list(&headers).await
+}
+
+async fn h_sessions_clear(headers: HeaderMap) -> Response {
+    admin::sessions_clear(&headers).await
+}
+
+async fn h_config_export(headers: HeaderMap) -> Response {
+    admin::config_export(&headers).await
+}
+
+async fn h_config_import(headers: HeaderMap, body: Bytes) -> Response {
+    admin::config_import(&headers, body).await
+}
+
+// ---------------------------------------------------------------- 用户面板
+
+async fn h_user_page() -> Response {
+    // 始终返回同一个 SPA 页面：登录/面板由 JS 根据 /api/user/me 的结果切换，
+    // 不在服务端做跳转——彻底消除重定向循环
+    let mut resp = web_assets::USER_HTML.replace("{{VERSION}}", VERSION).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    page_security_headers(&mut resp);
+    resp
+}
+
+async fn h_user_js() -> Response {
+    let mut resp = web_assets::USER_JS.to_string().into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/javascript"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    // 与 h_admin_js 同口径：不带版本参数的裸 JS 引用必须靠 no-cache 保证升级后
+    // 浏览器不拿旧缓存（admin.js 曾因缓存旧文件出过批量操作全失效的事故）
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+    );
+    resp
+}
+
+async fn h_user_login(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::login(&headers, addr.ip().to_string(), body).await
+}
+
+async fn h_user_logout(headers: HeaderMap) -> Response {
+    user_api::logout(&headers).await
+}
+
+async fn h_user_session(headers: HeaderMap) -> Response {
+    user_api::refresh_login(&headers).await
+}
+
+async fn h_user_me(headers: HeaderMap) -> Response {
+    user_api::me(&headers).await
+}
+
+async fn h_user_sign_status(headers: HeaderMap) -> Response {
+    user_api::sign_status(&headers).await
+}
+
+async fn h_user_sign(headers: HeaderMap) -> Response {
+    user_api::sign(&headers).await
+}
+
+async fn h_user_wallet(headers: HeaderMap) -> Response {
+    user_api::wallet(&headers).await
+}
+
+async fn h_user_keys(headers: HeaderMap) -> Response {
+    user_api::keys(&headers).await
+}
+
+async fn h_user_keys_add(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::keys_add(&headers, body).await
+}
+
+async fn h_user_keys_op(headers: HeaderMap, body: Bytes) -> Response {
+    user_api::keys_op(&headers, body).await
+}
+
+async fn h_user_logs(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    user_api::logs(&headers, raw_query.0).await
+}
+
+async fn h_user_register(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::register(addr.ip().to_string(), &headers, body).await
+}
+
+async fn h_user_register_code(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::register_send_code(addr.ip().to_string(), &headers, body).await
+}
+
+async fn h_user_forgot(ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response {
+    user_api::forgot(addr.ip().to_string(), &headers, body).await
+}
+
+async fn h_user_reset_pw(body: Bytes) -> Response {
+    user_api::reset_pw(body).await
+}
+
+async fn h_user_models(headers: HeaderMap) -> Response {
+    user_api::models(&headers).await
+}
+
+async fn h_user_test_key(headers: HeaderMap) -> Response {
+    user_api::test_key(&headers).await
+}
+
+// ---------------------------------------------------------------- 管理端用户管理
+
+async fn h_users_list(headers: HeaderMap) -> Response {
+    admin::users_list(&headers).await
+}
+
+async fn h_users_add(headers: HeaderMap, body: Bytes) -> Response {
+    admin::users_add(&headers, body).await
+}
+
+async fn h_users_op(headers: HeaderMap, body: Bytes) -> Response {
+    admin::users_op(&headers, body).await
+}
+
+async fn h_user_logs_admin(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::user_logs_admin(&headers, raw_query.0).await
+}
+
+async fn h_user_funds_admin(headers: HeaderMap, raw_query: axum::extract::RawQuery) -> Response {
+    admin::user_funds_admin(&headers, raw_query.0).await
+}
+
+async fn h_prices_list(headers: HeaderMap) -> Response {
+    admin::prices_list(&headers).await
+}
+
+async fn h_prices_save(headers: HeaderMap, body: Bytes) -> Response {
+    admin::prices_save(&headers, body).await
+}
+
+async fn h_user_stats(headers: HeaderMap) -> Response {
+    user_api::stats(&headers).await
+}
+
+// ---------------------------------------------------------------- 看门狗 / 自重启
+
+static RESTARTING: AtomicBool = AtomicBool::new(false);
+static POOL_CAP_WARN_AT: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
+
+/// 雪崩判定：所有启用账号都被封禁/冷却/并发占满，且队列里还有等待者。
+pub fn watchdog_dead(
+    db: &serde_json::Value,
+    inflight: &std::collections::HashMap<String, i64>,
+    now: i64,
+    cfg: &serde_json::Value,
+) -> (bool, serde_json::Value) {
+    let enabled: Vec<&serde_json::Value> = db
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|k| k.is_object() && k.get("enabled").map(util::truthy).unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default();
+    if enabled.is_empty() {
+        return (false, json!({}));
+    }
+    let conc = util::cfg_int(cfg, "acct_concurrency", 0);
+    let mut bad = 0i64;
+    for k in &enabled {
+        if util::int_or(k.get("banned_until"), 0) > now || util::int_or(k.get("cooldown_until"), 0) > now {
+            bad += 1;
+        } else if conc > 0 && inflight.get(&util::str_or(k.get("id"), "")).copied().unwrap_or(0) >= conc {
+            bad += 1;
+        }
+    }
+    let qn = db
+        .get("queue")
+        .and_then(|q| q.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|e| e.is_object() && now as f64 - util::f64_or(e.get("t"), 0.0) < 900.0)
+                .count()
+        })
+        .unwrap_or(0);
+    let info = json!({"bad": bad, "total": enabled.len(), "queue": qn});
+    (bad >= enabled.len() as i64 && qn > 0, info)
+}
+
+/// 近 10 条日志里的 PoolTimeout 是否值得「重启」处置（必须是连接泄漏特征才重启）。
+fn pool_timeout_verdict(recent_logs: &serde_json::Value, inflight: i64, cap: i64) -> (bool, String) {
+    let mut n = 0;
+    if let Some(a) = recent_logs.as_array() {
+        for x in a.iter().take(10) {
+            if let Some(row) = x.as_array() {
+                if row.len() > 6 && util::str_or(row.get(6), "").contains("PoolTimeout") {
+                    n += 1;
+                }
+            }
+        }
+    }
+    if n < 5 {
+        return (false, String::new());
+    }
+    if cap > 0 && inflight >= (cap as f64 * 0.8) as i64 {
+        return (false, String::new());
+    }
+    (
+        true,
+        format!(
+            "近 10 条日志中 {} 条 PoolTimeout,而在途仅 {}(池上限 {})→ 疑似连接泄漏",
+            n, inflight, if cap > 0 { cap.to_string() } else { "未知".into() }
+        ),
+    )
+}
+
+fn pool_capacity_warn(pool_timeout: i64, used: i64, cap: i64) {
+    let mut w = POOL_CAP_WARN_AT.lock().unwrap();
+    let now = util::now_f();
+    if now - *w < 300.0 {
+        return;
+    }
+    *w = now;
+    eprintln!(
+        "[pool] 池接近上限 {}/{}:近 10 条日志 PoolTimeout {} 次,建议 pool_max_connections ≥ {}",
+        used, cap, pool_timeout, cap.max(used) + 100
+    );
+}
+
+fn prepare_restart(reason: &str, tag: &str) {
+    store().flush();
+    let row = json!([
+        util::now_i(), tag, "updater", "-", 200, 0,
+        util::str_cut(&format!("{};已重启网关(队列条目已清)", reason), 140), "-", 1, "", 0, 0, 0, 0,
+    ]);
+    let log_on = store()
+        .load()
+        .pointer("/config/log_enabled")
+        .map(util::truthy)
+        .unwrap_or(true);
+    let max_logs = store()
+        .load()
+        .pointer("/config/log_max")
+        .and_then(util::py_int)
+        .unwrap_or(200)
+        .max(0) as usize;
+    store().update(|db| {
+        if let Some(o) = db.as_object_mut() {
+            o.insert("queue".into(), serde_json::Value::Array(vec![]));
+            if log_on {
+                if let Some(o) = db.as_object_mut() {
+                    let logs = o.entry("logs").or_insert_with(|| serde_json::Value::Array(vec![]));
+                    if let Some(a) = logs.as_array_mut() {
+                        a.insert(0, row);
+                        a.truncate(max_logs);
+                    }
+                }
+            }
+        }
+    });
+    store().flush();
+}
+
+/// 自我重启：拉起新进程（它会重试绑定端口直到旧进程退出），本进程退出。
+/// Windows 无 execv，这是语义等价的实现。
+pub fn self_restart(reason: &str) -> bool {
+    if RESTARTING.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let exe = match update::exe_path() {
+        Some(e) => e,
+        None => {
+            RESTARTING.store(false, Ordering::SeqCst);
+            return false;
+        }
+    };
+    prepare_restart(reason, "watch");
+    eprintln!("[restart] {}，重启", reason);
+    // 必须透传原始启动参数（--port 等）：否则 --port 12345 的实例重启后会绑回默认端口
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Unix 用 execv：同 PID 替换进程映像、监听端口随之释放，与 Python 版语义一致；
+    // Windows 没有 execv，退而拉起新进程（子进程带重试绑端口）再退出
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(exe)
+            .args(args)
+            .env("NGW_RESTART_CHILD", "1")
+            .exec();
+        RESTARTING.store(false, Ordering::SeqCst);
+        eprintln!("[restart] execv 失败: {}", err);
+        return false;
+    }
+    #[cfg(not(unix))]
+    {
+        // 刚刚替换过 exe：杀毒/索引器可能短暂锁住新文件导致启动失败，
+        // 重试几次再放弃（旧进程在此期间继续服务，不产生停机）
+        let mut last = String::new();
+        for _attempt in 0..3 {
+            match std::process::Command::new(&exe).args(&args).env("NGW_RESTART_CHILD", "1").spawn() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    last = e.to_string();
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
+                }
+            }
+        }
+        RESTARTING.store(false, Ordering::SeqCst);
+        eprintln!("[restart] 重启失败: {}", last);
+        // 界面上已显示「更新完成」，这里必须留下可见痕迹，否则版本静默停留在旧版
+        let row = json!([
+            util::now_i(), "watch", "updater", "-", 500, 0,
+            util::str_cut(&format!("[网关异常] 自助重启失败: {}，请手动重启", last), 140),
+            "-", 1, "", 0, 0, 0, 0,
+        ]);
+        let max_logs = store()
+            .load()
+            .pointer("/config/log_max")
+            .and_then(util::py_int)
+            .unwrap_or(200)
+            .max(0) as usize;
+        store().update(|db| {
+            if let Some(o) = db.as_object_mut() {
+                let logs = o.entry("logs").or_insert_with(|| serde_json::Value::Array(vec![]));
+                if let Some(a) = logs.as_array_mut() {
+                    a.insert(0, row);
+                    a.truncate(max_logs);
+                }
+            }
+        });
+        store().flush();
+        false
+    }
+}
+
+/// 定时自动检查更新（可选）：`update_enabled` + `update_auto_check_hours > 0` 时生效。
+/// 发现比当前版本新的正式 Release 就记一条日志，并走与手动更新完全相同的
+/// 「备份 → 替换 → 重启」流程（回滚备份照常生成）。
+async fn update_auto_loop() {
+    let mut first = true;
+    loop {
+        let hours = {
+            // 每轮读取实时配置；关闭时保持 60s 空转，等设置生效
+            // (trace 保留：自动升级属低频关键动作，stderr 留痕便于排查)
+            let cfg = proxy::cfg_all();
+            if !cfg.get("update_enabled").map(util::truthy).unwrap_or(false) {
+                0
+            } else {
+                util::cfg_int(&cfg, "update_auto_check_hours", 0)
+            }
+        };
+        if hours <= 0 {
+            first = true;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            continue;
+        }
+        let wait = if first { 60 } else { hours as u64 * 3600 };
+        eprintln!("[update] 自动检查已启用（间隔 {}h）", hours);
+        first = false;
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        let hours_now = {
+            let cfg = proxy::cfg_all();
+            util::cfg_int(&cfg, "update_auto_check_hours", 0)
+        };
+        if !cfg_now_enabled() || hours_now <= 0 {
+            continue;
+        }
+        match update::check_newer_tag().await {
+            Ok(Some(tag)) => {
+                // 防循环重启：这个 tag 已经装过一次，装完二进制报告的版本号仍比它小
+                // （发版时忘了同步 Cargo.toml 的 version），再装一遍只会下载→覆盖→重启
+                // 无限循环，必须停手并把原因留到 stderr
+                if update::applied_tag() == tag {
+                    eprintln!(
+                        "[update] {} 已安装过但版本号仍落后于 tag（Cargo.toml 的 version 没随 tag 提升），跳过自动升级以免反复重启",
+                        tag
+                    );
+                    continue;
+                }
+                eprintln!("[update] 发现 {}，开始升级", tag);
+                let row = json!([
+                    util::now_i(), "watch", "updater", "-", 200, 0,
+                    util::str_cut(&format!("自动检查更新:发现 {},开始自动升级", tag), 140),
+                    "-", 1, "", 0, 0, 0, 0,
+                ]);
+                let log_on = store()
+                    .load()
+                    .pointer("/config/log_enabled")
+                    .map(util::truthy)
+                    .unwrap_or(true);
+                let max_logs = store()
+                    .load()
+                    .pointer("/config/log_max")
+                    .and_then(util::py_int)
+                    .unwrap_or(200)
+                    .max(0) as usize;
+                store().update(|db| {
+                    if log_on {
+                        if let Some(o) = db.as_object_mut() {
+                            let logs = o.entry("logs").or_insert_with(|| serde_json::Value::Array(vec![]));
+                            if let Some(a) = logs.as_array_mut() {
+                                a.insert(0, row);
+                                a.truncate(max_logs);
+                            }
+                        }
+                    }
+                });
+                let (ok, msg) = update::remote_update().await;
+                eprintln!("[update] 升级结果 ok={} {}", ok, msg);
+                if ok {
+                    return; // remote_update 已安排自重启
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("[update] 自动检查失败: {}", e);
+            }
+        }
+    }
+}
+
+fn cfg_now_enabled() -> bool {
+    proxy::cfg_all()
+        .get("update_enabled")
+        .map(util::truthy)
+        .unwrap_or(false)
+}
+
+/// SIGTERM/SIGINT 优雅退出：等价于 Python 版 uvicorn shutdown（落盘后退出）。
+async fn signal_watch() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let Ok(mut term) = signal(SignalKind::terminate()) else { return };
+        let Ok(mut int) = signal(SignalKind::interrupt()) else { return };
+        tokio::select! {
+            _ = term.recv() => { eprintln!("[shutdown] 收到 SIGTERM，落盘退出"); }
+            _ = int.recv() => { eprintln!("[shutdown] 收到 SIGINT，落盘退出"); }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        eprintln!("[shutdown] 收到退出信号，落盘退出");
+    }
+    store().flush();
+    std::process::exit(0);
+}
+
+async fn flush_loop() {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::task::spawn_blocking(|| store().flush()).await.ok();
+    }
+}
+
+async fn watchdog_loop() {
+    let mut dead_streak: i64 = 0;
+    loop {
+        let t0 = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let lag = t0.elapsed().as_secs_f64() - 30.0;
+        let cfg = proxy::cfg_all();
+        if !cfg.get("watchdog_enabled").map(util::truthy).unwrap_or(true) {
+            dead_streak = 0;
+            continue;
+        }
+        let minutes = util::cfg_int(&cfg, "watchdog_minutes", 3).max(1) * 60;
+        let mut hit = false;
+        let mut why = String::new();
+        // 形态1:账号层全池不可用
+        let db = store().load();
+        let (dead, info) = watchdog_dead(&db, &pool::inflight_snapshot(), util::now_i(), &cfg);
+        if dead && util::int_or(info.get("queue"), 0) > 0 {
+            hit = true;
+            why = format!(
+                "全池不可用({}/{})且队列 {} 个等待",
+                util::int_or(info.get("bad"), 0),
+                util::int_or(info.get("total"), 0),
+                util::int_or(info.get("queue"), 0)
+            );
+        }
+        // 形态2:事件循环滞后
+        if lag > 10.0 {
+            hit = true;
+            why = format!("事件循环滞后 {:.1} 秒(锁竞争/同步阻塞)", lag);
+        }
+        // 形态3:连接池持续满（必须是泄漏特征才重启；容量不足只提示）
+        let used = pool::inflight_total();
+        refresh_pool_cap();
+        let cap = POOL_CAP.load(Ordering::SeqCst);
+        let (restart_pool, why_pool) = pool_timeout_verdict(db.get("logs").unwrap_or(&serde_json::Value::Null), used, cap);
+        if restart_pool {
+            hit = true;
+            why = why_pool;
+        } else {
+            let mut n_pt = 0;
+            if let Some(a) = db.get("logs").and_then(|l| l.as_array()) {
+                for x in a.iter().take(10) {
+                    if let Some(row) = x.as_array() {
+                        if row.len() > 6 && util::str_or(row.get(6), "").contains("PoolTimeout") {
+                            n_pt += 1;
+                        }
+                    }
+                }
+            }
+            if n_pt >= 5 {
+                pool_capacity_warn(n_pt, used, cap);
+            }
+        }
+        if hit {
+            dead_streak += 30;
+            if dead_streak >= minutes {
+                self_restart(&format!("看门狗触发: {}，已持续 {} 秒", why, dead_streak));
+                return;
+            }
+        } else {
+            dead_streak = 0;
+        }
+    }
+}
+
+async fn periodic_restart_loop() {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let cfg = proxy::cfg_all();
+        let interval = util::cfg_int(&cfg, "restart_interval_hours", 0);
+        if interval <= 0 {
+            continue;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(interval as u64 * 3600)).await;
+        let cfg = proxy::cfg_all();
+        if util::cfg_int(&cfg, "restart_interval_hours", 0) <= 0 {
+            continue;
+        }
+        self_restart(&format!("定时重启，间隔 {} 小时", interval));
+        return;
+    }
+}
+
+// ---------------------------------------------------------------- 启动
+
+/// 启动最早期应用配置里的显示时区：daily 统计/日上限重置走 chrono::Local，
+/// glibc 在首次 localtime 后会缓存 TZ，所以必须先于一切时间调用设置。
+/// 设置项此前是死的（后台可改但从未生效）。
+fn apply_tz_from_config() {
+    let f = store::data_dir().join("db").join("config.json");
+    let Ok(raw) = std::fs::read_to_string(&f) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    let tz = v
+        .pointer("/config/timezone")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if tz.is_empty() {
+        return;
+    }
+    if std::env::var("TZ").map(|t| t != tz).unwrap_or(true) {
+        std::env::set_var("TZ", &tz);
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    apply_tz_from_config();
+    // 旧混存用户日志表启动即拆分：概览统计/日志计数只读分表，不迁移就一直显示 0
+    crate::users::migrate_legacy_logs_once();
+    // 老用户行补账本字段与累计计数器（累计口径不再依赖会被裁剪的日志）
+    crate::users::migrate_user_fields_once();
+    // 透传渠道兼容迁移：旧库「渠道没列模型=任意名可调」在升级后保持原样，
+    // 管理员在「模型接入」分页关闭开关才启用「默认隐藏、加别名才对外」
+    crate::upstreams::migrate_transparent_once();
+    let mut port: u16 = 8100;
+    let args: Vec<String> = std::env::args().collect();
+    let mut it = args.iter().peekable();
+    while let Some(a) = it.next() {
+        if a == "--port" {
+            if let Some(v) = it.next() {
+                port = v.parse().unwrap_or(8100);
+            }
+        } else if let Some(rest) = a.strip_prefix("--port=") {
+            port = rest.parse().unwrap_or(8100);
+        } else if a == "--reset-password" {
+            if let Some(pw) = it.next() {
+                std::process::exit(cli_reset_password(pw));
+            }
+            eprintln!("用法：nim-gateway --reset-password 新密码");
+            std::process::exit(2);
+        }
+    }
+    if let Ok(p) = std::env::var("NGW_PORT").or_else(|_| std::env::var("PORT")) {
+        if let Ok(v) = p.parse() {
+            port = v;
+        }
+    }
+
+    // 启动即捕获自身路径：运行中被替换/删除后仍能更新与重启
+    if let Ok(p) = std::env::current_exe() {
+        update::set_exe_path(p);
+    }
+    let store_ref = store();
+    upstreams::ensure_default();
+    {
+        let cfg = store_ref.load();
+        if let Some(c) = cfg.get("config") {
+            init_http(c);
+        }
+    }
+    store_ref.flush();
+    queue::clear(); // 重启前的请求已不存在，不能保留幽灵队列。
+
+    tokio::spawn(flush_loop());
+    tokio::spawn(signal_watch());
+    tokio::spawn(update_auto_loop());
+    tokio::spawn(watchdog_loop());
+    tokio::spawn(periodic_restart_loop());
+
+    let app = build_router();
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = match bind_with_retry(addr, 15).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[start] 端口 {} 绑定失败:{}", port, e);
+            std::process::exit(1);
+        }
+    };
+    eprintln!("[start] 监听 0.0.0.0:{}，后台 /admin", port);
+    if let Err(e) = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    {
+        eprintln!("[start] 服务异常退出:{}", e);
+    }
+    store_ref.flush();
+}
+
+async fn bind_with_retry(addr: SocketAddr, max_secs: u64) -> std::io::Result<tokio::net::TcpListener> {
+    // 普通启动也短暂重试：手动快速重启 / 旧进程被杀后，Windows 上 TIME_WAIT
+    // 的同端口套接字会让首次 bind 失败（无 SO_REUSEADDR），等 2 秒即过。
+    // 重启子进程等待更久（max_secs）；所有启动路径统一重试，避免首次 bind
+    // 碰上短暂占用就直接退出
+    let wait = if std::env::var("NGW_RESTART_CHILD").is_ok() { max_secs } else { 5 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    loop {
+        let attempt = || -> std::io::Result<tokio::net::TcpListener> {
+            #[cfg(unix)]
+            {
+                // Unix 上显式设 SO_REUSEADDR：重启后立即重绑，不被旧连接的 TIME_WAIT 卡住
+                use socket2::{Domain, Socket, Type};
+                let sock = Socket::new(Domain::for_address(addr), Type::STREAM, None)?;
+                sock.set_reuse_address(true)?;
+                sock.set_nonblocking(true)?;
+                sock.bind(&addr.into())?;
+                sock.listen(1024)?;
+                return tokio::net::TcpListener::from_std(std::net::TcpListener::from(sock));
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows 的 SO_REUSEADDR 语义不同（允许双绑），保持默认
+                std::net::TcpListener::bind(addr)
+                    .and_then(|l| l.set_nonblocking(true).map(|_| l))
+                    .and_then(tokio::net::TcpListener::from_std)
+            }
+        };
+        match attempt() {
+            Ok(l) => return Ok(l),
+            Err(e) => {
+                if std::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+fn cli_reset_password(pw: &str) -> i32 {
+    let pw = pw.trim();
+    if pw.len() < 6 || pw.is_empty() {
+        eprintln!("新密码至少 6 位且不能全为空白");
+        return 2;
+    }
+    store().update(|db| {
+        if let Some(cfg) = db.get_mut("config").and_then(|c| c.as_object_mut()) {
+            cfg.insert(
+                "admin_password_hash".into(),
+                serde_json::Value::from(store::hash_password(pw)),
+            );
+            // 与后台改密同口径：轮换会话密钥，改密前的一切登录态（可能已泄露）全部失效
+            cfg.insert("session_secret".into(), serde_json::Value::from(util::rand_hex(24)));
+            cfg.remove("admin_revoked_sessions");
+        }
+    });
+    store().flush();
+    let user = store()
+        .load()
+        .pointer("/config/admin_username")
+        .map(|x| util::str_or(Some(x), "admin"))
+        .unwrap_or_else(|| "admin".into());
+    println!("已重置管理员密码（用户名 {}）。请用新密码登录后台。", user);
+    0
+}
+
+fn build_router() -> Router {
+    Router::new()
+        // /v1 数据面
+        .route("/api/device/code", post(device::code))
+        .route("/api/device/token", post(device::token).delete(device::revoke))
+        .route("/api/device/authorize", post(device::decide))
+        .route("/user/device", get(device::page))
+        .route("/v1/me", get(device::me))
+        .route("/v1/devices", get(device::devices))
+        .route("/v1/usage", get(device::usage))
+        .route("/v1/models", get(h_v1_models).options(h_options))
+        .route("/v1/models/", get(h_v1_models).options(h_options))
+        .route("/v1/chat/completions", post(h_chat).options(h_options))
+        .route("/v1/chat/completions/", post(h_chat).options(h_options))
+        .route("/v1/completions", post(h_completions).options(h_options))
+        .route("/v1/completions/", post(h_completions).options(h_options))
+        .route("/v1/embeddings", post(h_embeddings).options(h_options))
+        .route("/v1/embeddings/", post(h_embeddings).options(h_options))
+        .route("/v1/responses", post(h_responses).options(h_options))
+        .route("/v1/responses/", post(h_responses).options(h_options))
+        .route("/v1/messages", post(h_messages).options(h_options))
+        .route("/v1/messages/", post(h_messages).options(h_options))
+        .route("/v1/models/{*rest}", get(h_v1_model_retrieve))
+        .route("/v1/{*rest}", get(h_v1_get).post(h_v1_post))
+        .route("/v1/{*rest}", options(h_options))
+        // 页面与公开接口
+        .route("/", get(h_root))
+        .route("/admin", get(h_admin))
+        .route("/webclaw", get(h_webclaw))
+        .route("/queue", get(h_queue_page))
+        .route("/api/presets", get(h_presets))
+        .route("/api/queue/public", get(h_queue_public))
+        .route("/assets/admin.js", get(h_admin_js))
+        .route("/assets/{*name}", get(h_bundled_asset))
+        .route("/assets/webclaw.js", get(h_webclaw_js))
+        // 管理 API
+        .route("/api/login", post(h_login))
+        .route("/api/logout", post(h_logout))
+        .route("/api/overview", get(h_overview))
+        .route("/api/keys", get(h_keys))
+        .route("/api/keydetail", get(h_keydetail))
+        .route("/api/keys/import", post(h_keys_import))
+        .route("/api/keys/export", get(h_keys_export))
+        .route("/api/keys/op", post(h_keys_op))
+        .route("/api/keys/batch", post(h_keys_batch))
+        .route("/api/keys/clear-all", post(h_keys_clear_all))
+        .route("/api/queue", get(h_queue_list).post(h_queue_clear))
+        .route("/api/upstreams", get(h_upstreams_list).post(h_upstreams_save))
+        .route("/api/upstreams/delete", post(h_upstreams_delete))
+        .route("/api/logs", get(h_logs))
+        .route("/api/logs/clear", post(h_logs_clear))
+        .route("/api/analytics", get(h_analytics))
+        .route("/api/settings", get(h_settings_get).post(h_settings_save))
+        .route("/api/routable-models", get(h_routable_models))
+        .route("/api/upstream-models", get(h_upstream_models))
+        .route("/api/upstream-models/op", post(h_upstream_model_op))
+        .route("/api/upstream-models/fetch", post(h_upstream_models_fetch))
+        .route("/api/upstream-models/test", post(h_upstream_model_test))
+        .route("/api/upstreams/probe", post(h_upstream_probe))
+        .route("/api/password", post(h_password))
+        .route("/api/stats/reset", post(h_stats_reset))
+        .route("/api/poolmap", get(h_poolmap))
+        .route("/api/tokens", get(h_tokens_list).post(h_tokens_add))
+        .route("/api/tokens/update", post(h_tokens_update))
+        .route("/api/tokens/delete", post(h_tokens_delete))
+        .route("/api/update", post(h_update))
+        .route("/api/rollback", post(h_rollback))
+        .route("/api/intercept", get(h_intercept_get))
+        .route("/api/intercept/rules", post(h_intercept_rules))
+        .route("/api/intercept/rules/delete", post(h_intercept_rules_delete))
+        .route("/api/intercept/test", post(h_intercept_test))
+        .route("/api/intercept/toggle", post(h_intercept_toggle))
+        .route("/api/intercept/clear", post(h_intercept_clear))
+        .route("/api/training", get(h_training_list))
+        .route("/api/training/clear", post(h_training_clear))
+        .route("/api/training/export", get(h_training_export))
+        .route("/api/sessions", get(h_sessions_list))
+        .route("/api/sessions/clear", post(h_sessions_clear))
+        .route("/api/config/export", get(h_config_export))
+        .route("/api/config/import", post(h_config_import))
+        // 多用户
+        .route("/user", get(h_user_page))
+        .route("/assets/user.js", get(h_user_js))
+        .route("/api/user/login", post(h_user_login))
+        .route("/api/user/logout", post(h_user_logout))
+        .route("/api/user/session", get(h_user_session))
+        .route("/api/user/me", get(h_user_me))
+    .route("/api/user/sign", get(h_user_sign_status).post(h_user_sign))
+    .route("/api/user/wallet", get(h_user_wallet))
+    .route("/api/user/register", post(h_user_register))
+    .route("/api/user/register/send-code", post(h_user_register_code))
+    .route("/api/user/forgot", post(h_user_forgot))
+    .route("/api/user/reset", post(h_user_reset_pw))
+        .route("/api/user/keys", get(h_user_keys).post(h_user_keys_add))
+        .route("/api/user/keys/op", post(h_user_keys_op))
+        .route("/api/user/logs", get(h_user_logs))
+        .route("/api/user/models", get(h_user_models))
+        .route("/api/user/test-key", post(h_user_test_key))
+        .route("/api/users", get(h_users_list).post(h_users_add))
+        .route("/api/users/op", post(h_users_op))
+        .route("/api/user-logs", get(h_user_logs_admin))
+    .route("/api/user-funds", get(h_user_funds_admin))
+        .route("/api/prices", get(h_prices_list).post(h_prices_save))
+        .route("/api/user/stats", get(h_user_stats))
+        // axum 默认把请求体限制在 2MB：不显式放宽，MAX_BODY=20MB 永远不会生效，
+        // 大 prompt 会在提取器阶段被 413 掉。层上限比 MAX_BODY 高 1MB：边界请求
+        // 进到处理器里返回友好的「请求体过大」，超过层上限才走 axum 的通用 413
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY + 1024 * 1024))
+}

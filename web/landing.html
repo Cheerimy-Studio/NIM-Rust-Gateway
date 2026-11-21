@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>言灵中转</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;color:#dbe5f5;
+  background:radial-gradient(1200px 600px at 20% -10%,#1d3561 0%,transparent 60%),
+             radial-gradient(1000px 500px at 110% 110%,#17306b 0%,transparent 55%),
+             linear-gradient(160deg,#0d1526 0%,#0a1120 100%);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 26px;
+  border-bottom:1px solid rgba(255,255,255,.07);background:rgba(10,17,32,.55);backdrop-filter:blur(10px);
+  position:sticky;top:0;z-index:10}
+.brand{display:flex;align-items:center;gap:11px;color:#fff;text-decoration:none}
+.brand .mark{width:34px;height:34px;border-radius:10px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#10b981,#059669);color:#fff;font-weight:800;font-size:16px;
+  box-shadow:0 4px 14px rgba(16,185,129,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.brand .bt{font-weight:700;font-size:15.5px;letter-spacing:.5px;line-height:1.2}
+.brand .bt small{display:block;font-weight:500;font-size:9.5px;color:#5d6b83;letter-spacing:2.2px;text-transform:uppercase;margin-top:1px}
+.btn-login{display:inline-flex;align-items:center;gap:7px;padding:8px 22px;border-radius:10px;
+  font-size:13.5px;font-weight:600;color:#fff;text-decoration:none;border:none;cursor:pointer;
+  background:linear-gradient(135deg,#10b981,#059669);
+  box-shadow:0 3px 12px rgba(16,185,129,.35),inset 0 1px 0 rgba(255,255,255,.2);transition:all .15s ease}
+.btn-login:hover{background:linear-gradient(135deg,#059669,#047857);transform:translateY(-1px);
+  box-shadow:0 6px 18px rgba(16,185,129,.45)}
+.btn-login svg{width:14px;height:14px}
+main{flex:1;display:flex;align-items:center;justify-content:center;padding:44px 24px}
+.hero{width:100%;max-width:560px}
+.hero-title{font-size:26px;font-weight:800;color:#fff;letter-spacing:.3px;margin:0 0 8px;text-align:center}
+.hero-sub{font-size:13px;color:#8d9bb2;text-align:center;margin-bottom:26px;letter-spacing:.3px}
+.panel{border-radius:16px;padding:24px 30px;
+  background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);backdrop-filter:blur(8px);
+  box-shadow:0 24px 70px rgba(2,8,20,.5)}
+.ep{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.07);font-size:13.5px}
+.ep:last-of-type{border-bottom:0;padding-bottom:2px}
+.ep .n{color:#6f7f9a;width:86px;flex-shrink:0;font-size:12px;letter-spacing:.5px}
+.ep code{color:#dbe5f5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.ep a{color:#6ea2ff;font-size:12.5px;text-decoration:none}
+.ep a:hover{color:#9dc0ff}
+.foot{text-align:center;padding:18px;font-size:11.5px;color:#4b5871;letter-spacing:.4px}
+.foot a{color:#64748b;text-decoration:none}
+.foot a:hover{color:#8d9bb2}
+</style>
+<link rel="stylesheet" href="/assets/ui.css?v={{VERSION}}">
+</head>
+<body data-page="landing">
+  <header class="topbar">
+    <a class="brand" href="/"><span class="mark">言</span><span class="bt">言灵中转<small>Yanling Gateway</small></span></a>
+    <a class="btn-login" href="/user">登录
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5"/></svg>
+    </a>
+  </header>
+  <main>
+    <div class="hero">
+      <h1 class="hero-title">言灵中转</h1>
+      <p class="hero-sub">内部压测研究平台</p>
+      <div class="panel">
+        <div class="ep"><span class="n">chat</span><code>POST /v1/chat/completions</code></div>
+        <div class="ep"><span class="n">responses</span><code>POST /v1/responses</code></div>
+        <div class="ep"><span class="n">messages</span><code>POST /v1/messages</code></div>
+        <div class="ep"><span class="n">models</span><code>GET /v1/models</code></div>
+        <div class="ep"><span class="n">queue</span><code><a href="/queue">队列状态 →</a></code></div>
+      </div>
+    </div>
+  </main>
+  <footer class="foot">© 2026 <a href="https://github.com/Cheerimy-Studio/NIM-Rust-Gateway" target="_blank" rel="noopener">Cheerimy-Studio</a></footer>
+</body>
+</html>

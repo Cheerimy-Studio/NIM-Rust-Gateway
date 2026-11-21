@@ -1,0 +1,127 @@
+"""Run against an isolated gateway; forwarding headers emulate a trusted TLS proxy."""
+import concurrent.futures
+import os
+from pathlib import Path
+import socket
+import subprocess
+import tempfile
+import time
+import httpx
+
+ROOT=Path(__file__).resolve().parents[1]
+def check(ok,msg):
+    assert ok,msg
+    print('PASS',msg,flush=True)
+def main():
+    with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
+    with tempfile.TemporaryDirectory(prefix='ngw-device-') as tmp:
+        # 不配置任何设备登录环境变量：全部走后台设置，验证「功能可用」
+        env={**os.environ,'NGW_DATA_DIR':tmp,'NGW_ADMIN_PASSWORD':'device-test-password'}
+        with open(Path(tmp)/'server.log','w+') as log:
+            p=subprocess.Popen([str(ROOT/'target/debug/nim-gateway'),'--port',str(port)],env=env,stdout=log,stderr=log)
+            try:
+                with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=30) as c:
+                    for _ in range(100):
+                        try:
+                            if c.get('/').status_code==200:break
+                        except httpx.ConnectError:pass
+                        time.sleep(.1)
+                    check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==400,'reject plaintext/untrusted protocol')
+                    c.headers.update({'X-Forwarded-Proto':'https','X-Real-IP':'192.0.2.1'})
+                    a=c.post('/api/login',json={'username':'admin','password':'device-test-password'}).json();c.headers['X-CSRF']=a['csrf']
+                    for cookie in c.cookies.jar:cookie.secure=False
+                    # 仅通过后台设置启用设备登录：公网入口 + 信任全部来源（*）
+                    check(c.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*'}}).status_code==200,'configure device login in admin settings')
+                    # 本地联调：回环地址允许 http 直连，且不需要任何转发头
+                    check(c.post('/api/settings',json={'config':{'public_origin':f'http://127.0.0.1:{port}','trusted_proxies':''}}).status_code==200,'settings allow loopback http origin')
+                    c.headers.pop('X-Forwarded-Proto',None); c.headers.pop('X-Real-IP',None)
+                    _loop=c.post('/api/device/code',json={'client_id':'01code','scope':'llm'})
+                    check(_loop.status_code==200 and _loop.json()['verification_uri'].startswith(f'http://127.0.0.1:{port}/user/device'),'loopback direct device login works')
+                    c.headers.update({'X-Forwarded-Proto':'https','X-Real-IP':'192.0.2.1'})
+                    check(c.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*'}}).status_code==200,'restore device origin')
+                    check(c.post('/api/users',json={'username':'device-user','password':'device-test-password','balance':2,'free_rpm':10,'paid_rpm':10}).status_code==200,'create user')
+                    u=c.post('/api/user/login',json={'username':'device-user','password':'device-test-password'}).json();c.headers['X-CSRF']=u['csrf']
+                    # HTTP fixture emulates TLS at proxy; httpx correctly withholds Secure cookies on HTTP.
+                    for cookie in c.cookies.jar:cookie.secure=False
+                    def issue():
+                        r=c.post('/api/device/code',json={'client_id':'01code','scope':'llm'});check(r.status_code==200,'issue code');return r.json()
+                    def poll(g,client='01code'):
+                        return c.post('/api/device/token',json={'client_id':client,'grant_type':'urn:ietf:params:oauth:grant-type:device_code','device_code':g['device_code']})
+                    g=issue();check(len(g['user_code'])==8 and not set('0O1I')&set(g['user_code']),'readable code')
+                    check(poll(g).json()['error']=='authorization_pending','pending')
+                    check(poll(g).json()['error']=='slow_down','slow polling backoff')
+                    check(poll(g,'other').json()['error']=='invalid_grant','client binding')
+                    c.headers['X-Real-IP']='192.0.2.2';check(poll(g).json()['error'] in ('authorization_pending','slow_down'),'network change does not invalidate grant');c.headers['X-Real-IP']='192.0.2.1'
+                    check(c.get('/user/device',params={'code':g['user_code']}).status_code==200,'authorization page')
+                    csrf=c.headers.pop('X-CSRF');check(c.post('/api/device/authorize',json={'code':g['user_code'],'decision':'allow'}).status_code==403,'authorization CSRF');c.headers['X-CSRF']=csrf
+                    if os.environ.get('NGW_DEVICE_UI'):
+                        from playwright.sync_api import sync_playwright
+                        with sync_playwright() as pw:
+                            browser=pw.chromium.launch(headless=True,executable_path=os.environ.get('NGW_CHROMIUM','/usr/bin/chromium'))
+                            context=browser.new_context(extra_http_headers={'X-Forwarded-Proto':'https','X-Real-IP':'192.0.2.1'})
+                            context.add_cookies([{'name':cookie.name,'value':cookie.value,'domain':'127.0.0.1','path':'/','secure':False,'httpOnly':True,'sameSite':'Lax'} for cookie in c.cookies.jar])
+                            page=context.new_page();page.goto(str(c.base_url).rstrip('/')+f"/user/device?code={g['user_code']}")
+                            check(page.get_by_text(g['user_code'],exact=True).is_visible(),'browser displays device code')
+                            if os.environ.get('NGW_SCREENSHOT_DIR'):
+                                shots=Path(os.environ['NGW_SCREENSHOT_DIR']);shots.mkdir(parents=True,exist_ok=True)
+                                page.wait_for_timeout(350)
+                                page.screenshot(path=str(shots/'device.png'),full_page=True)
+                            page.get_by_role('button',name='允许登录').click();page.wait_for_url(str(c.base_url).rstrip('/')+'/user')
+                            page.locator('[data-p="devices"]').click()
+                            page.get_by_text('01Code-设备',exact=False).first.wait_for()
+                            if os.environ.get('NGW_SCREENSHOT_DIR'):
+                                shots=Path(os.environ['NGW_SCREENSHOT_DIR']);shots.mkdir(parents=True,exist_ok=True)
+                                page.wait_for_timeout(250)
+                                page.screenshot(path=str(shots/'devices.png'),full_page=True)
+                            check(True,'browser authorization creates visible device history')
+                            browser.close()
+                    else:
+                        check(c.post('/api/device/authorize',json={'code':g['user_code'],'decision':'allow'}).status_code==200,'approve')
+                    check(c.post('/api/device/authorize',json={'code':g['user_code'],'decision':'allow'}).status_code==400,'approval single use')
+                    _approved=[k for k in c.get('/api/user/keys').json()['rows'] if k.get('device_client')=='01code']
+                    check(len(_approved)==1 and _approved[0].get('device_ip'),'browser approval creates device history before client polls')
+                    # 换 IP 的探测会触发一次 slow_down（interval 升到 15s），等足窗口
+                    time.sleep(20.1)
+                    # Race redemption: only one request receives a Key.
+                    def redeem(_):
+                        with httpx.Client(base_url=c.base_url,trust_env=False,headers={'X-Forwarded-Proto':'https','X-Real-IP':'192.0.2.1'}) as other:
+                            return other.post('/api/device/token',json={'client_id':'01code','grant_type':'urn:ietf:params:oauth:grant-type:device_code','device_code':g['device_code']})
+                    with concurrent.futures.ThreadPoolExecutor(2) as pool:results=list(pool.map(redeem,range(2)))
+                    check(sum(r.status_code==200 for r in results)==1,'atomic redemption')
+                    token=next(r.json()['access_token'] for r in results if r.status_code==200)
+                    c.headers['Authorization']='Bearer '+token
+                    _keys=c.get('/api/user/keys').json()['rows']
+                    _dev=[k for k in _keys if k.get('device_client')=='01code']
+                    check(len(_dev)==1 and _dev[0].get('device_ip'),'device key visible in user key list')
+                    check(c.get('/v1/me').json()['username']=='device-user','Bearer account')
+                    _devices=c.get('/v1/devices').json()['rows']
+                    check(len(_devices)==1 and _devices[0].get('current') is True,'device list endpoint returns current device')
+                    check(len([k for k in c.get('/api/user/keys').json()['rows'] if k.get('device_client')=='01code'])==1,'redemption reuses approved device key')
+                    check(len(c.get('/v1/usage?days=7').json())==7,'daily usage')
+                    check(c.get('/v1/models').status_code==200,'device models')
+                    check(c.delete('/api/device/token').status_code==204,'revoke')
+                    check(c.get('/v1/me').status_code==401,'revoked identity rejected')
+                    check(c.get('/v1/models').status_code==401,'revoked model calls rejected')
+                    del c.headers['Authorization']
+                    denied=issue();check(c.post('/api/device/authorize',json={'code':denied['user_code'],'decision':'deny'}).status_code==200,'deny');check(poll(denied).json()['error']=='access_denied','denied polling')
+                    # 后台设置：公网入口/可信代理优先于环境变量；开关可整体停用。
+                    # 此时 c 是用户会话，管理设置走独立的 admin 会话。
+                    with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=30) as adm:
+                        ar=adm.post('/api/login',json={'username':'admin','password':'device-test-password'})
+                        adm.headers['X-CSRF']=ar.json()['csrf']
+                        check(adm.post('/api/settings',json={'config':{'public_origin':'https://cfg.example'}}).status_code==200,'settings origin saved')
+                        g2=issue();check(g2['verification_uri'].startswith('https://cfg.example/user/device'),'config origin takes precedence')
+                        check(adm.post('/api/settings',json={'config':{'public_origin':'http://bad'}}).status_code==400,'reject non-https origin in settings')
+                        check(adm.post('/api/settings',json={'config':{'trusted_proxies':'not-an-ip'}}).status_code==400,'reject non-ip trusted proxy')
+                        check(adm.post('/api/settings',json={'config':{'trusted_proxies':'203.0.113.9'}}).status_code==200,'settings trusted saved')
+                        check(adm.post('/api/settings',json={'config':{'trusted_proxies':'*'}}).status_code==200,'settings trusted restore')
+                        check(adm.post('/api/settings',json={'config':{'public_origin':'https://gateway.example','trusted_proxies':'*','device_login_enabled':False}}).status_code==200,'settings disable device login')
+                        check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==404,'device login disabled => 404')
+                        check(adm.post('/api/settings',json={'config':{'device_login_enabled':True}}).status_code==200,'settings re-enable device login')
+                    for _ in range(2):issue()
+                    check(c.post('/api/device/code',json={'client_id':'01code','scope':'llm'}).status_code==200,'no per-IP issuance limit')
+                    check(poll({'device_code':'unknown'}).json()['error']=='expired_token','unknown/expired token')
+                    check(c.get('/api/oauth/providers').status_code == 404,'OAuth removed')
+            finally:
+                p.terminate();p.wait(timeout=10)
+if __name__=='__main__':main()
